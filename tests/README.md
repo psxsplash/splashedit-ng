@@ -78,3 +78,23 @@ sprite and UI art from a psxsplash game (images with transparency measured with 
 deltaE goes down on every row. RGB PSNR drops slightly on three small synthetic rows because the
 palette minimises OKLab distance. Not yet checked: these textures rendered
 by psxsplash on the console or an emulator.
+
+## Boot check
+
+`boot/boot.sh` boots psxsplash (a PCdrv build) on one exported scene in pcsx-redux, headless, and
+saves the screen at a given frame (default 600). The three files are copied to a temporary
+directory as `scene_0.*`, the names the PCdrv loader opens.
+
+    boot/boot.sh <pcsx-redux> <openbios.bin> <psxsplash.ps-exe> <dir>/scene shot.png [frame]
+
+Without nav regions psxsplash does not attach the camera to the player, so the camera stays at the
+origin facing +Z and the player start in the file has no effect. Put the objects at positive Z.
+
+`boot/palcheck.py` checks one textured quad on the screenshot against `texstats --out`: every pixel
+must be a palette colour, give or take the one 5-bit step the GPU dither adds.
+
+    python3 boot/palcheck.py shot.png x0 y0 x1 y1 decoded.png
+
+With c03 moved to z = 3 all three quads render, and the 4 and 8 bpp quads pass with 16-word
+CLUT padding (half the pixels exact, half one dither step off). Against the wrong palette the
+4 bpp quad fails with a distance of 90.
