@@ -297,4 +297,100 @@ PsxTexture convertTexture(const Image& img, BitDepth depth, bool cutout) {
     return t;
 }
 
+namespace {
+
+float srgbToLinear(float c) { return c <= 0.04045f ? c / 12.92f : std::pow((c + 0.055f) / 1.055f, 2.4f); }
+
+struct Lab {
+    float l, a, b;
+};
+
+Lab oklab(float r, float g, float b) {
+    r = srgbToLinear(r);
+    g = srgbToLinear(g);
+    b = srgbToLinear(b);
+    float l = std::cbrt(0.4122214708f * r + 0.5363325363f * g + 0.0514459929f * b);
+    float m = std::cbrt(0.2119034982f * r + 0.6806995451f * g + 0.1073969566f * b);
+    float s = std::cbrt(0.0883024619f * r + 0.2817188376f * g + 0.6299787005f * b);
+    return {0.2104542553f * l + 0.7936177850f * m - 0.0040720468f * s,
+            1.9779984951f * l - 2.4285922050f * m + 0.4505937099f * s,
+            0.0259040371f * l + 0.7827717662f * m - 0.8086757660f * s};
+}
+
+float expand5(unsigned v) { return float((v * 255 + 15) / 31) / 255.f; }
+
+}  // namespace
+
+Image decodeTexture(const PsxTexture& t) {
+    Image img;
+    img.width = t.width;
+    img.height = t.height;
+    img.pixels.resize(size_t(t.width) * t.height);
+    for (int row = 0; row < t.height; row++) {
+        int y = t.height - row - 1;
+        for (int x = 0; x < t.width; x++) {
+            uint16_t w;
+            if (t.bitDepth == BitDepth::Bpp16) {
+                w = t.word(x, row);
+            } else if (t.bitDepth == BitDepth::Bpp8) {
+                w = t.palette[(t.word(x / 2, row) >> ((x & 1) * 8)) & 0xff];
+            } else {
+                w = t.palette[(t.word(x / 4, row) >> ((x & 3) * 4)) & 0xf];
+            }
+            float a = w == 0 ? 0.f : 1.f;
+            img.pixels[size_t(y) * t.width + x] = {expand5(w & 31), expand5((w >> 5) & 31), expand5((w >> 10) & 31), a};
+        }
+    }
+    return img;
+}
+
+TextureError measureTexture(const Image& source, const PsxTexture& t) {
+    Image out = decodeTexture(t);
+    int w = source.width, h = source.height;
+    auto counted = [&](int i) { return !(t.cutout && source.pixels[size_t(i)].a < kCutoutAlpha); };
+    auto blur = [&](const Image& im, int x, int y) {
+        float r = 0, g = 0, b = 0;
+        int n = 0;
+        for (int dy = -1; dy <= 1; dy++)
+            for (int dx = -1; dx <= 1; dx++) {
+                int nx = x + dx, ny = y + dy;
+                if (nx < 0 || ny < 0 || nx >= w || ny >= h || !counted(ny * w + nx)) continue;
+                const auto& p = im.pixels[size_t(ny) * w + nx];
+                r += p.r, g += p.g, b += p.b, n++;
+            }
+        return oklab(r / n, g / n, b / n);
+    };
+    auto dist = [](Lab p, Lab q) {
+        return std::sqrt(double(p.l - q.l) * (p.l - q.l) + double(p.a - q.a) * (p.a - q.a) + double(p.b - q.b) * (p.b - q.b));
+    };
+    TextureError e;
+    double se = 0, de = 0, deb = 0;
+    long n = 0;
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++) {
+            int i = y * w + x;
+            if (!counted(i)) continue;
+            const auto& s = source.pixels[size_t(i)];
+            const auto& o = out.pixels[size_t(i)];
+            for (float d : {s.r - o.r, s.g - o.g, s.b - o.b}) se += double(d) * d * 255.0 * 255.0;
+            de += dist(oklab(s.r, s.g, s.b), oklab(o.r, o.g, o.b));
+            deb += dist(blur(source, x, y), blur(out, x, y));
+            n++;
+        }
+    if (n) {
+        double mse = se / (3.0 * n);
+        e.psnr = mse > 0 ? 10.0 * std::log10(255.0 * 255.0 / mse) : 99.0;
+        e.deltaE = 100.0 * de / n;
+        e.deltaEBlur = 100.0 * deb / n;
+    }
+    if (t.bitDepth != BitDepth::Bpp16) {
+        std::vector<bool> used(t.palette.size());
+        int per = t.bitDepth == BitDepth::Bpp8 ? 2 : 4, bits = 16 / per;
+        for (uint16_t word : t.imageData)
+            for (int k = 0; k < per; k++) used[(word >> (k * bits)) & ((1 << bits) - 1)] = true;
+        for (bool u : used) e.colorsUsed += u;
+    }
+    return e;
+}
+
 }  // namespace splash

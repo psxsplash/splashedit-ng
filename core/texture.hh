@@ -51,4 +51,21 @@ struct PsxTexture {
 
 PsxTexture convertTexture(const Image& img, BitDepth depth, bool cutout = false);
 
+// What the console shows for a converted texture, back in Image form (5-bit
+// channels expanded to the nearest 8-bit level; transparent texels get a = 0).
+Image decodeTexture(const PsxTexture& t);
+
+// How far a converted texture is from its source, over the texels the
+// console draws (with cutout, source texels below the alpha threshold are
+// skipped). deltaE is the mean OKLab distance x100; deltaEBlur is the same
+// after a 3x3 box blur of both images, which is closer to what dithering
+// looks like at viewing distance than a per-texel score.
+struct TextureError {
+    double psnr = 0;  // RGB, dB
+    double deltaE = 0;
+    double deltaEBlur = 0;
+    int colorsUsed = 0;  // distinct palette entries actually referenced
+};
+TextureError measureTexture(const Image& source, const PsxTexture& t);
+
 }  // namespace splash
