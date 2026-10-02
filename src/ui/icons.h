@@ -1,0 +1,51 @@
+#pragma once
+
+// Lucide codepoints (lucide-font 1.50.0, assets/fonts/codepoints.json), UTF-8.
+namespace icon {
+inline constexpr const char* play = "\xee\x84\xbc";            // e13c
+inline constexpr const char* cpu = "\xee\x82\xa9";             // e0a9
+inline constexpr const char* package = "\xee\x84\xa9";         // e129
+inline constexpr const char* search = "\xee\x85\x91";          // e151
+inline constexpr const char* box = "\xee\x81\xa1";             // e061
+inline constexpr const char* folder = "\xee\x83\x97";          // e0d7
+inline constexpr const char* folderOpen = "\xee\x89\x87";      // e247
+inline constexpr const char* sun = "\xee\x85\xb8";             // e178
+inline constexpr const char* lightbulb = "\xee\x87\x82";       // e1c2
+inline constexpr const char* camera = "\xee\x81\xa4";          // e064
+inline constexpr const char* volume = "\xee\x86\xab";          // e1ab
+inline constexpr const char* script = "\xee\x91\x9f";          // e45f
+inline constexpr const char* chevronRight = "\xee\x81\xaf";    // e06f
+inline constexpr const char* chevronDown = "\xee\x81\xad";     // e06d
+inline constexpr const char* eye = "\xee\x82\xba";             // e0ba
+inline constexpr const char* eyeOff = "\xee\x82\xbb";          // e0bb
+inline constexpr const char* lock = "\xee\x84\x8b";            // e10b
+inline constexpr const char* plus = "\xee\x84\xbd";            // e13d
+inline constexpr const char* x = "\xee\x86\xb2";               // e1b2
+inline constexpr const char* minus = "\xee\x84\x9c";           // e11c
+inline constexpr const char* square = "\xee\x85\xa7";          // e167
+inline constexpr const char* settings = "\xee\x85\x94";        // e154
+inline constexpr const char* move = "\xee\x8b\xa5";            // e2e5
+inline constexpr const char* rotate = "\xee\x8b\xaa";          // e2ea
+inline constexpr const char* scale = "\xee\x8b\xab";           // e2eb
+inline constexpr const char* warning = "\xee\x86\x93";         // e193
+inline constexpr const char* monitor = "\xee\x84\x9d";         // e11d
+inline constexpr const char* layers = "\xee\x94\xa9";          // e529
+inline constexpr const char* fileCode = "\xee\x83\x83";        // e0c3
+inline constexpr const char* undo = "\xee\x8a\xa1";            // e2a1
+inline constexpr const char* redo = "\xee\x8a\xa0";            // e2a0
+inline constexpr const char* zap = "\xee\x86\xb4";             // e1b4
+inline constexpr const char* ellipsis = "\xee\x82\xb6";        // e0b6
+inline constexpr const char* hardDrive = "\xee\x83\xad";       // e0ed
+inline constexpr const char* music = "\xee\x84\xa2";           // e122
+inline constexpr const char* grid = "\xee\x83\xa9";            // e0e9
+inline constexpr const char* maximize = "\xee\x84\x92";        // e112
+inline constexpr const char* copy = "\xee\x82\x9e";            // e09e
+inline constexpr const char* magnet = "\xee\x8a\xb5";          // e2b5
+inline constexpr const char* globe = "\xee\x83\xa8";           // e0e8
+inline constexpr const char* user = "\xee\x86\x9f";            // e19f
+inline constexpr const char* pointer = "\xee\x87\x83";         // e1c3
+inline constexpr const char* gamepad = "\xee\x83\x9f";         // e0df
+inline constexpr const char* wand = "\xee\x8d\x97";            // e357
+inline constexpr const char* help = "\xee\x82\x82";            // e082
+inline constexpr const char* link = "\xee\x84\x82";            // e102
+}  // namespace icon
