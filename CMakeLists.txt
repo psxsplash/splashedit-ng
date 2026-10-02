@@ -14,8 +14,31 @@ FetchContent_Declare(stb
     GIT_TAG 2c980bb59875b0d32144a71867fbdebb2f77cd20)
 FetchContent_MakeAvailable(imgui stb)
 
-find_package(SDL3 REQUIRED CONFIG)
-find_package(Freetype REQUIRED)
+# Use system SDL3 and FreeType when present, otherwise build them, so a
+# plain Windows checkout configures without a package manager.
+find_package(SDL3 CONFIG QUIET)
+if(NOT SDL3_FOUND)
+    FetchContent_Declare(SDL3
+        GIT_REPOSITORY https://github.com/libsdl-org/SDL.git
+        GIT_TAG release-3.4.16
+        GIT_SHALLOW TRUE)
+    set(SDL_SHARED OFF CACHE BOOL "" FORCE)
+    set(SDL_STATIC ON CACHE BOOL "" FORCE)
+    set(SDL_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(SDL3)
+endif()
+find_package(Freetype QUIET)
+if(NOT FREETYPE_FOUND)
+    FetchContent_Declare(freetype
+        GIT_REPOSITORY https://github.com/freetype/freetype.git
+        GIT_TAG VER-2-14-3
+        GIT_SHALLOW TRUE)
+    foreach(dep BZIP2 PNG ZLIB BROTLI HARFBUZZ)
+        set(FT_DISABLE_${dep} ON CACHE BOOL "" FORCE)
+    endforeach()
+    FetchContent_MakeAvailable(freetype)
+    add_library(Freetype::Freetype ALIAS freetype)
+endif()
 find_package(OpenGL REQUIRED)
 
 add_library(imgui STATIC
@@ -42,8 +65,11 @@ target_include_directories(splashedit PRIVATE src)
 target_include_directories(splashedit SYSTEM PRIVATE ${stb_SOURCE_DIR})
 target_link_libraries(splashedit PRIVATE imgui)
 target_compile_definitions(splashedit PRIVATE SPLASHEDIT_ASSET_DIR="${CMAKE_CURRENT_SOURCE_DIR}/assets")
+if(WIN32)
+    target_compile_definitions(splashedit PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+endif()
 if(MSVC)
-    target_compile_options(splashedit PRIVATE /W4)
+    target_compile_options(splashedit PRIVATE /W4 /utf-8)
 else()
     target_compile_options(splashedit PRIVATE -Wall -Wextra)
 endif()

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdio>
 
 #include "gl.h"
@@ -143,16 +144,16 @@ static float hash(int x, int y, int seed) {
     return ((h ^ (h >> 16)) & 0xffff) / 65535.0f;
 }
 
+static void put(std::vector<uint8_t>& p, int x, int y, float r, float g, float b) {
+    size_t i = (size_t)(y * 64 * 3 + x) * 4;
+    p[i] = (uint8_t)std::clamp(r * 255.0f, 0.0f, 255.0f);
+    p[i + 1] = (uint8_t)std::clamp(g * 255.0f, 0.0f, 255.0f);
+    p[i + 2] = (uint8_t)std::clamp(b * 255.0f, 0.0f, 255.0f);
+}
+
 static void makeAtlas(std::vector<uint8_t>& px) {
     const int T = 64;
     px.assign(T * 3 * T * 4, 255);
-    auto put = (void (*)(std::vector<uint8_t>&, int, int, float, float, float))[](std::vector<uint8_t>& p, int x, int y, float r,
-                                                                                  float g, float b) {
-        size_t i = (size_t)(y * 64 * 3 + x) * 4;
-        p[i] = (uint8_t)std::clamp(r * 255.0f, 0.0f, 255.0f);
-        p[i + 1] = (uint8_t)std::clamp(g * 255.0f, 0.0f, 255.0f);
-        p[i + 2] = (uint8_t)std::clamp(b * 255.0f, 0.0f, 255.0f);
-    };
     for (int y = 0; y < T; ++y)
         for (int x = 0; x < T; ++x) {
             // 0: flagstones, two per tile with offset grout.
