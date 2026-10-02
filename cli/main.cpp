@@ -10,6 +10,7 @@
 #include <string>
 
 #include "splashpack.hh"
+#include "texture.hh"
 
 namespace fs = std::filesystem;
 
@@ -34,11 +35,52 @@ static int usage() {
     std::fprintf(stderr,
                  "usage: splashpack-cli export <scene> -o <out.splashpack> [--project <dir>] [--order-from <ref.splashpack>]\n"
                  "  --project defaults to the directory holding the scene file\n"
-                 "  --order-from (parity tests) orders objects like the name table of ref\n");
+                 "  --order-from (parity tests) orders objects like the name table of ref\n"
+                 "usage: splashpack-cli texstats <image> [--bpp 4|8|16] [--cutout] [--out <decoded.png>]\n"
+                 "  converts one image the way export does and prints its error against the source\n");
     return 2;
 }
 
+static int texstats(int argc, char** argv) {
+    std::string path;
+    splash::BitDepth depth = splash::BitDepth::Bpp8;
+    bool cutout = false;
+    std::string outPng;
+    for (int i = 2; i < argc; i++) {
+        std::string a = argv[i];
+        if (a == "--bpp" && i + 1 < argc) {
+            std::string v = argv[++i];
+            if (v == "4") depth = splash::BitDepth::Bpp4;
+            else if (v == "8") depth = splash::BitDepth::Bpp8;
+            else if (v == "16") depth = splash::BitDepth::Bpp16;
+            else return usage();
+        } else if (a == "--out" && i + 1 < argc) {
+            outPng = argv[++i];
+        } else if (a == "--cutout") {
+            cutout = true;
+        } else if (path.empty()) {
+            path = a;
+        } else {
+            return usage();
+        }
+    }
+    if (path.empty()) return usage();
+    try {
+        splash::Image img = splash::loadImage(path);
+        splash::PsxTexture t = splash::convertTexture(img, depth, cutout);
+        splash::TextureError e = splash::measureTexture(img, t);
+        if (!outPng.empty()) splash::savePng(splash::decodeTexture(t), outPng);
+        std::printf("%s bpp=%d psnr=%.2f deltaE=%.3f deltaE_blur=%.3f colors=%d\n", path.c_str(), int(depth), e.psnr,
+                    e.deltaE, e.deltaEBlur, e.colorsUsed);
+        return 0;
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "error: %s\n", e.what());
+        return 1;
+    }
+}
+
 int main(int argc, char** argv) {
+    if (argc >= 2 && std::strcmp(argv[1], "texstats") == 0) return texstats(argc, argv);
     if (argc < 2 || std::strcmp(argv[1], "export") != 0) return usage();
     std::string scenePath, outPath, project, orderFrom;
     for (int i = 2; i < argc; i++) {
