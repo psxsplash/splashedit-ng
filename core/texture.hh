@@ -22,6 +22,7 @@ struct Image {
 };
 
 Image loadImage(const std::filesystem::path& file);
+void savePng(const Image& img, const std::filesystem::path& file);
 
 // PS1 15-bit colour word with the semi-transparency bit.
 inline uint16_t packVram(uint16_t r, uint16_t g, uint16_t b, bool stp) {
