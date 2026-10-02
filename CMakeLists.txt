@@ -12,7 +12,22 @@ FetchContent_Declare(imgui
 FetchContent_Declare(stb
     GIT_REPOSITORY https://github.com/nothings/stb.git
     GIT_TAG 2c980bb59875b0d32144a71867fbdebb2f77cd20)
-FetchContent_MakeAvailable(imgui stb)
+FetchContent_Declare(nlohmann_json
+    GIT_REPOSITORY https://github.com/nlohmann/json.git
+    GIT_TAG v3.12.0
+    GIT_SHALLOW TRUE)
+FetchContent_MakeAvailable(stb nlohmann_json)
+
+option(SPLASHEDIT_BUILD_EDITOR "Build the editor (needs SDL3, FreeType, OpenGL)" ON)
+
+add_subdirectory(core)
+add_subdirectory(cli)
+
+if(NOT SPLASHEDIT_BUILD_EDITOR)
+    return()
+endif()
+
+FetchContent_MakeAvailable(imgui)
 
 find_package(SDL3 REQUIRED CONFIG)
 find_package(Freetype REQUIRED)

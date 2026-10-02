@@ -1,0 +1,54 @@
+// Texture conversion to PS1 form: 16bpp direct colour, or 4/8bpp indexed with
+// a CLUT. Mirrors SplashEdit 2.4's PSXTexture2D + TextureQuantizer.
+#pragma once
+
+#include <cstdint>
+#include <filesystem>
+#include <string>
+#include <vector>
+
+#include "scene.hh"
+
+namespace splash {
+
+// RGBA float image, rows BOTTOM-UP (pixels[y * width + x], y = 0 is the
+// bottom row), matching Texture2D.GetPixels.
+struct Image {
+    int width = 0, height = 0;
+    struct Px {
+        float r, g, b, a;
+    };
+    std::vector<Px> pixels;
+};
+
+Image loadImage(const std::filesystem::path& file);
+
+// PS1 15-bit colour word with the semi-transparency bit.
+inline uint16_t packVram(uint16_t r, uint16_t g, uint16_t b, bool stp) {
+    return uint16_t((stp ? 0x8000 : 0) | ((b & 31) << 10) | ((g & 31) << 5) | (r & 31));
+}
+
+struct PsxTexture {
+    std::string source;  // project path, the identity used for deduplication
+    BitDepth bitDepth = BitDepth::Bpp8;
+    bool cutout = false;
+    int width = 0, height = 0;
+    int quantizedWidth = 0;  // in 16-bit VRAM words
+    // quantizedWidth x height words, row 0 = top of the image.
+    std::vector<uint16_t> imageData;
+    // CLUT words; empty for 16bpp. hasPalette distinguishes "no CLUT" (16bpp)
+    // from an empty CLUT the way the original's null/empty list did.
+    bool hasPalette = false;
+    std::vector<uint16_t> palette;
+
+    // Placement, filled by the VRAM packer.
+    uint8_t packingX = 0, packingY = 0;  // inside the atlas; X in words
+    uint8_t texpageX = 0, texpageY = 0;
+    uint16_t clutPackingX = 0, clutPackingY = 0;  // X in units of 16 words
+
+    uint16_t word(int x, int y) const { return imageData[size_t(y) * quantizedWidth + x]; }
+};
+
+PsxTexture convertTexture(const Image& img, BitDepth depth, bool cutout = false);
+
+}  // namespace splash
