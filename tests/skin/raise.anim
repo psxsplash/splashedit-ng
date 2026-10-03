@@ -1,0 +1,28 @@
+{
+ "format": "splashedit-ng/anim",
+ "version": 1,
+ "name": "raise",
+ "length": 0.5,
+ "loop": false,
+ "channels": [
+  {
+   "joint": "shoulder",
+   "property": "rotation",
+   "interpolation": "linear",
+   "times": [
+    0,
+    0.5
+   ],
+   "values": [
+    0,
+    0,
+    0.0,
+    1.0,
+    0,
+    0,
+    -0.3826834,
+    0.9238795
+   ]
+  }
+ ]
+}

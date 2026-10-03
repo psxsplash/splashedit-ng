@@ -125,6 +125,12 @@ json writeMesh(const MeshComponent& m) {
     return j;
 }
 
+json writeSkin(const SkinComponent& sk) {
+    json j = {{"type", "skin"}, {"clips", sk.clips}, {"fps", sk.fps}};
+    putExtras(j, sk.extra);
+    return j;
+}
+
 json writeCollider(const ColliderComponent& c) {
     json j = {{"type", "collider"}, {"kind", enumTo(c.kind, kColliderKinds)}, {"platform", c.platform}};
     putExtras(j, c.extra);
@@ -305,6 +311,13 @@ Object readObject(const json& j) {
             a.trimLeadingSilence = c.value("trimLeadingSilence", a.trimLeadingSilence);
             a.extra = extrasOf(c, writeAudio(a));
             o.audio = a;
+        } else if (type == "skin") {
+            SkinComponent sk;
+            for (const json& cj : c.value("clips", json::array())) sk.clips.push_back(cj.get<std::string>());
+            sk.fps = c.value("fps", sk.fps);
+            if (sk.fps < 1 || sk.fps > 30) fail("object '" + o.name + "': skin fps must be 1..30");
+            sk.extra = extrasOf(c, writeSkin(sk));
+            o.skin = sk;
         } else {
             o.unknownComponents.push_back(c.dump());
         }
@@ -332,6 +345,7 @@ json writeObject(const Object& o) {
     if (o.trigger) comps.push_back(writeTrigger(*o.trigger));
     if (o.interactable) comps.push_back(writeInteractable(*o.interactable));
     if (o.audio) comps.push_back(writeAudio(*o.audio));
+    if (o.skin) comps.push_back(writeSkin(*o.skin));
     for (const std::string& c : o.unknownComponents) comps.push_back(json::parse(c));
     j["components"] = comps;
     json kids = json::array();
@@ -722,6 +736,54 @@ Mesh loadMesh(const fs::path& file) {
         for (int i : sm)
             if (i < 0 || size_t(i) >= nv) fail(file.string() + ": index out of range");
     }
+    if (j.contains("skin")) {
+        const json& sj = j["skin"];
+        MeshSkin sk;
+        for (const json& jj : sj.value("joints", json::array())) {
+            Joint jt;
+            jt.name = jj.at("name").get<std::string>();
+            jt.parent = jj.value("parent", -1);
+            if (jj.contains("position")) jt.position = vec3(jj["position"]);
+            if (jj.contains("rotation")) {
+                const json& r = jj["rotation"];
+                jt.rotation = {f(r.at(0)), f(r.at(1)), f(r.at(2)), f(r.at(3))};
+            }
+            if (jj.contains("scale")) jt.scale = vec3(jj["scale"]);
+            if (jt.parent < -1 || jt.parent >= int(sk.joints.size()))
+                fail(file.string() + ": joint '" + jt.name + "' parent must be -1 or an earlier joint");
+            sk.joints.push_back(std::move(jt));
+        }
+        size_t nj = sk.joints.size();
+        if (nj == 0) fail(file.string() + ": skin has no joints");
+        std::vector<float> ib;
+        for (const json& x : sj.value("inverseBind", json::array())) ib.push_back(x.get<float>());
+        if (!ib.empty()) {
+            if (ib.size() != nj * 12) fail(file.string() + ": inverseBind needs 12 floats per joint");
+            for (size_t i = 0; i < nj; i++) {
+                std::array<float, 12> a;
+                std::copy(ib.begin() + long(i * 12), ib.begin() + long(i * 12 + 12), a.begin());
+                sk.inverseBind.push_back(a);
+            }
+        }
+        std::vector<int> vj;
+        std::vector<float> vw;
+        for (const json& x : sj.value("vertexJoints", json::array())) vj.push_back(x.get<int>());
+        for (const json& x : sj.value("vertexWeights", json::array())) vw.push_back(x.get<float>());
+        if (vj.size() != nv * 4 || vw.size() != nv * 4)
+            fail(file.string() + ": vertexJoints and vertexWeights need 4 values per vertex");
+        for (size_t i = 0; i < nv; i++) {
+            std::array<int, 4> a;
+            std::array<float, 4> b;
+            for (int k = 0; k < 4; k++) {
+                a[k] = vj[i * 4 + size_t(k)];
+                b[k] = vw[i * 4 + size_t(k)];
+                if (a[k] < 0 || size_t(a[k]) >= nj) fail(file.string() + ": vertex joint index out of range");
+            }
+            sk.vertexJoints.push_back(a);
+            sk.vertexWeights.push_back(b);
+        }
+        m.skin = std::move(sk);
+    }
     return m;
 }
 
@@ -739,6 +801,79 @@ void saveMesh(const Mesh& m, const fs::path& file) {
     if (!m.uv.empty()) j["uv"] = uv;
     if (!m.colors.empty()) j["colors"] = c;
     j["submeshes"] = m.submeshes;
+    if (m.skin) {
+        const MeshSkin& sk = *m.skin;
+        json joints = json::array(), ib = json::array(), vj = json::array(), vw = json::array();
+        for (const Joint& jt : sk.joints)
+            joints.push_back({{"name", jt.name},
+                              {"parent", jt.parent},
+                              {"position", vec3(jt.position)},
+                              {"rotation", json::array({jt.rotation.x, jt.rotation.y, jt.rotation.z, jt.rotation.w})},
+                              {"scale", vec3(jt.scale)}});
+        for (const auto& a : sk.inverseBind)
+            for (float x : a) ib.push_back(x);
+        for (const auto& a : sk.vertexJoints)
+            for (int x : a) vj.push_back(x);
+        for (const auto& a : sk.vertexWeights)
+            for (float x : a) vw.push_back(x);
+        json sj = {{"joints", joints}};
+        if (!sk.inverseBind.empty()) sj["inverseBind"] = ib;
+        sj["vertexJoints"] = vj;
+        sj["vertexWeights"] = vw;
+        j["skin"] = sj;
+    }
+    writeJson(j, file);
+}
+
+namespace {
+const std::initializer_list<std::pair<const char*, AnimProperty>> kAnimProps = {
+    {"position", AnimProperty::Position}, {"rotation", AnimProperty::Rotation}, {"scale", AnimProperty::Scale}};
+const std::initializer_list<std::pair<const char*, AnimInterp>> kAnimInterps = {{"linear", AnimInterp::Linear},
+                                                                                 {"step", AnimInterp::Step}};
+}  // namespace
+
+AnimClip loadAnim(const fs::path& file) {
+    json j = readJson(file);
+    if (j.value("format", "") != "splashedit-ng/anim") fail(file.string() + ": not a splashedit-ng anim");
+    checkVersion(j, file);
+    AnimClip c;
+    c.name = j.at("name").get<std::string>();
+    c.length = j.at("length").get<float>();
+    if (!(c.length >= 0)) fail(file.string() + ": length must be >= 0");
+    c.loop = j.value("loop", false);
+    for (const json& cj : j.value("channels", json::array())) {
+        AnimChannel ch;
+        ch.joint = cj.at("joint").get<std::string>();
+        ch.property = enumFrom(cj.at("property"), kAnimProps);
+        if (cj.contains("interpolation")) ch.interp = enumFrom(cj["interpolation"], kAnimInterps);
+        for (const json& x : cj.at("times")) ch.times.push_back(x.get<float>());
+        for (const json& x : cj.at("values")) ch.values.push_back(x.get<float>());
+        size_t stride = ch.property == AnimProperty::Rotation ? 4 : 3;
+        if (ch.times.empty()) fail(file.string() + ": channel '" + ch.joint + "' has no keys");
+        if (ch.values.size() != ch.times.size() * stride)
+            fail(file.string() + ": channel '" + ch.joint + "' needs " + std::to_string(stride) + " values per key");
+        for (size_t i = 1; i < ch.times.size(); i++)
+            if (ch.times[i] < ch.times[i - 1]) fail(file.string() + ": channel '" + ch.joint + "' times not ascending");
+        c.channels.push_back(std::move(ch));
+    }
+    return c;
+}
+
+void saveAnim(const AnimClip& c, const fs::path& file) {
+    json j;
+    j["format"] = "splashedit-ng/anim";
+    j["version"] = kFormatVersion;
+    j["name"] = c.name;
+    j["length"] = c.length;
+    j["loop"] = c.loop;
+    json chs = json::array();
+    for (const AnimChannel& ch : c.channels)
+        chs.push_back({{"joint", ch.joint},
+                       {"property", enumTo(ch.property, kAnimProps)},
+                       {"interpolation", enumTo(ch.interp, kAnimInterps)},
+                       {"times", ch.times},
+                       {"values", ch.values}});
+    j["channels"] = chs;
     writeJson(j, file);
 }
 

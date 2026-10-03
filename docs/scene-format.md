@@ -66,6 +66,7 @@ Components so far (more are added feature by feature, matching the splashpack se
 | `navigation` | nav bake without a player: `agentHeight` 1.8, `agentRadius` 0.5, nav bake fields (below), `spawnAnchor` object name or null (null = this object) |
 | `trigger` | `size` [1, 1, 1] box size before the object's transform, `lua` script path or null. The written box is the world AABB of the transformed box; the script gets `onTriggerEnter(index)` and `onTriggerExit(index)` |
 | `interactable` | `radius` 2, `button` 14 (pad bit, 14 = Cross), `repeatable` true, `cooldownFrames` 30, `showPrompt` false, `promptCanvas` "" (15 bytes kept), `lineOfSight` false |
+| `skin` | `clips` (paths to `.anim` files, 1..16), `fps` 1..30 [15]. Needs a `mesh` component whose `.mesh` has a `skin`. Lua plays a clip with `SkinnedAnim.Play(objectName, clipName)` |
 | `audio` | `clip` WAV path or null, `clipName` "" (the name Lua plays it by), `sampleRate` 22050, `loop` false, `defaultVolume` 100, `trimLeadingSilence` false. Channels are averaged to mono, resampled to `sampleRate` and encoded to SPU-ADPCM |
 
 Nav bake fields, shared by `player` and `navigation` (defaults in brackets): `maxStepHeight` [0.35],
@@ -166,6 +167,47 @@ has run. Arrays are flat.
 
 `normals`, `uv` and `colors` may be absent; when present they have one entry per position. Each array's
 length must be a multiple of its tuple size. Bounds are computed from `positions`.
+
+A skinned mesh adds `skin`:
+
+```json
+"skin": {
+  "joints": [ { "name": "hip", "parent": -1, "position": [0, 1, 0], "rotation": [0, 0, 0, 1], "scale": [1, 1, 1] }, ... ],
+  "inverseBind": [ 12 floats per joint, 3x4 row-major ],
+  "vertexJoints": [ 4 joint indices per vertex ],
+  "vertexWeights": [ 4 weights per vertex ]
+}
+```
+
+Joint transforms are local to the parent (`-1` = mesh space) and give the rest pose; a parent comes
+before its children. `inverseBind` maps mesh space to each joint's space at bind time and may be
+left out, in which case the inverse of the rest pose is used. The PS1 skins rigidly: each vertex
+follows the joint with its largest weight. psxsplash draws at most 64 joints.
+
+## Animation clip (`*.anim`)
+
+```json
+{
+  "format": "splashedit-ng/anim",
+  "version": 1,
+  "name": "walk",
+  "length": 1.0,
+  "loop": true,
+  "channels": [
+    { "joint": "knee_l", "property": "rotation", "interpolation": "linear",
+      "times": [0, 0.5, 1.0], "values": [x, y, z, w, ...] }
+  ]
+}
+```
+
+`property` is `position`, `scale` (3 values per key) or `rotation` (quaternion, 4 values);
+`interpolation` is `linear` (rotations slerp) or `step`. Joints without a channel hold their rest
+pose. `name` is what Lua plays and is 1..24 characters; names are unique per object.
+
+Export samples each clip at the skin's `fps`. A looping clip stores `round(length * fps)` frames over
+`[0, length)`: the engine wraps from the last frame to the first and blends between them, so the end
+pose is not stored a second time (2.4.0 stored it, which held the loop seam for one frame). A one-shot
+clip stores the frames at `i / fps` up to and including the end pose.
 
 ## Images
 

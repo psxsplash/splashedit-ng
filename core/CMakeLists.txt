@@ -68,6 +68,7 @@ add_library(splashcore STATIC
     audio.cpp
     font.cpp
     scene.cpp
+    skin.cpp
     texture.cpp
     vrampacker.cpp
     bvh.cpp

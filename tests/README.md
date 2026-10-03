@@ -156,6 +156,20 @@ and frames past 8191 fail the export.
 the crate right while the progress bar fills: at frames 300, 337 and 374 the crate's centre is at
 x 127, 141 and 156.5 and the bar is 48, 96 and 141 px long.
 
+## Skinned meshes
+
+`skincheck.py` exports `skin/skin.scene` (a two-joint arm from `skin/make_arm.py`) and reads the
+skinned-mesh table back the way psxsplash's loader does. It applies each baked bone matrix to the
+exported vertices the way the renderer does and compares with the clip's pose computed separately,
+for every frame, a child joint under a moving parent and a non-uniformly scaled object. It also
+checks frame counts, the skinned flag, the bone per triangle vertex, and that a missing skeleton,
+an unknown joint, no clips, a repeated or too-long clip name and fps 31 fail the export.
+
+    python3 skincheck.py <splashpack-cli>
+
+`skin/skin.scene` booted with `boot/boot.sh` (its script loops `bend`) shows the upper box swinging
+about the elbow.
+
 ## UI
 
 `uicheck.py` exports `ui/ui.scene`, reads the UI table back the way `uisystem.cpp` does and resolves
