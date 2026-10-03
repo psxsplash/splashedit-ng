@@ -567,6 +567,16 @@ json writeTrack(const CutsceneTrack& t) {
     return j;
 }
 
+json writeSkinEvents(const std::vector<SkinAnimEvent>& evs) {
+    json out = json::array();
+    for (const SkinAnimEvent& e : evs) {
+        json ej = {{"frame", e.frame}, {"object", e.object}, {"clip", e.clip}, {"loop", e.loop}};
+        putExtras(ej, e.extra);
+        out.push_back(ej);
+    }
+    return out;
+}
+
 json writeCutscene(const Cutscene& c) {
     json tracks = json::array(), audio = json::array();
     for (const CutsceneTrack& t : c.tracks) tracks.push_back(writeTrack(t));
@@ -576,8 +586,53 @@ json writeCutscene(const Cutscene& c) {
         audio.push_back(aj);
     }
     json j = {{"name", c.name}, {"durationFrames", c.durationFrames}, {"tracks", tracks}, {"audioEvents", audio}};
+    if (!c.skinEvents.empty()) j["skinEvents"] = writeSkinEvents(c.skinEvents);
     putExtras(j, c.extra);
     return j;
+}
+
+json writeAnimation(const Animation& a) {
+    json tracks = json::array();
+    for (const CutsceneTrack& t : a.tracks) tracks.push_back(writeTrack(t));
+    json j = {{"name", a.name}, {"durationFrames", a.durationFrames}, {"tracks", tracks}};
+    if (!a.skinEvents.empty()) j["skinEvents"] = writeSkinEvents(a.skinEvents);
+    putExtras(j, a.extra);
+    return j;
+}
+
+template <class Bad>
+CutsceneTrack readTrack(const json& tj, const Bad& bad) {
+    CutsceneTrack t;
+    t.type = enumFrom(tj.at("type"), kTrackTypes);
+    t.target = tj.value("target", "");
+    for (const json& kj : tj.value("keyframes", json::array())) {
+        Keyframe k;
+        k.frame = kj.value("frame", 0);
+        if (k.frame < 0 || k.frame > 8191) bad("keyframe frame must be 0..8191");
+        if (kj.contains("value"))
+            for (size_t i = 0; i < 3; i++) k.value[i] = f(kj["value"].at(i));
+        if (kj.contains("interp")) k.interp = enumFrom(kj["interp"], kInterps);
+        k.extra = extrasOf(kj, json{{"frame", 0}, {"value", 0}, {"interp", 0}});
+        t.keyframes.push_back(k);
+    }
+    t.extra = extrasOf(tj, writeTrack(t));
+    return t;
+}
+
+template <class Bad>
+std::vector<SkinAnimEvent> readSkinEvents(const json& j, const Bad& bad) {
+    std::vector<SkinAnimEvent> out;
+    for (const json& ej : j.value("skinEvents", json::array())) {
+        SkinAnimEvent e;
+        e.frame = ej.value("frame", 0);
+        e.object = ej.value("object", "");
+        e.clip = ej.value("clip", "");
+        e.loop = ej.value("loop", false);
+        if (e.frame < 0 || e.frame > 65535) bad("skin event frame must be 0..65535");
+        e.extra = extrasOf(ej, json{{"frame", 0}, {"object", 0}, {"clip", 0}, {"loop", 0}});
+        out.push_back(std::move(e));
+    }
+    return out;
 }
 
 Cutscene readCutscene(const json& j) {
@@ -586,23 +641,7 @@ Cutscene readCutscene(const json& j) {
     auto bad = [&](const std::string& what) { fail("cutscene '" + c.name + "': " + what); };
     c.durationFrames = j.value("durationFrames", c.durationFrames);
     if (c.durationFrames < 1 || c.durationFrames > 65535) bad("durationFrames must be 1..65535");
-    for (const json& tj : j.value("tracks", json::array())) {
-        CutsceneTrack t;
-        t.type = enumFrom(tj.at("type"), kTrackTypes);
-        t.target = tj.value("target", "");
-        for (const json& kj : tj.value("keyframes", json::array())) {
-            Keyframe k;
-            k.frame = kj.value("frame", 0);
-            if (k.frame < 0 || k.frame > 8191) bad("keyframe frame must be 0..8191");
-            if (kj.contains("value"))
-                for (size_t i = 0; i < 3; i++) k.value[i] = f(kj["value"].at(i));
-            if (kj.contains("interp")) k.interp = enumFrom(kj["interp"], kInterps);
-            k.extra = extrasOf(kj, json{{"frame", 0}, {"value", 0}, {"interp", 0}});
-            t.keyframes.push_back(k);
-        }
-        t.extra = extrasOf(tj, writeTrack(t));
-        c.tracks.push_back(std::move(t));
-    }
+    for (const json& tj : j.value("tracks", json::array())) c.tracks.push_back(readTrack(tj, bad));
     for (const json& aj : j.value("audioEvents", json::array())) {
         CutsceneAudioEvent a;
         a.frame = aj.value("frame", 0);
@@ -615,8 +654,25 @@ Cutscene readCutscene(const json& j) {
         a.extra = extrasOf(aj, json{{"frame", 0}, {"clip", 0}, {"volume", 0}, {"pan", 0}});
         c.audioEvents.push_back(std::move(a));
     }
-    c.extra = extrasOf(j, writeCutscene(c));
+    c.skinEvents = readSkinEvents(j, bad);
+    json known = writeCutscene(c);
+    known["skinEvents"] = 0;
+    c.extra = extrasOf(j, known);
     return c;
+}
+
+Animation readAnimation(const json& j) {
+    Animation a;
+    a.name = j.value("name", "");
+    auto bad = [&](const std::string& what) { fail("animation '" + a.name + "': " + what); };
+    a.durationFrames = j.value("durationFrames", a.durationFrames);
+    if (a.durationFrames < 1 || a.durationFrames > 65535) bad("durationFrames must be 1..65535");
+    for (const json& tj : j.value("tracks", json::array())) a.tracks.push_back(readTrack(tj, bad));
+    a.skinEvents = readSkinEvents(j, bad);
+    json known = writeAnimation(a);
+    known["skinEvents"] = 0;
+    a.extra = extrasOf(j, known);
+    return a;
 }
 
 // The version only changes when an older build would read a file wrong.
@@ -663,8 +719,9 @@ Scene loadScene(const fs::path& file) {
     for (const json& fj : j.value("fonts", json::array())) s.fonts.push_back(readFont(fj));
     for (const json& cj : j.value("canvases", json::array())) s.canvases.push_back(readCanvas(cj));
     for (const json& cj : j.value("cutscenes", json::array())) s.cutscenes.push_back(readCutscene(cj));
+    for (const json& aj : j.value("animations", json::array())) s.animations.push_back(readAnimation(aj));
     s.extra = extrasOf(j, json{{"format", 0}, {"version", 0}, {"settings", 0}, {"objects", 0}, {"fonts", 0},
-                               {"canvases", 0}, {"cutscenes", 0}});
+                               {"canvases", 0}, {"cutscenes", 0}, {"animations", 0}});
     return s;
 }
 
@@ -690,6 +747,11 @@ void saveScene(const Scene& s, const fs::path& file) {
         json cs = json::array();
         for (const Cutscene& c : s.cutscenes) cs.push_back(writeCutscene(c));
         j["cutscenes"] = cs;
+    }
+    if (!s.animations.empty()) {
+        json as = json::array();
+        for (const Animation& a : s.animations) as.push_back(writeAnimation(a));
+        j["animations"] = as;
     }
     putExtras(j, s.extra);
     writeJson(j, file);

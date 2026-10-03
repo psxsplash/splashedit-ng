@@ -131,7 +131,8 @@ An optional top-level array, played from Lua with `Cutscene.Play(name)`.
                        { "frame": 120, "value": [1.5, 0, 4], "interp": "easeOut" } ] },
       { "type": "uiProgress", "target": "hud/bar", "keyframes": [ { "frame": 0, "value": [0, 0, 0] } ] }
     ],
-    "audioEvents": [ { "frame": 30, "clip": "door", "volume": 100, "pan": 64 } ] }
+    "audioEvents": [ { "frame": 30, "clip": "door", "volume": 100, "pan": 64 } ],
+    "skinEvents": [ { "frame": 0, "object": "Arm", "clip": "wave", "loop": true } ] }
 ]
 ```
 
@@ -142,11 +143,28 @@ object transform), `objectActive`, `uiCanvasVisible`, `uiElementVisible`, `rumbl
 (0..1), `cameraH` (projection distance, 1..1024), `rumbleLarge` (0..255), `objectUVOffset` (texels,
 0..255). Object tracks target an object with a mesh by name, `uiCanvasVisible` a canvas name, other
 UI tracks `canvas/element`; camera and rumble tracks have no target. `interp` is `linear`, `step`,
-`easeIn`, `easeOut` or `easeInOut`. Frames are 0..8191 and keys may be in any order. Audio events
-name an audio component's `clipName`; `volume` is 0..128 [100], `pan` 0..127 [64].
+`easeIn`, `easeOut` or `easeInOut`. Frames run at 30 per second; keys are at frames 0..8191 and
+may be in any order. Audio events name an audio component's `clipName`; `volume` is 0..128 [100],
+`pan` 0..127 [64]. Skin events start a clip on an object with a skin component, as
+`SkinnedAnim.Play` would: `object` is the object name, `clip` one of its clip names, `loop` [false].
 
-At most 16 cutscenes, 8 tracks each, 64 keys per track and 64 audio events. A target or clip that
-does not exist fails the export.
+At most 16 cutscenes, 8 tracks each, 64 keys per track, 64 audio events and 16 skin events. Names
+are 1..24 characters. A target or clip that does not exist fails the export.
+
+### Animations: `animations`
+
+An optional top-level array, played from Lua with `Animation.Play(name)`. Up to 8 run at once.
+An animation is a cutscene without `audioEvents` and without camera tracks (`cameraPosition`,
+`cameraRotation`, `cameraH`), which fail the export; the limits are the same.
+
+```json
+"animations": [
+  { "name": "lift", "durationFrames": 60,
+    "tracks": [ { "type": "objectPosition", "target": "Crate",
+                  "keyframes": [ { "frame": 0, "value": [0, 0, 4] }, { "frame": 60, "value": [0, 1.5, 4] } ] } ],
+    "skinEvents": [ { "frame": 0, "object": "Arm", "clip": "raise" } ] }
+]
+```
 
 ## Mesh file (`*.mesh`)
 
