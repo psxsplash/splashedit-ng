@@ -1,5 +1,5 @@
 // Headless tests for the editor's document model: the undo history and the
-// viewport's ray picker. No SDL, no GL. Run through CTest (`ctest`).
+// viewport's ray picker and gizmo maths. No SDL, no GL. Run through CTest (`ctest`).
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
@@ -7,6 +7,7 @@
 #include <system_error>
 
 #include "editor/document.hh"
+#include "editor/gizmo.hh"
 #include "editor/pick.hh"
 
 namespace {
@@ -253,6 +254,148 @@ void testPick() {
     CHECK(!editor::raySphere({{1, 0, -5}, {0, 0, 1}}, {0, 0, 0}, 0.5f));
 }
 
+bool sameQuat(splash::Quat a, splash::Quat b) { return a.x == b.x && a.y == b.y && a.z == b.z && a.w == b.w; }
+bool nearV(splash::Vec3 a, splash::Vec3 b, float eps = 1e-5f) {
+    return std::fabs(a.x - b.x) < eps && std::fabs(a.y - b.y) < eps && std::fabs(a.z - b.z) < eps;
+}
+
+// The pure maths behind the rotate and scale gizmos.
+void testGizmoMath() {
+    const float pi = editor::kPi;
+    auto nearF = [](float a, float b) { return std::fabs(a - b) < 1e-4f; };
+    // Quaternion.AngleAxis(90, up) * forward == right, as in Unity.
+    splash::Quat q = editor::quatAxisAngle({0, 1, 0}, pi / 2);
+    CHECK(nearV(splash::rotate(q, {0, 0, 1}), {1, 0, 0}));
+    // The axis need not be unit length; a zero axis is the identity.
+    CHECK(nearV(splash::rotate(editor::quatAxisAngle({0, 0, 5}, pi / 2), {1, 0, 0}), {0, 1, 0}));
+    CHECK(sameQuat(editor::quatAxisAngle({0, 0, 0}, 1), splash::Quat{}));
+    // a * b applies b first: 90 about Y then 90 about X takes +Z to +X then keeps it.
+    splash::Quat x90 = editor::quatAxisAngle({1, 0, 0}, pi / 2);
+    CHECK(nearV(splash::rotate(editor::quatMul(x90, q), {0, 0, 1}), {1, 0, 0}));
+    CHECK(nearV(splash::rotate(editor::quatMul(q, x90), {0, 1, 0}), {1, 0, 0}));
+    splash::Quat n = editor::quatNormalize({0, 0, 0, 2});
+    CHECK(sameQuat(n, splash::Quat{}));
+    CHECK(sameQuat(editor::quatNormalize({0, 0, 0, 0}), splash::Quat{}));
+
+    // Mouse angle around the centre, y down: right is 0, below is +90.
+    CHECK(nearF(editor::screenAngle(100, 100, 150, 100), 0));
+    CHECK(nearF(editor::screenAngle(100, 100, 100, 160), pi / 2));
+    // Steps go the short way across the +-180 seam, so a drag can pass it.
+    CHECK(nearF(editor::angleStep(pi - 0.1f, -pi + 0.1f), 0.2f));
+    CHECK(nearF(editor::angleStep(-pi + 0.1f, pi - 0.1f), -0.2f));
+    CHECK(nearF(editor::angleStep(0.5f, 0.2f), -0.3f));
+    float acc = 0, last = 0;
+    for (int i = 1; i <= 40; ++i) {  // a full turn and a bit, in 10 degree steps
+        float a = std::remainder(i * pi / 18, 2 * pi);
+        acc += editor::angleStep(last, a);
+        last = a;
+    }
+    CHECK(nearF(acc, 40 * pi / 18));
+
+    // Snapping.
+    CHECK(editor::snapTo(0.37f, 0.25f) == 0.25f);
+    CHECK(editor::snapTo(0.38f, 0.25f) == 0.5f);
+    CHECK(editor::snapTo(0.37f, 0) == 0.37f);
+    CHECK(nearF(editor::rotateDragDegrees(pi / 4, false), 45));
+    CHECK(editor::rotateDragDegrees(23.0f * pi / 180, true) == 30);
+    CHECK(editor::rotateDragDegrees(-22.0f * pi / 180, true) == -15);
+    CHECK(editor::rotateDragDegrees(7.0f * pi / 180, true) == 0);
+    CHECK(nearF(editor::scaleAxis(1, 1.234f, true), 1.2f));
+    CHECK(nearF(editor::scaleAxis(1, 1.234f, false), 1.234f));
+    CHECK(nearF(editor::scaleAxis(2, 0.5f, false), 1));
+}
+
+// A scale gizmo can never reach zero or flip an object.
+void testScaleClamp() {
+    using editor::kMinScale;
+    // Dragged through zero and beyond: held at the minimum, still positive.
+    CHECK(editor::scaleAxis(1, 0, false) == kMinScale);
+    CHECK(editor::scaleAxis(1, -3, false) == kMinScale);
+    CHECK(editor::scaleAxis(1, 0.001f, false) == kMinScale);
+    // Snapping a tiny value to 0 does not reach zero either.
+    CHECK(editor::scaleAxis(1, 0.04f, true) == kMinScale);
+    CHECK(editor::scaleAxis(0.5f, 0.05f, true) == kMinScale);
+    // Above the minimum it is left alone.
+    CHECK(editor::scaleAxis(1, 0.02f, false) == 0.02f);
+    // An object already mirrored stays mirrored and away from zero.
+    CHECK(editor::scaleAxis(-2, 0.5f, false) == -1);
+    CHECK(editor::scaleAxis(-2, -1, false) == -kMinScale);
+    CHECK(editor::scaleAxis(-2, 0, false) == -kMinScale);
+    // A zero start recovers to the minimum rather than staying collapsed.
+    CHECK(editor::scaleAxis(0, 3, false) == kMinScale);
+    CHECK(editor::clampScale(std::nanf(""), 1) == kMinScale);
+    // Uniform: per component, each keeping its sign; snap scales the factor.
+    splash::Vec3 u = editor::scaleUniform({1, 2, -0.5f}, -1, false);
+    CHECK(u.x == kMinScale && u.y == kMinScale && u.z == -kMinScale);
+    u = editor::scaleUniform({1, 2, 0.5f}, 1.13f, true);
+    CHECK(nearV(u, {1.1f, 2.2f, 0.55f}));
+}
+
+// One gizmo drag (many merged edits) undoes to the exact transform before it
+// and redoes to the exact transform after it, for rotate and for scale.
+void testGizmoUndo() {
+    editor::Document d;
+    splash::Scene s = sample();
+    s.objects[0].transform.rotation = editor::quatAxisAngle({0.3f, 1, 0.2f}, 0.7f);
+    s.objects[0].transform.scale = {1.5f, 0.75f, 2};
+    d.reset(s);
+    const splash::Transform before = d.object({0})->transform;
+
+    // A rotate drag: a run of frames about world Y, as the gizmo edits.
+    splash::Quat last;
+    for (int f = 1; f <= 8; ++f) {
+        float deg = editor::rotateDragDegrees(f * 0.05f, true);
+        last = editor::quatNormalize(editor::quatMul(editor::quatAxisAngle({0, 1, 0}, deg * editor::kPi / 180), before.rotation));
+        d.edit({0}, [&](splash::Object& o) { o.transform.rotation = last; }, "gizmo.rotate");
+    }
+    d.endMerge();
+    CHECK(d.historySize() == 1);
+    CHECK(sameQuat(d.object({0})->transform.rotation, last));
+    CHECK(!sameQuat(last, before.rotation));
+    CHECK(d.undo());
+    CHECK(sameQuat(d.object({0})->transform.rotation, before.rotation));
+    CHECK(d.object({0})->transform.scale == before.scale && d.object({0})->transform.position == before.position);
+    CHECK(d.redo());
+    CHECK(sameQuat(d.object({0})->transform.rotation, last));
+
+    // A scale drag on X, then a uniform one: two drags, two steps.
+    const splash::Transform mid = d.object({0})->transform;
+    splash::Vec3 sx = mid.scale;
+    for (int f = 1; f <= 6; ++f) {
+        sx.x = editor::scaleAxis(mid.scale.x, 1 + f * 0.1f, false);
+        d.edit({0}, [&](splash::Object& o) { o.transform.scale = sx; }, "gizmo.scale");
+    }
+    d.endMerge();
+    splash::Vec3 su;
+    for (int f = 1; f <= 6; ++f) {
+        su = editor::scaleUniform(sx, 1 - f * 0.3f, false);  // past zero: clamped
+        d.edit({0}, [&](splash::Object& o) { o.transform.scale = su; }, "gizmo.scale");
+    }
+    d.endMerge();
+    CHECK(d.historySize() == 3);
+    CHECK(su.x == editor::kMinScale && su.y == editor::kMinScale && su.z == editor::kMinScale);
+    CHECK(d.object({0})->transform.scale == su);
+    CHECK(d.undo());
+    CHECK(d.object({0})->transform.scale == sx);
+    CHECK(d.undo());
+    CHECK(d.object({0})->transform.scale == mid.scale);
+    CHECK(sameQuat(d.object({0})->transform.rotation, last));
+    CHECK(d.undo());
+    CHECK(sameQuat(d.object({0})->transform.rotation, before.rotation));
+    CHECK(d.object({0})->transform.scale == before.scale);
+    CHECK(!d.dirty());
+    CHECK(d.redo() && d.redo());
+    CHECK(d.object({0})->transform.scale == sx);
+    CHECK(d.redo());
+    CHECK(d.object({0})->transform.scale == su);
+
+    // A rotate drag right after a move drag does not merge into it.
+    d.reset(sample());
+    setX(d, {0}, 5, "gizmo.move");
+    d.edit({0}, [&](splash::Object& o) { o.transform.rotation = last; }, "gizmo.rotate");
+    CHECK(d.historySize() == 2);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -264,6 +407,9 @@ int main(int argc, char** argv) {
     testDirtyAndSave();
     testStructure();
     testPick();
+    testGizmoMath();
+    testScaleClamp();
+    testGizmoUndo();
     if (g_failures) {
         std::fprintf(stderr, "editor_tests: %d of %d checks failed\n", g_failures, g_checks);
         return 1;

@@ -58,6 +58,7 @@ struct Action {
     float wheel = 0;
     ImGuiKey key = ImGuiKey_None;
     bool ctrl = false, shift = false;
+    bool hold = false;  // a drag that never lets go (mid-drag screenshots)
     std::string text;
 };
 
@@ -126,7 +127,7 @@ void playAction(ImGuiIO& io, const Action& a, int f) {
                 float t = (float)(f - 1) / steps;
                 io.AddMousePosEvent(a.x0 + (a.x1 - a.x0) * t, a.y0 + (a.y1 - a.y0) * t);
             }
-            if (f == 2 + steps) io.AddMouseButtonEvent(a.button, false);
+            if (f == 2 + steps && !a.hold) io.AddMouseButtonEvent(a.button, false);
             break;
         }
         case Action::Key:
@@ -167,8 +168,9 @@ Args parse(int argc, char** argv) {
             Action act(!std::strcmp(argv[i], "--click") ? Action::Click : Action::DoubleClick);
             std::sscanf(next(), "%f,%f,%d", &act.x0, &act.y0, &act.button);
             a.actions.push_back(act);
-        } else if (!std::strcmp(argv[i], "--drag")) {
+        } else if (!std::strcmp(argv[i], "--drag") || !std::strcmp(argv[i], "--drag-hold")) {
             Action act(Action::Drag);
+            act.hold = !std::strcmp(argv[i], "--drag-hold");
             std::sscanf(next(), "%f,%f,%f,%f,%d", &act.x0, &act.y0, &act.x1, &act.y1, &act.button);
             a.actions.push_back(act);
         } else if (!std::strcmp(argv[i], "--wheel")) {
