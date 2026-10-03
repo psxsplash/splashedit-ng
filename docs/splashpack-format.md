@@ -235,11 +235,14 @@ InterpMode ids: Linear 0, Step 1, EaseIn 2, EaseOut 3, EaseInOut 4.
 - cutscene name (UTF-8, NUL-terminated, <=24), then all offsets are backfilled.
 Reader: R:splashpack.cpp cutscene loop; `CutsceneKeyframe` 8 B, `CutsceneAudioEvent` 8 B, `CutsceneSkinAnimEvent` 8 B (static_asserts in R:cutscene.hh).
 
-This exporter (`core/splashpack.cpp`, `writeCutscenes`) writes track types 0-13 (the ones psxsplash
-reads) with the same encodings, except: keys and audio events are sorted stably, so keys on the same
-frame keep their file order; `uiColor` takes 0..1; `uiPosition` keys get the same anchor rounding
-correction as the element (sec. 2.18); a position key that clamps to int16 is a warning. A track
-target that is not an exported object, canvas or `canvas/element`, an unknown audio clip, and
+This exporter (`core/splashpack.cpp`, `writeSequences`) writes track types 0-18 with the same
+encodings, except: keys and audio events are sorted stably, so keys on the same frame keep their
+file order; `uiColor` and `lightColor` take 0..1; `uiPosition` keys get the same anchor rounding
+correction as the element (sec. 2.18); a position or radius key that clamps to int16 is a warning,
+and so is a light intensity key above 8. A light track names a runtime point light by object name
+and the exporter writes its index in the light table (sec. 2.21) into the `lightIndex` byte. A track
+target that is not an exported object, canvas, `canvas/element` or runtime light (a duplicate light
+name too), an unknown audio clip, and
 counts over the reader's caps fail the export: the reader would skip or drop them. The track
 names are written before the audio events (the reader follows offsets). Skin events name an object
 and one of its clips; the exporter writes that object's index in the skin table (sec. 2.17, not the

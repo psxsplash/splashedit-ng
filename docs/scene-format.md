@@ -141,8 +141,11 @@ units, 8 x gteScaling, from the origin), `cameraRotation`, `objectRotation` (Eul
 object transform), `objectActive`, `uiCanvasVisible`, `uiElementVisible`, `rumbleSmall` (x above 0.5
 = on), `uiProgress` (0..100), `uiPosition` (x, y in pixels, the element's `rect` offset), `uiColor`
 (0..1), `cameraH` (projection distance, 1..1024), `rumbleLarge` (0..255), `objectUVOffset` (texels,
-0..255). Object tracks target an object with a mesh by name, `uiCanvasVisible` a canvas name, other
-UI tracks `canvas/element`; camera and rumble tracks have no target. `interp` is `linear`, `step`,
+0..255), `lightPosition`, `lightRadius` (scene units, at most 8 PSX units), `lightColor` (0..1),
+`lightIntensity` (as the light's `intensity`, at most 8), `lightEnabled` (x above 0.5 = on). Object
+tracks target an object with a mesh by name, `uiCanvasVisible` a canvas name, other UI tracks
+`canvas/element`, light tracks an object whose light has `runtime` on; camera and rumble tracks have
+no target. `interp` is `linear`, `step`,
 `easeIn`, `easeOut` or `easeInOut`. Frames run at 30 per second; keys are at frames 0..8191 and
 may be in any order. Audio events name an audio component's `clipName`; `volume` is 0..128 [100],
 `pan` 0..127 [64]. Skin events start a clip on an object with a skin component, as
