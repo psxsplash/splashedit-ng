@@ -62,7 +62,8 @@ endif()
 # and tests headless, also with SPLASHEDIT_BUILD_EDITOR off.
 add_library(splasheditdoc STATIC
     src/editor/document.cpp
-    src/editor/pick.cpp)
+    src/editor/pick.cpp
+    src/editor/gizmo.cpp)
 target_include_directories(splasheditdoc PUBLIC src)
 target_link_libraries(splasheditdoc PUBLIC splashcore)
 if(MSVC)

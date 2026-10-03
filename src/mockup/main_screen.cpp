@@ -14,6 +14,7 @@
 #include <string>
 
 #include "editor/document.hh"
+#include "editor/gizmo.hh"
 #include "ui/icons.h"
 #include "ui/widgets.h"
 #include "viewport/ps1view.h"
@@ -355,6 +356,58 @@ static bool mouseOnPlaneY(const viewport::Ps1View& view, ImRect r, float y, spla
     return true;
 }
 
+// Where a gizmo sits: the selected object's projected origin and the world
+// length that spans ~76 px on screen at its depth, so every gizmo keeps one
+// screen size however far away the object is.
+struct GizmoFrame {
+    splash::Vec3 wpos;   // object origin, Unity world space
+    ImVec2 c;            // its projection
+    float len = 0;       // world length of a 76 px arm
+    bool visible = false;
+};
+
+static GizmoFrame gizmoFrame(const viewport::Ps1View& view, ImRect r, const splash::FlatObject& fo) {
+    GizmoFrame gf;
+    gf.wpos = fo.localToWorld.position();
+    const viewport::Vec3 o = toGl(gf.wpos);
+    viewport::Vec3 right, up, fwd, eye = view.eye();
+    view.basis(&right, &up, &fwd);
+    float depth = (o.x - eye.x) * fwd.x + (o.y - eye.y) * fwd.y + (o.z - eye.z) * fwd.z;
+    gf.visible = depth > 0.05f && view.project(o, r.Min, r.GetSize(), &gf.c);
+    gf.len = 76.0f * 2 * depth * std::tan(viewport::Ps1View::kFovY * 0.5f) / r.GetHeight();
+    return gf;
+}
+
+// A gizmo may take hover only when nothing else holds or hovers the mouse.
+static bool gizmoMayHover(bool active, ImRect r) {
+    ImGuiContext& g = *GImGui;
+    return !active && g.ActiveId == 0 && g.HoveredId == 0 && ImGui::IsWindowHovered() && r.Contains(ImGui::GetIO().MousePos);
+}
+
+static float length(ImVec2 v) { return std::sqrt(v.x * v.x + v.y * v.y); }
+
+// The readout next to the cursor while a gizmo drags: an axis tag in its
+// colour, then the value. It sits on the cursor's side away from the gizmo's
+// centre `c`, so it does not cover the handles, and inside the viewport.
+static void gizmoLabel(ImDrawList* dl, ImRect r, ImVec2 c, ImVec2 at, const char* tag, ImU32 tagCol, const char* value) {
+    Fonts& f = fonts();
+    ImVec2 ts = measure(f.semibold, type::label, tag), vs = measure(f.medium, type::label, value);
+    const float padX = 8, gap = 6, h = 22;
+    float w = padX + ts.x + gap + vs.x + padX;
+    const bool left = at.x < c.x, above = at.y < c.y;
+    ImVec2 p(left ? at.x - 18 - w : at.x + 18, above ? at.y - 14 - h : at.y + 14);
+    if (p.x + w > r.Max.x - 4) p.x = at.x - 18 - w;
+    if (p.x < r.Min.x + 4) p.x = at.x + 18;
+    if (p.y + h > r.Max.y - 4) p.y = at.y - 14 - h;
+    if (p.y < r.Min.y + 4) p.y = at.y + 14;
+    ImRect b(p, p + ImVec2(w, h));
+    dl->AddRectFilled(b.Min + ImVec2(0, 1), b.Max + ImVec2(0, 1), rgb(0x000000, 70), radius::button);
+    dl->AddRectFilled(b.Min, b.Max, rgb(0x0e1014, 225), radius::button);
+    dl->AddRect(b.Min, b.Max, rgb(0xffffff, 18), radius::button);
+    text(dl, ImVec2(b.Min.x + padX, b.Min.y + (h - ts.y) * 0.5f), f.semibold, type::label, tagCol, tag);
+    text(dl, ImVec2(b.Min.x + padX + ts.x + gap, b.Min.y + (h - vs.y) * 0.5f), f.medium, type::label, color::text, value);
+}
+
 // The move gizmo: three world-axis arrows and an XZ plane handle, a fixed
 // size on screen. Dragging an arrow moves along it by the mouse motion
 // projected onto the arrow; dragging the plane follows the mouse across the
@@ -370,16 +423,13 @@ static void moveGizmo(State& st, ImDrawList* dl, viewport::Ps1View& view, ImRect
     if (active) ImGui::KeepAliveID(gid);
 
     // Handle geometry, sized from the object's depth so it stays ~76 px long.
-    const splash::Vec3 wpos = fo.localToWorld.position();
-    const viewport::Vec3 o = toGl(wpos);
-    viewport::Vec3 right, up, fwd, eye = view.eye();
-    view.basis(&right, &up, &fwd);
-    float depth = (o.x - eye.x) * fwd.x + (o.y - eye.y) * fwd.y + (o.z - eye.z) * fwd.z;
-    ImVec2 c;
-    bool visible = depth > 0.05f && view.project(o, mn, sz, &c);
+    const GizmoFrame gf = gizmoFrame(view, r, fo);
+    const splash::Vec3 wpos = gf.wpos;
+    const ImVec2 c = gf.c;
+    const bool visible = gf.visible;
+    const float len = gf.len;
     const splash::Vec3 axisDirs[3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
     const ImU32 axisCols[3] = {color::axisX, color::axisY, color::axisZ};
-    float len = 76.0f * 2 * depth * std::tan(viewport::Ps1View::kFovY * 0.5f) / sz.y;
     ImVec2 tips[3];
     bool tipOk[3] = {};
     ImVec2 quad[4];
@@ -402,7 +452,7 @@ static void moveGizmo(State& st, ImDrawList* dl, viewport::Ps1View& view, ImRect
 
     // Hover: arrows over the plane, nearest arrow wins.
     int hover = -1;
-    if (visible && !active && g.ActiveId == 0 && g.HoveredId == 0 && ImGui::IsWindowHovered() && r.Contains(io.MousePos)) {
+    if (visible && gizmoMayHover(active, r)) {
         float best = 7.0f;
         for (int i = 0; i < 3; ++i) {
             if (!tipOk[i]) continue;
@@ -418,6 +468,7 @@ static void moveGizmo(State& st, ImDrawList* dl, viewport::Ps1View& view, ImRect
         ImGui::SetHoveredID(gid);
         if (ImGui::IsMouseClicked(0)) {
             drag.handle = hover;
+            drag.tool = 1;
             drag.startMouse = io.MousePos;
             drag.startWorld = wpos;
             drag.startLocal = fo.object->transform.position;
@@ -493,6 +544,362 @@ static void moveGizmo(State& st, ImDrawList* dl, viewport::Ps1View& view, ImRect
     }
     dl->AddCircleFilled(c, 6, rgb(0xf4f5f8), 20);
     dl->AddCircle(c, 6, rgb(0x000000, 90), 20, 1.5f);
+}
+
+// The world axes, and for ring i two unit vectors spanning its plane with
+// U x V = axis i, so a positive turn about the axis carries U toward V.
+static const splash::Vec3 kAxis[3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
+static const splash::Vec3 kRingU[3] = {{0, 1, 0}, {0, 0, 1}, {1, 0, 0}};
+static const splash::Vec3 kRingV[3] = {{0, 0, 1}, {1, 0, 0}, {0, 1, 0}};
+
+// The camera position in Unity space.
+static splash::Vec3 eyeUnity(const viewport::Ps1View& view) {
+    viewport::Vec3 e = view.eye();
+    return {e.x, e.y, -e.z};
+}
+
+// The rotate gizmo: three world-axis rings (the axes move uses) at the move
+// gizmo's screen size. Dragging a ring turns the object about that axis by
+// the mouse's angle around the gizmo's centre on screen; snapping rounds the
+// turn to 15 degrees. One drag is one undo step.
+static void rotateGizmo(State& st, ImDrawList* dl, viewport::Ps1View& view, ImRect r, editor::Document& doc, const splash::FlatObject& fo,
+                        const splash::Mat34* parentToWorld) {
+    ImGuiContext& g = *GImGui;
+    ImGuiIO& io = ImGui::GetIO();
+    const ImGuiID gid = ImGui::GetID("##gizmo");
+    ImVec2 mn = r.Min, sz = r.GetSize();
+    State::GizmoDrag& drag = st.gizmo;
+    const bool active = g.ActiveId == gid && drag.handle >= 0;
+    if (active) ImGui::KeepAliveID(gid);
+
+    const GizmoFrame gf = gizmoFrame(view, r, fo);
+    const float radius = gf.len * 0.92f;
+    const ImU32 axisCols[3] = {color::axisX, color::axisY, color::axisZ};
+    const splash::Vec3 toEye = eyeUnity(view) - gf.wpos;
+    constexpr int kSeg = 72;
+    ImVec2 ring[3][kSeg];
+    bool facing[3][kSeg];  // segment k (point k to k + 1) is on the camera's half
+    bool ringOk[3] = {};
+    if (gf.visible) {
+        for (int i = 0; i < 3; ++i) {
+            ringOk[i] = true;
+            for (int k = 0; k < kSeg && ringOk[i]; ++k) {
+                float a = 2 * editor::kPi * k / kSeg, m = a + editor::kPi / kSeg;
+                splash::Vec3 d = kRingU[i] * std::cos(a) + kRingV[i] * std::sin(a);
+                ringOk[i] = view.project(toGl(gf.wpos + d * radius), mn, sz, &ring[i][k]);
+                facing[i][k] = splash::dot(kRingU[i] * std::cos(m) + kRingV[i] * std::sin(m), toEye) >= 0;
+            }
+        }
+    }
+
+    // Hover: the nearest ring, front halves preferred where rings cross.
+    int hover = -1, hoverSeg = 0;
+    if (gf.visible && gizmoMayHover(active, r)) {
+        float best = 7.0f;
+        for (int i = 0; i < 3; ++i) {
+            if (!ringOk[i]) continue;
+            for (int k = 0; k < kSeg; ++k) {
+                float dist = distToSegment(io.MousePos, ring[i][k], ring[i][(k + 1) % kSeg]) + (facing[i][k] ? 0.0f : 3.0f);
+                if (dist < best) best = dist, hover = i, hoverSeg = k;
+            }
+        }
+    }
+    if (hover >= 0) {
+        ImGui::SetHoveredID(gid);
+        if (ImGui::IsMouseClicked(0)) {
+            drag.handle = hover;
+            drag.tool = 2;
+            drag.startMouse = io.MousePos;
+            drag.startRot = fo.object->transform.rotation;
+            // A world axis seen from the parent's space, so the turn is about the world axis.
+            splash::Vec3 pa = worldToParentDelta(parentToWorld, kAxis[hover]);
+            drag.parentAxis = splash::sqrMagnitude(pa) > 1e-12f ? splash::normalized(pa) : kAxis[hover];
+            float a = 2 * editor::kPi * (hoverSeg + 0.5f) / kSeg;
+            drag.ringStart = kRingU[hover] * std::cos(a) + kRingV[hover] * std::sin(a);
+            drag.lastAngle = editor::screenAngle(gf.c.x, gf.c.y, io.MousePos.x, io.MousePos.y);
+            drag.accum = 0;
+            drag.shown = 0;
+            // Which way a growing screen angle turns the object: V is U turned
+            // +90 degrees, so compare their winding on screen (y down).
+            ImVec2 su, sv;
+            float cr = 0;
+            if (view.project(toGl(gf.wpos + kRingU[hover] * radius), mn, sz, &su) &&
+                view.project(toGl(gf.wpos + kRingV[hover] * radius), mn, sz, &sv)) {
+                su = su - gf.c, sv = sv - gf.c;
+                cr = su.x * sv.y - su.y * sv.x;
+            }
+            drag.sign = cr < 0 ? -1.0f : 1.0f;
+            ImGui::SetActiveID(gid, g.CurrentWindow);
+            doc.endMerge();  // a new drag never merges into an earlier edit
+        }
+    }
+
+    // Drag.
+    if (g.ActiveId == gid && drag.handle >= 0) {
+        if (ImGui::IsMouseDown(0)) {
+            // Too close to the centre the angle is noise: hold it until the mouse leaves.
+            ImVec2 m = io.MousePos - gf.c;
+            if (m.x * m.x + m.y * m.y > 16) {
+                float a = editor::screenAngle(gf.c.x, gf.c.y, io.MousePos.x, io.MousePos.y);
+                drag.accum += editor::angleStep(drag.lastAngle, a);
+                drag.lastAngle = a;
+            }
+            float deg = editor::rotateDragDegrees(drag.accum * drag.sign, st.snap || io.KeyCtrl);
+            drag.shown = deg;
+            splash::Quat q = drag.startRot;
+            if (deg != 0)
+                q = editor::quatNormalize(editor::quatMul(editor::quatAxisAngle(drag.parentAxis, deg * (editor::kPi / 180.0f)), drag.startRot));
+            const splash::Quat& cur = fo.object->transform.rotation;
+            bool same = q.x == cur.x && q.y == cur.y && q.z == cur.z && q.w == cur.w;
+            if (doc.selection() && !same)
+                doc.edit(*doc.selection(), [&](splash::Object& ob) { ob.transform.rotation = q; }, "gizmo.rotate");
+        } else {
+            doc.endMerge();
+            ImGui::ClearActiveID();
+            drag.handle = -1;
+        }
+    }
+
+    if (!gf.visible) return;
+    // Draw: back halves thin and faint, then front halves, the lit ring last.
+    const bool dragging = g.ActiveId == gid && drag.handle >= 0;
+    const int lit = dragging ? drag.handle : hover;
+    float t[3];
+    for (int i = 0; i < 3; ++i) t[i] = anim(gid + 1 + (ImGuiID)i, lit == i);
+    auto stroke = [&](int i, bool front, ImU32 col, float w) {
+        int k0 = -1;
+        for (int k = 0; k < kSeg; ++k)
+            if (facing[i][k] != facing[i][(k + kSeg - 1) % kSeg]) {
+                k0 = k;
+                break;
+            }
+        if (k0 < 0) {  // all on one side
+            if (facing[i][0] == front) dl->AddPolyline(ring[i], kSeg, col, ImDrawFlags_Closed, w);
+            return;
+        }
+        ImVec2 run[kSeg + 1];
+        int n = 0;
+        for (int j = 0; j < kSeg; ++j) {
+            int k = (k0 + j) % kSeg;
+            if (facing[i][k] == front) {
+                if (n == 0) run[n++] = ring[i][k];
+                run[n++] = ring[i][(k + 1) % kSeg];
+            } else if (n) {
+                dl->AddPolyline(run, n, col, 0, w);
+                n = 0;
+            }
+        }
+        if (n) dl->AddPolyline(run, n, col, 0, w);
+    };
+    int order[3] = {0, 1, 2};
+    if (lit >= 0) std::swap(order[lit], order[2]);
+    for (int i : order) {
+        if (!ringOk[i] || (dragging && i != drag.handle)) continue;
+        stroke(i, false, lerpColor(axisCols[i] & 0x00ffffff, axisCols[i], 0.32f + 0.3f * t[i]), 1.5f);
+    }
+    // While dragging, the wedge swept so far, from the grab point.
+    if (dragging) {
+        const int h = drag.handle;
+        float rad = drag.shown * (editor::kPi / 180.0f);
+        float sweep = std::clamp(rad, -2 * editor::kPi, 2 * editor::kPi);
+        int n = std::clamp((int)(std::fabs(sweep) / (2 * editor::kPi) * kSeg) + 1, 1, kSeg);
+        ImVec2 arc[kSeg + 1];
+        bool ok = true;
+        for (int j = 0; j <= n && ok; ++j) {
+            splash::Vec3 d = splash::rotate(editor::quatAxisAngle(kAxis[h], sweep * j / n), drag.ringStart);
+            ok = view.project(toGl(gf.wpos + d * radius), mn, sz, &arc[j]);
+        }
+        if (ok) {
+            // Unsmoothed fan, so the triangles meet without seams.
+            ImDrawListFlags fl = dl->Flags;
+            dl->Flags &= ~ImDrawListFlags_AntiAliasedFill;
+            if (sweep != 0)
+                for (int j = 0; j < n; ++j) dl->AddTriangleFilled(gf.c, arc[j], arc[j + 1], (axisCols[h] & 0x00ffffff) | 0x38000000);
+            dl->Flags = fl;
+            dl->AddLine(gf.c, arc[0], rgb(0xffffff, 110), 1.2f);
+            dl->AddLine(gf.c, arc[n], rgb(0xffffff, 220), 1.5f);
+        }
+    }
+    for (int i : order) {
+        if (!ringOk[i]) continue;
+        if (dragging && i != drag.handle) {
+            stroke(i, true, (axisCols[i] & 0x00ffffff) | 0x40000000, 1.5f);
+            continue;
+        }
+        float w = 2.5f + 1.5f * t[i];
+        stroke(i, true, rgb(0x000000, 90), w + 2);
+        stroke(i, true, lerpColor(axisCols[i], rgb(0xffffff), 0.35f * t[i]), w);
+    }
+    dl->AddCircleFilled(gf.c, 3.5f, rgb(0xf4f5f8), 16);
+    dl->AddCircle(gf.c, 3.5f, rgb(0x000000, 90), 16, 1.2f);
+    if (dragging) {
+        static const char* tags[3] = {"X", "Y", "Z"};
+        char v[32];
+        std::snprintf(v, sizeof v, std::fmod(drag.shown, 1.0f) == 0 ? "%+.0f\xc2\xb0" : "%+.1f\xc2\xb0", (double)drag.shown);
+        if (drag.shown == 0) std::snprintf(v, sizeof v, "0\xc2\xb0");
+        gizmoLabel(dl, r, gf.c, io.MousePos, tags[drag.handle], axisCols[drag.handle], v);
+    }
+}
+
+// A solid cube centred on `centre` with edges along `ax` (unit, world),
+// half-size `half`, faces lit from above. Back faces are culled, so the
+// faces never need sorting.
+static void gizmoCube(ImDrawList* dl, const viewport::Ps1View& view, ImRect r, splash::Vec3 centre, const splash::Vec3 ax[3], float half,
+                      ImU32 col, splash::Vec3 eye) {
+    ImVec2 p[8];
+    for (int c = 0; c < 8; ++c) {
+        splash::Vec3 w = centre + ax[0] * (c & 1 ? half : -half) + ax[1] * (c & 2 ? half : -half) + ax[2] * (c & 4 ? half : -half);
+        if (!view.project(toGl(w), r.Min, r.GetSize(), &p[c])) return;
+    }
+    for (int k = 0; k < 3; ++k)
+        for (int s = 0; s < 2; ++s) {
+            splash::Vec3 n = ax[k] * (s ? 1.0f : -1.0f);
+            if (splash::dot(n, eye - (centre + n * half)) <= 0) continue;
+            int a = 1 << ((k + 1) % 3), b = 1 << ((k + 2) % 3), base = s ? 1 << k : 0;
+            ImVec2 q[4] = {p[base], p[base | a], p[base | a | b], p[base | b]};
+            float light = 0.55f + 0.45f * std::clamp(n.y * 0.7f + 0.5f, 0.0f, 1.0f);
+            ImU32 face = lerpColor(rgb(0x000000, (int)(col >> 24)), col, light);
+            dl->AddConvexPolyFilled(q, 4, face);
+            dl->AddPolyline(q, 4, rgb(0x000000, 70), ImDrawFlags_Closed, 1.0f);
+        }
+}
+
+// The scale gizmo: three handles along the object's own axes (scale is
+// local) ending in cubes, and a centre cube for uniform scale. Dragging a
+// handle by its own screen length doubles that axis; the centre scales by
+// the drag up and to the right. Snapping rounds to 0.1, and no component
+// ever reaches zero or changes sign. One drag is one undo step.
+static void scaleGizmo(State& st, ImDrawList* dl, viewport::Ps1View& view, ImRect r, editor::Document& doc, const splash::FlatObject& fo) {
+    ImGuiContext& g = *GImGui;
+    ImGuiIO& io = ImGui::GetIO();
+    const ImGuiID gid = ImGui::GetID("##gizmo");
+    ImVec2 mn = r.Min, sz = r.GetSize();
+    State::GizmoDrag& drag = st.gizmo;
+    const bool active = g.ActiveId == gid && drag.handle >= 0;
+    if (active) ImGui::KeepAliveID(gid);
+
+    const GizmoFrame gf = gizmoFrame(view, r, fo);
+    const ImU32 axisCols[3] = {color::axisX, color::axisY, color::axisZ};
+    const splash::Vec3 eye = eyeUnity(view);
+    splash::Vec3 dirs[3];
+    for (int i = 0; i < 3; ++i) dirs[i] = splash::normalized(splash::rotate(fo.worldRotation, kAxis[i]));
+    const splash::Vec3 cur = fo.object->transform.scale;
+    // While dragging, the handles stretch with the scale so the change reads.
+    float stretch[4] = {1, 1, 1, 1};
+    if (active)
+        for (int i = 0; i < 3; ++i) {
+            float s0 = drag.startScale[i];
+            if (std::fabs(s0) > 1e-6f) stretch[i] = std::clamp(cur[i] / s0, 0.2f, 3.0f);
+        }
+    ImVec2 tips[3], dirS[3];
+    float tipPx[3] = {};
+    bool tipOk[3] = {};
+    if (gf.visible)
+        for (int i = 0; i < 3; ++i) {
+            ImVec2 p;
+            if (!view.project(toGl(gf.wpos + dirs[i] * gf.len), mn, sz, &p)) continue;
+            float l = length(p - gf.c);
+            if (l < 10) continue;  // pointing at the camera: too short to grab
+            tipOk[i] = true;
+            dirS[i] = (p - gf.c) * (1.0f / l);
+            tipPx[i] = l;
+            tips[i] = gf.c + dirS[i] * (l * stretch[i]);
+        }
+
+    // Hover: the centre cube first, then the nearest handle.
+    int hover = -1;
+    if (gf.visible && gizmoMayHover(active, r)) {
+        if (length(io.MousePos - gf.c) < 10) {
+            hover = 3;
+        } else {
+            float best = 7.0f;
+            for (int i = 0; i < 3; ++i) {
+                if (!tipOk[i]) continue;
+                float dist = distToSegment(io.MousePos, gf.c + dirS[i] * 10, tips[i] + dirS[i] * 7);
+                if (dist < best) best = dist, hover = i;
+            }
+        }
+    }
+    if (hover >= 0) {
+        ImGui::SetHoveredID(gid);
+        if (ImGui::IsMouseClicked(0)) {
+            drag.handle = hover;
+            drag.tool = 3;
+            drag.startMouse = io.MousePos;
+            drag.startScale = cur;
+            drag.axisDir = hover < 3 ? dirS[hover] : ImVec2(0.70710678f, -0.70710678f);
+            drag.handlePx = hover < 3 ? tipPx[hover] : 76.0f;
+            drag.shown = hover < 3 ? cur[hover] : 1.0f;
+            ImGui::SetActiveID(gid, g.CurrentWindow);
+            doc.endMerge();  // a new drag never merges into an earlier edit
+        }
+    }
+
+    // Drag.
+    if (g.ActiveId == gid && drag.handle >= 0) {
+        if (ImGui::IsMouseDown(0)) {
+            ImVec2 m = io.MousePos - drag.startMouse;
+            float factor = 1 + (m.x * drag.axisDir.x + m.y * drag.axisDir.y) / drag.handlePx;
+            const bool snap = st.snap || io.KeyCtrl;
+            splash::Vec3 ns = drag.startScale;
+            if (drag.handle < 3) {
+                component(ns, drag.handle) = editor::scaleAxis(drag.startScale[drag.handle], factor, snap);
+                drag.shown = ns[drag.handle];
+            } else {
+                ns = editor::scaleUniform(drag.startScale, factor, snap);
+                drag.shown = 1;
+                for (int i = 0; i < 3; ++i)
+                    if (std::fabs(drag.startScale[i]) > 1e-6f) {
+                        drag.shown = ns[i] / drag.startScale[i];
+                        break;
+                    }
+            }
+            if (doc.selection() && !(ns == cur))
+                doc.edit(*doc.selection(), [&](splash::Object& ob) { ob.transform.scale = ns; }, "gizmo.scale");
+            ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
+        } else {
+            doc.endMerge();
+            ImGui::ClearActiveID();
+            drag.handle = -1;
+        }
+    }
+
+    if (!gf.visible) return;
+    // Draw far handles first so near ones overlap them; the centre cube last.
+    const bool dragging = g.ActiveId == gid && drag.handle >= 0;
+    const int lit = dragging ? drag.handle : hover;
+    float t[4];
+    for (int i = 0; i < 4; ++i) t[i] = anim(gid + 1 + (ImGuiID)i, lit == i);
+    int order[3] = {0, 1, 2};
+    float dist[3];
+    for (int i = 0; i < 3; ++i) dist[i] = splash::sqrMagnitude(gf.wpos + dirs[i] * gf.len - eye);
+    std::sort(order, order + 3, [&](int a, int b) { return dist[a] > dist[b]; });
+    const float cube = gf.len * 0.075f;
+    for (int i : order) {
+        if (!tipOk[i]) continue;
+        ImU32 col = lerpColor(axisCols[i], rgb(0xffffff), 0.35f * t[i]);
+        if (dragging && drag.handle < 3 && i != drag.handle) col = (col & 0x00ffffff) | 0x60000000;
+        float wdt = 2.5f + 1.5f * t[i];
+        ImVec2 a = gf.c + dirS[i] * 10, b = tips[i] - dirS[i] * 5;
+        if (length(b - gf.c) > 10) {
+            dl->AddLine(a, b, rgb(0x000000, 90), wdt + 2);
+            dl->AddLine(a, b, col, wdt);
+        }
+        splash::Vec3 at = gf.wpos + dirs[i] * (gf.len * stretch[i]);
+        gizmoCube(dl, view, r, at, dirs, cube * (1 + 0.25f * t[i]), col, eye);
+    }
+    gizmoCube(dl, view, r, gf.wpos, dirs, cube * (1.15f + 0.25f * t[3]), lerpColor(rgb(0xd8dbe2), rgb(0xffffff), t[3]), eye);
+    if (dragging) {
+        static const char* tags[3] = {"X", "Y", "Z"};
+        char v[32];
+        if (drag.handle < 3) {
+            std::snprintf(v, sizeof v, "%.2f", (double)drag.shown);
+            gizmoLabel(dl, r, gf.c, io.MousePos, tags[drag.handle], axisCols[drag.handle], v);
+        } else {
+            std::snprintf(v, sizeof v, "\xc3\x97%.2f", (double)drag.shown);
+            gizmoLabel(dl, r, gf.c, io.MousePos, "XYZ", color::text, v);
+        }
+    }
 }
 
 // Local-space bounds of a mesh, loaded and cached by project path. Empty when
@@ -659,7 +1066,14 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
     dl->AddRectFilled(chip.Min, chip.Max, rgb(0x0e1014, 190), radius::pill);
     textCentered(dl, chip, f.regular, type::caption, color::textDim, info);
 
-    // Selection outline and move gizmo follow the selected object.
+    // A tool switch (W/E/R) mid-drag ends the drag; what it did so far stays as one undo step.
+    if (st.gizmo.handle >= 0 && st.gizmo.tool != st.tool) {
+        doc.endMerge();
+        if (GImGui->ActiveId == ImGui::GetID("##gizmo")) ImGui::ClearActiveID();
+        st.gizmo.handle = -1;
+    }
+
+    // Selection outline and the tool's gizmo follow the selected object.
     if (sel) {
         for (const splash::FlatObject& fo : flats)
             if (fo.object == sel) {
@@ -668,12 +1082,14 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
                 selectedBoxGl(doc, fo, &lo, &hi);
                 selectionOutline(dl, view, mn, sz, lo, hi);
                 dl->ChannelsSetCurrent(kGizmo);
-                if (st.tool == 1) {
+                if (st.tool >= 1 && st.tool <= 3) {
                     const splash::Object* par = doc.parent(*doc.selection());
                     const splash::Mat34* parentToWorld = nullptr;
                     for (const splash::FlatObject& pf : flats)
                         if (par && pf.object == par) parentToWorld = &pf.localToWorld;
-                    moveGizmo(st, dl, view, r, doc, fo, parentToWorld);
+                    if (st.tool == 1) moveGizmo(st, dl, view, r, doc, fo, parentToWorld);
+                    if (st.tool == 2) rotateGizmo(st, dl, view, r, doc, fo, parentToWorld);
+                    if (st.tool == 3) scaleGizmo(st, dl, view, r, doc, fo);
                 }
                 break;
             }

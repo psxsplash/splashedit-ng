@@ -22,7 +22,9 @@ struct State {
     int viewMode = 0;    // 0 PS1, 1 clean
     bool maximized = false;
     std::string saveError;  // last Ctrl+S failure, shown in the status bar; empty after a good save
-    bool snap = true;       // grid snapping for the move gizmo (Ctrl snaps while it is off)
+    // Gizmo snapping: move to 0.25 m, rotate to 15 degrees, scale to 0.1.
+    // Ctrl snaps while it is off.
+    bool snap = true;
 
     // F2 rename in the tree: the object's path, and whether the editor still has to open.
     bool renaming = false;
@@ -34,13 +36,28 @@ struct State {
     int vpButton = -1;
     bool vpDragged = false;
 
-    // Move gizmo drag in progress: handle 0..2 = X/Y/Z arrow, 3 = XZ plane, -1 = none.
+    // Gizmo drag in progress, for the tool in `tool`. Move: handle 0..2 =
+    // X/Y/Z arrow, 3 = XZ plane. Rotate: 0..2 = X/Y/Z ring. Scale: 0..2 =
+    // X/Y/Z handle, 3 = uniform centre. -1 = none.
     struct GizmoDrag {
         int handle = -1;
+        int tool = -1;
         ImVec2 startMouse;
         splash::Vec3 startWorld, startLocal, startHit;
-        ImVec2 axisDir;     // unit screen direction of the dragged arrow
-        float pxPerUnit = 1;  // screen pixels per world metre along it, at the object's depth
+        ImVec2 axisDir;     // unit screen direction of the dragged arrow / scale handle
+        float pxPerUnit = 1;  // move: screen pixels per world metre along it, at the object's depth
+        // Rotate: the local rotation before the drag, the axis in parent
+        // space, the last mouse angle around the centre, the summed angle,
+        // and +-1 for which way a screen-angle increase turns the object.
+        splash::Quat startRot;
+        splash::Vec3 parentAxis;
+        splash::Vec3 ringStart;  // world unit vector from the centre to where the ring was grabbed
+        float lastAngle = 0, accum = 0, sign = 1;
+        // Scale: the local scale before the drag and the handle's screen
+        // length, the pixels that double the scale.
+        splash::Vec3 startScale;
+        float handlePx = 1;
+        float shown = 0;  // the value the drag label shows (degrees or factor)
     } gizmo;
 };
 
