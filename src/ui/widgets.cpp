@@ -180,7 +180,7 @@ void searchField(const char* id, ImRect r, const char* placeholder, const char* 
     }
 }
 
-void treeRow(const char* id, ImRect r, const TreeRow& row) {
+Hit treeRow(const char* id, ImRect r, const TreeRow& row) {
     Fonts& f = fonts();
     Hit h = interact(id, r);
     ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -221,6 +221,7 @@ void treeRow(const char* id, ImRect r, const TreeRow& row) {
         text(dl, ImVec2(right - s.x, centerY(f.regular, type::caption, r.Min.y, r.Max.y)), f.regular, type::caption,
              color::textFaint, row.meta);
     }
+    return h;
 }
 
 bool section(const char* id, ImRect r, const char* ic, ImU32 iconColor, const char* title, bool open, bool enabled,

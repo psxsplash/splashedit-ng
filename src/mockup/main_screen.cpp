@@ -1,7 +1,14 @@
 #include "mockup/main_screen.h"
 
+#include <array>
+#include <cfloat>
 #include <cmath>
+#include <cstdio>
+#include <cstring>
+#include <filesystem>
+#include <string>
 
+#include "editor/document.hh"
 #include "ui/icons.h"
 #include "ui/widgets.h"
 #include "viewport/ps1view.h"
@@ -56,7 +63,7 @@ static void windowControls(ImDrawList* dl, ImRect bar) {
     }
 }
 
-static ImRect titleBar(State& st, ImDrawList* dl, ImVec2 size) {
+static ImRect titleBar(State& st, ImDrawList* dl, ImVec2 size, const editor::Document& doc) {
     Fonts& f = fonts();
     ImRect bar(ImVec2(0, 0), ImVec2(size.x, size::titleBar));
     dl->AddRectFilled(bar.Min, bar.Max, color::chrome);
@@ -88,8 +95,9 @@ static ImRect titleBar(State& st, ImDrawList* dl, ImVec2 size) {
     x += measure(f.regular, type::body, "Courtyard Demo").x + space::sm;
     text(dl, ImVec2(x, ty), f.regular, type::body, color::textFaint, "/");
     x += 12;
-    text(dl, ImVec2(x, ty), f.medium, type::body, color::text, "courtyard");
-    x += measure(f.medium, type::body, "courtyard").x + space::sm;
+    const char* stem = doc.sceneStem().c_str();
+    text(dl, ImVec2(x, ty), f.medium, type::body, color::text, stem);
+    x += measure(f.medium, type::body, stem).x + space::sm;
     dl->AddCircleFilled(ImVec2(x + 3, bar.GetCenter().y + 1), 3, color::textFaint, 12);
 
     // The three actions a user takes every minute, centred.
@@ -119,9 +127,73 @@ static ImRect titleBar(State& st, ImDrawList* dl, ImVec2 size) {
     return bar;
 }
 
-static void sceneTree(ImDrawList* dl, ImRect r) {
+// Icon and colour for an object, by what it carries.
+struct ObjectLook {
+    const char* icon;
+    ImU32 color;
+};
+static ObjectLook lookOf(const splash::Object& o, bool expanded) {
+    if (o.light) return {icon::lightbulb, kind::light};
+    if (o.mesh) return {icon::box, kind::mesh};
+    if (o.script && !o.collider) return {icon::script, kind::script};
+    if (!o.children.empty() && !o.collider) return {expanded ? icon::folderOpen : icon::folder, kind::folder};
+    return {icon::box, color::textDim};
+}
+
+static std::string fileName(const std::string& projectPath) {
+    return std::filesystem::path(projectPath).filename().string();
+}
+
+struct TreeCtx {
+    editor::Document& doc;
+    ImRect panel;
+    float y;
+};
+
+// Clicks left of the chevron's right edge toggle; anywhere else selects.
+static bool chevronClicked(ImRect rr, int depth) {
+    return ImGui::GetIO().MousePos.x < rr.Min.x + space::xs + depth * 16.0f + 16;
+}
+
+static void treeObjects(TreeCtx& c, const std::vector<splash::Object>& objs, editor::ObjectPath& path) {
+    for (size_t i = 0; i < objs.size(); ++i) {
+        const splash::Object& o = objs[i];
+        path.push_back(static_cast<int>(i));
+        bool open = c.doc.expanded(path);
+        ObjectLook look = lookOf(o, open);
+        std::string meta;
+        if (o.mesh)
+            if (const editor::MeshInfo* mi = c.doc.mesh(o.mesh->mesh); mi && mi->status == editor::AssetStatus::Ok)
+                meta = std::to_string(mi->triangles) + " tris";
+        TreeRow row;
+        row.depth = static_cast<int>(path.size());
+        row.icon = look.icon;
+        row.iconColor = look.color;
+        row.label = o.name.c_str();
+        row.meta = meta.empty() ? nullptr : meta.c_str();
+        row.hasChildren = !o.children.empty();
+        row.expanded = open;
+        row.selected = c.doc.selection() && *c.doc.selection() == path;
+        row.warning = c.doc.hasWarning(o);
+        row.hidden = !o.active;
+        ImRect rr(ImVec2(c.panel.Min.x + space::xs + 2, c.y), ImVec2(c.panel.Max.x - space::xs - 2, c.y + size::row));
+        ImGui::PushID(static_cast<int>(i));
+        Hit h = treeRow("row", rr, row);
+        if (h.clicked) {
+            if (row.hasChildren && chevronClicked(rr, row.depth)) c.doc.toggleExpanded(path);
+            else c.doc.select(path);
+        }
+        c.y += size::row;
+        if (row.hasChildren && open) treeObjects(c, o.children, path);
+        ImGui::PopID();
+        path.pop_back();
+    }
+}
+
+static void sceneTree(ImDrawList* dl, ImRect r, editor::Document& doc) {
     panel(dl, r);
-    float y = panelHeader(dl, r, "Scene", "14 objects");
+    std::string count = std::to_string(doc.objectCount()) + (doc.objectCount() == 1 ? " object" : " objects");
+    float y = panelHeader(dl, r, "Scene", count.c_str());
     iconButton("addobj", ImRect(ImVec2(r.Max.x - 62, r.Min.y + 5), ImVec2(r.Max.x - 36, r.Min.y + 29)), icon::plus, false,
                "Add object (Ctrl+A)");
     iconButton("treemenu", ImRect(ImVec2(r.Max.x - 32, r.Min.y + 5), ImVec2(r.Max.x - 6, r.Min.y + 29)), icon::ellipsis);
@@ -129,38 +201,26 @@ static void sceneTree(ImDrawList* dl, ImRect r) {
                 "Ctrl F");
     y += 28 + space::sm;
 
-    TreeRow rows[] = {
-        {0, icon::layers, color::accentHover, "courtyard", nullptr, true, true},
-        {1, icon::folderOpen, kind::folder, "Environment", nullptr, true, true},
-        {2, icon::box, kind::mesh, "Floor", "308 tris"},
-        {2, icon::box, kind::mesh, "Back Wall", "126 tris"},
-        {2, icon::box, kind::mesh, "Side Wall", "99 tris"},
-        {2, icon::box, kind::mesh, "Pillar", "90 tris"},
-        {2, icon::box, kind::mesh, "Pillar (2)", "90 tris"},
-        {2, icon::box, kind::mesh, "Platform", "84 tris"},
-        {1, icon::folderOpen, kind::folder, "Crates", nullptr, true, true},
-        {2, icon::box, kind::mesh, "Crate", "12 tris", false, false, true, true},
-        {2, icon::box, kind::mesh, "Crate (2)", "12 tris"},
-        {2, icon::box, kind::mesh, "Crate (3)", "12 tris"},
-        {1, icon::gamepad, kind::player, "Player Start"},
-        {1, icon::camera, kind::camera, "Main Camera"},
-        {1, icon::lightbulb, kind::light, "Torch Light"},
-        {1, icon::volume, kind::audio, "Ambience", nullptr, false, false, false, false, true},
-        {1, icon::script, kind::script, "Game Logic"},
-    };
-    int i = 0;
-    for (const TreeRow& row : rows) {
-        ImRect rr(ImVec2(r.Min.x + space::xs + 2, y), ImVec2(r.Max.x - space::xs - 2, y + size::row));
-        ImGui::PushID(i++);
-        treeRow("row", rr, row);
-        ImGui::PopID();
-        y += size::row;
-    }
-
-    // Footer: the project's asset folder, collapsed.
     ImRect foot(ImVec2(r.Min.x, r.Max.y - 40), r.Max);
+    ImGui::PushClipRect(ImVec2(r.Min.x, y), ImVec2(r.Max.x, foot.Min.y), true);
+    const editor::ObjectPath root;
+    bool rootOpen = doc.expanded(root);
+    TreeRow top{0, icon::layers, color::accentHover, doc.sceneStem().c_str(), nullptr, !doc.scene().objects.empty(), rootOpen};
+    ImRect rr(ImVec2(r.Min.x + space::xs + 2, y), ImVec2(r.Max.x - space::xs - 2, y + size::row));
+    Hit h = treeRow("root", rr, top);
+    if (h.clicked) {
+        if (top.hasChildren && chevronClicked(rr, 0)) doc.toggleExpanded(root);
+        else doc.select(std::nullopt);
+    }
+    TreeCtx ctx{doc, r, y + size::row};
+    editor::ObjectPath path;
+    if (rootOpen) treeObjects(ctx, doc.scene().objects, path);
+    ImGui::PopClipRect();
+
+    // Footer: the project's folder, collapsed.
     dl->AddLine(ImVec2(foot.Min.x + 1, foot.Min.y), ImVec2(foot.Max.x - 1, foot.Min.y), color::border);
-    TreeRow assets{0, icon::folder, kind::folder, "Assets", "23 files", true, false};
+    std::string files = std::to_string(doc.projectFileCount()) + (doc.projectFileCount() == 1 ? " file" : " files");
+    TreeRow assets{0, icon::folder, kind::folder, "Assets", files.c_str(), true, false};
     treeRow("assets", ImRect(ImVec2(foot.Min.x + 6, foot.Min.y + 7), ImVec2(foot.Max.x - 6, foot.Max.y - 7)), assets);
 }
 
@@ -289,21 +349,144 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, viewport::Ps1View
     textCentered(dl, chip, f.regular, type::caption, color::textDim, info);
 }
 
-static void inspector(ImDrawList* dl, ImRect r) {
+// Fixed two decimals, as position and scale read in a column ("0.50").
+static std::string fmtFixed(float v) {
+    char b[32];
+    std::snprintf(b, sizeof b, "%.2f", static_cast<double>(v));
+    std::string s = b;
+    if (s == "-0.00") s = "0.00";
+    return s;
+}
+
+// Up to two decimals with trailing zeros dropped ("15", "12.5", "0.75").
+static std::string fmtShort(float v) {
+    std::string s = fmtFixed(v);
+    s.erase(s.find_last_not_of('0') + 1);
+    if (s.back() == '.') s.pop_back();
+    if (s == "-0") s = "0";
+    return s;
+}
+
+static std::string fmtKB(int bytes) { return fmtShort(static_cast<float>(bytes) / 1024.0f) + " KB"; }
+
+// Unity's Euler order (Z, then X, then Y), in degrees within -180..180.
+static splash::Vec3 eulerDegrees(splash::Quat q) {
+    const double kDeg = 57.29577951308232;
+    double x = q.x, y = q.y, z = q.z, w = q.w;
+    double sx = 2 * (w * x - y * z);
+    double ex, ey, ez;
+    if (std::fabs(sx) > 0.99999) {
+        ex = std::copysign(90.0, sx);
+        ey = std::atan2(-2 * (x * z - w * y), 1 - 2 * (y * y + z * z)) * kDeg;
+        ez = 0;
+    } else {
+        ex = std::asin(sx) * kDeg;
+        ey = std::atan2(2 * (x * z + w * y), 1 - 2 * (x * x + y * y)) * kDeg;
+        ez = std::atan2(2 * (x * y + w * z), 1 - 2 * (x * x + z * z)) * kDeg;
+    }
+    return {static_cast<float>(ex), static_cast<float>(ey), static_cast<float>(ez)};
+}
+
+static ImU32 toColor(const std::array<float, 3>& c) {
+    auto u = [](float v) { return static_cast<int>(splash::clampv(v, 0.0f, 1.0f) * 255.0f + 0.5f); };
+    return IM_COL32(u(c[0]), u(c[1]), u(c[2]), 255);
+}
+
+static std::string toHex(const std::array<float, 3>& c) {
+    auto u = [](float v) { return static_cast<unsigned>(splash::clampv(v, 0.0f, 1.0f) * 255.0f + 0.5f); };
+    char b[16];
+    std::snprintf(b, sizeof b, "#%02X%02X%02X", u(c[0]), u(c[1]), u(c[2]));
+    return b;
+}
+
+static const char* bppLabel(splash::BitDepth d) {
+    switch (d) {
+        case splash::BitDepth::Bpp4: return "4 bpp";
+        case splash::BitDepth::Bpp8: return "8 bpp";
+        case splash::BitDepth::Bpp16: return "16 bpp";
+    }
+    return "";
+}
+
+static const char* lightingLabel(splash::VertexColorMode m) {
+    switch (m) {
+        case splash::VertexColorMode::Baked: return "Baked vertex";
+        case splash::VertexColorMode::Flat: return "Flat";
+        case splash::VertexColorMode::Mesh: return "Mesh colours";
+    }
+    return "";
+}
+
+static const char* colliderLabel(splash::ColliderKind k) {
+    switch (k) {
+        case splash::ColliderKind::Static: return "Static";
+        case splash::ColliderKind::Dynamic: return "Dynamic";
+        case splash::ColliderKind::None: return "None";
+    }
+    return "";
+}
+
+static const char* lightKindLabel(splash::LightKind k) {
+    switch (k) {
+        case splash::LightKind::Point: return "Point";
+        case splash::LightKind::Spot: return "Spot";
+        case splash::LightKind::Directional: return "Directional";
+    }
+    return "";
+}
+
+static void emptyInspector(ImDrawList* dl, ImRect body) {
+    Fonts& f = fonts();
+    const char* title = "Nothing selected";
+    const char* hint = "Pick an object in the Scene panel to see and edit its properties.";
+    float wrap = body.GetWidth() - space::xl * 2;
+    ImVec2 ts = measure(f.semibold, type::body, title);
+    float cy = body.Min.y + body.GetHeight() * 0.38f;
+    textCentered(dl, ImRect(ImVec2(body.Min.x, cy - 44), ImVec2(body.Max.x, cy - 20)), f.medium, type::icon + 9, color::textFaint,
+                 icon::pointer);
+    text(dl, ImVec2(body.GetCenter().x - ts.x * 0.5f, cy), f.semibold, type::body, color::textDim, title);
+    // Centre each wrapped line of the hint.
+    float y = cy + ts.y + space::xs;
+    const char* s = hint;
+    const char* end = hint + std::strlen(hint);
+    while (s < end) {
+        const char* e = f.regular->CalcWordWrapPosition(type::label, s, end, wrap);
+        if (e == s) e = s + 1;
+        std::string line(s, e);
+        while (!line.empty() && line.back() == ' ') line.pop_back();
+        ImVec2 ls = measure(f.regular, type::label, line.c_str());
+        text(dl, ImVec2(body.GetCenter().x - ls.x * 0.5f, y), f.regular, type::label, color::textFaint, line.c_str());
+        y += ls.y;
+        s = e;
+        while (s < end && *s == ' ') ++s;
+    }
+}
+
+static void inspector(ImDrawList* dl, ImRect r, editor::Document& doc) {
     Fonts& f = fonts();
     panel(dl, r);
     float y = panelHeader(dl, r, "Inspector", nullptr);
     iconButton("lockinsp", ImRect(ImVec2(r.Max.x - 32, r.Min.y + 5), ImVec2(r.Max.x - 6, r.Min.y + 29)), icon::lock, false,
                "Keep showing this object");
 
+    const splash::Object* o = doc.selected();
+    if (!o) {
+        emptyInspector(dl, ImRect(ImVec2(r.Min.x, y), r.Max));
+        return;
+    }
+    ImGui::PushClipRect(ImVec2(r.Min.x, y), ImVec2(r.Max.x, r.Max.y - 1), true);
+
     float x0 = r.Min.x + space::md, x1 = r.Max.x - space::md;
     // Object header.
+    ObjectLook look = lookOf(*o, true);
+    const splash::Object* parent = doc.parent(*doc.selection());
+    std::string where = "in " + (parent ? parent->name : doc.sceneStem());
     ImRect ic(ImVec2(x0, y), ImVec2(x0 + 40, y + 40));
-    dl->AddRectFilled(ic.Min, ic.Max, rgb(0x7aa7ff, 34), radius::card);
-    textCentered(dl, ic, f.medium, type::icon + 3, kind::mesh, icon::box);
-    text(dl, ImVec2(ic.Max.x + space::md, y + 2), f.semibold, type::title, color::text, "Crate");
-    text(dl, ImVec2(ic.Max.x + space::md, y + 22), f.regular, type::caption, color::textFaint, "in Crates  ·  static");
-    toggle("objactive", ImRect(ImVec2(x1 - 30, y + 12), ImVec2(x1, y + 28)), true);
+    dl->AddRectFilled(ic.Min, ic.Max, (look.color & 0x00ffffffu) | (34u << IM_COL32_A_SHIFT), radius::card);
+    textCentered(dl, ic, f.medium, type::icon + 3, look.color, look.icon);
+    text(dl, ImVec2(ic.Max.x + space::md, y + 2), f.semibold, type::title, color::text, o->name.c_str());
+    text(dl, ImVec2(ic.Max.x + space::md, y + 22), f.regular, type::caption, color::textFaint, where.c_str());
+    toggle("objactive", ImRect(ImVec2(x1 - 30, y + 12), ImVec2(x1, y + 28)), o->active);
     y += 40 + space::lg;
 
     const float lw = 96, rowH = 32;
@@ -316,45 +499,111 @@ static void inspector(ImDrawList* dl, ImRect r) {
         dl->AddRect(ImVec2(x0, top), ImVec2(x1, y + space::sm), rgb(0xffffff, 10), radius::card);
         y += space::sm + space::md;
     };
+    auto card = [&](const char* id, const char* title, const std::string& body, const char* fix) {
+        float h = problemCard(id, ImVec2(x0 + space::sm, y + space::xs), x1 - x0 - space::sm * 2, title, body.c_str(), fix);
+        y += h + space::sm;
+    };
+    // Card for a referenced file that is missing or could not be read.
+    auto fileCard = [&](const char* id, editor::AssetStatus st, const std::string& path, const std::string& error) {
+        if (st == editor::AssetStatus::Ok) return;
+        if (st == editor::AssetStatus::Missing) card(id, "File not found", path.empty() ? "No file is set." : path, "Locate file");
+        else card(id, "File could not be read", error, "Locate file");
+    };
 
     // Transform.
+    const splash::Transform& t = o->transform;
+    splash::Vec3 e = eulerDegrees(t.rotation);
     float top = y;
     section("s_transform", ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), icon::move, color::textDim, "Transform", true, true, false);
     y += 34 + space::xs;
-    vec3Field("pos", row("lpos", "Position", "Where the object sits, in metres."), "0.00", "0.50", "-1.00");
-    vec3Field("rot", row("lrot", "Rotation", "Rotation around each axis, in degrees."), "0", "15", "0");
-    vec3Field("scl", row("lscl", "Scale", "Size multiplier on each axis."), "1.00", "1.00", "1.00");
+    vec3Field("pos", row("lpos", "Position", "Where the object sits, in metres, relative to its parent."),
+              fmtFixed(t.position.x).c_str(), fmtFixed(t.position.y).c_str(), fmtFixed(t.position.z).c_str());
+    vec3Field("rot", row("lrot", "Rotation", "Rotation around each axis, in degrees."), fmtShort(e.x).c_str(), fmtShort(e.y).c_str(),
+              fmtShort(e.z).c_str());
+    vec3Field("scl", row("lscl", "Scale", "Size multiplier on each axis."), fmtFixed(t.scale.x).c_str(), fmtFixed(t.scale.y).c_str(),
+              fmtFixed(t.scale.z).c_str());
     sectionEnd(top);
 
     // Mesh.
-    top = y;
-    section("s_mesh", ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), icon::box, kind::mesh, "Mesh", true);
-    y += 34 + space::xs;
-    assetField("model", row("lmodel", "Model", "The 3D model to draw. Drop a .glb, .gltf, .obj or .fbx here."), icon::box, kind::mesh,
-               "crate.glb", "12 tris");
-    assetField("texture", row("ltex", "Texture", "Image painted on the model. Converted to PS1 colours on export."), icon::grid,
-               color::warn, "crate_wood.png", "64 x 64  ·  8 bpp");
-    {
-        float h = problemCard("fix4bpp", ImVec2(x0 + space::sm, y + space::xs), x1 - x0 - space::sm * 2, "Texture could be 4 bpp",
-                              "crate_wood.png has 38 colours and takes 4 KB of VRAM. Reduced to 16 colours at 4 bpp it takes 2 KB.",
-                              "Convert to 4 bpp");
-        y += h + space::sm;
+    if (o->mesh) {
+        const splash::MeshComponent& m = *o->mesh;
+        const editor::MeshInfo* mi = doc.mesh(m.mesh);
+        editor::AssetStatus meshSt = mi ? mi->status : editor::AssetStatus::Missing;
+        std::string tris = meshSt == editor::AssetStatus::Ok ? std::to_string(mi->triangles) + " tris" : std::string();
+        std::string modelName = m.mesh.empty() ? std::string("None") : fileName(m.mesh);
+
+        const std::string texPath = m.materials.empty() ? std::string() : m.materials[0].texture;
+        const editor::TextureInfo* ti = texPath.empty() ? nullptr : doc.texture(texPath);
+        editor::AssetStatus texSt = ti ? ti->status : editor::AssetStatus::Ok;
+        bool to4 = doc.couldBe4bpp(m);
+        std::string texName = texPath.empty() ? std::string("None") : fileName(texPath);
+        std::string texMeta = bppLabel(m.bitDepth);
+        if (ti && ti->status == editor::AssetStatus::Ok)
+            texMeta = std::to_string(ti->width) + " x " + std::to_string(ti->height) + "  \xc2\xb7  " + texMeta;
+
+        top = y;
+        section("s_mesh", ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), icon::box, kind::mesh, "Mesh", true);
+        y += 34 + space::xs;
+        assetField("model", row("lmodel", "Model", "The 3D model to draw. Drop a .glb, .gltf, .obj or .fbx here."), icon::box,
+                   meshSt == editor::AssetStatus::Ok ? kind::mesh : color::warn, modelName.c_str(),
+                   tris.empty() ? nullptr : tris.c_str());
+        fileCard("fixmesh", meshSt, m.mesh, mi ? mi->error : std::string());
+        assetField("texture", row("ltex", "Texture", "Image painted on the model. Converted to PS1 colours on export."), icon::grid,
+                   texSt != editor::AssetStatus::Ok || to4 ? color::warn : color::textDim, texName.c_str(), texMeta.c_str());
+        fileCard("fixtex", texSt, texPath, ti ? ti->error : std::string());
+        if (to4) {
+            int cur = m.bitDepth == splash::BitDepth::Bpp8 ? ti->vramBytes8 : ti->vramBytes16;
+            std::string body = texName + " has " + std::to_string(ti->colors15) + (ti->colors15 == 1 ? " colour" : " colours") +
+                               " and takes " + fmtKB(cur) + " of VRAM. At 4 bpp it keeps every colour and takes " +
+                               fmtKB(ti->vramBytes4) + ".";
+            card("fix4bpp", "Texture could be 4 bpp", body, "Convert to 4 bpp");
+        }
+        dropdown("lighting", row("llight", "Lighting", "How light reaches this mesh. Baked vertex lighting costs nothing at runtime."),
+                 icon::sun, lightingLabel(m.vertexColors));
+        sectionEnd(top);
     }
-    dropdown("lighting", row("llight", "Lighting", "How light reaches this mesh. Baked vertex lighting costs nothing at runtime."),
-             icon::sun, "Baked vertex");
-    {
-        ImRect v = row("ldbl", "Double-sided", "Draw the back faces too. Doubles this mesh's triangle cost.");
-        toggle("dbl", ImRect(ImVec2(v.Min.x, v.Min.y + 4), ImVec2(v.Min.x + 30, v.Max.y - 4)), false);
-    }
-    sectionEnd(top);
 
     // Collider.
-    top = y;
-    section("s_col", ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), icon::square, rgb(0x46c98a), "Collider", true);
-    y += 34 + space::xs;
-    dropdown("shape", row("lshape", "Shape", "Box is cheapest. Mesh follows the model exactly."), nullptr, "Box");
-    slider("bounce", row("lbounce", "Push force", "How hard the player is pushed back on contact."), 0.35f, "0.35");
-    sectionEnd(top);
+    if (o->collider) {
+        top = y;
+        section("s_col", ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), icon::square, rgb(0x46c98a), "Collider", true);
+        y += 34 + space::xs;
+        dropdown("shape", row("lshape", "Shape", "Static never moves. Dynamic can be moved by scripts. None turns collision off."),
+                 nullptr, colliderLabel(o->collider->kind));
+        sectionEnd(top);
+    }
+
+    // Light.
+    if (o->light) {
+        const splash::LightComponent& l = *o->light;
+        top = y;
+        section("s_light", ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), icon::lightbulb, kind::light, "Light", true, l.enabled);
+        y += 34 + space::xs;
+        dropdown("lkind", row("llkind", "Type", "Point shines in every direction, spot in a cone, directional from far away."),
+                 nullptr, lightKindLabel(l.kind));
+        colorField("lcol", row("llcol", "Colour", "The colour of the light."), toColor(l.color), toHex(l.color).c_str());
+        numberField("lint", row("llint", "Intensity", "How bright the light is. 1 is normal."), fmtShort(l.intensity).c_str());
+        if (l.kind != splash::LightKind::Directional)
+            numberField("lrange", row("llrange", "Range", "How far the light reaches before it fades out."), fmtShort(l.range).c_str(),
+                        "m");
+        if (l.kind == splash::LightKind::Spot)
+            numberField("lspot", row("llspot", "Spot angle", "Width of the cone of light."), fmtShort(l.spotAngle).c_str(),
+                        "\xc2\xb0");
+        sectionEnd(top);
+    }
+
+    // Script.
+    if (o->script) {
+        const std::string& lua = o->script->lua;
+        top = y;
+        section("s_script", ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), icon::script, kind::script, "Script", true);
+        y += 34 + space::xs;
+        bool found = doc.fileExists(lua);
+        assetField("lua", row("llua", "File", "The Lua file that runs for this object."), icon::fileCode,
+                   found ? kind::script : color::warn, lua.empty() ? "None" : fileName(lua).c_str(), nullptr);
+        fileCard("fixlua", found ? editor::AssetStatus::Ok : editor::AssetStatus::Missing, lua, std::string());
+        sectionEnd(top);
+    }
 
     // Add component.
     ImRect add(ImVec2(x0, y), ImVec2(x1, y + 34));
@@ -366,6 +615,7 @@ static void inspector(ImDrawList* dl, ImRect r) {
     float lx = add.GetCenter().x - lwid * 0.5f;
     text(dl, ImVec2(lx, add.Min.y + 8), f.medium, type::icon, color::textDim, icon::plus);
     text(dl, ImVec2(lx + 22, add.Min.y + 8), f.medium, type::body, color::textDim, lbl);
+    ImGui::PopClipRect();
 }
 
 static void statusBar(ImDrawList* dl, ImVec2 size) {
@@ -396,7 +646,7 @@ static void statusBar(ImDrawList* dl, ImVec2 size) {
     text(dl, ImVec2(pr.Min.x + 26, bar.Min.y + (size::statusBar - ps.y) * 0.5f), f.medium, type::caption, color::warn, prob);
 }
 
-ImRect drawMainScreen(State& st, viewport::Ps1View& view, ImVec2 size) {
+ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view, ImVec2 size) {
     ImGui::SetNextWindowPos(ImVec2(0, 0));
     ImGui::SetNextWindowSize(size);
     ImGui::Begin("##main", nullptr,
@@ -405,15 +655,15 @@ ImRect drawMainScreen(State& st, viewport::Ps1View& view, ImVec2 size) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
     dl->AddRectFilled(ImVec2(0, 0), size, color::base);
 
-    ImRect bar = titleBar(st, dl, size);
+    ImRect bar = titleBar(st, dl, size, doc);
     float top = size::titleBar + size::gutter, bottom = size.y - size::statusBar - size::gutter;
     float g = size::gutter;
     ImRect left(ImVec2(g, top), ImVec2(g + 272, bottom));
     ImRect right(ImVec2(size.x - g - 352, top), ImVec2(size.x - g, bottom));
     ImRect mid(ImVec2(left.Max.x + g, top), ImVec2(right.Min.x - g, bottom));
-    sceneTree(dl, left);
+    sceneTree(dl, left, doc);
     viewportPanel(st, dl, mid, view);
-    inspector(dl, right);
+    inspector(dl, right, doc);
     statusBar(dl, size);
     ImGui::End();
     return bar;

@@ -23,6 +23,17 @@ option(SPLASHEDIT_BUILD_EDITOR "Build the editor (needs SDL3, FreeType, OpenGL)"
 add_subdirectory(core)
 add_subdirectory(cli)
 
+# Regenerates examples/courtyard (meshes, crate texture, scene). Not built by
+# default: `cmake --build build --target make_example && ./build/make_example`.
+add_executable(make_example EXCLUDE_FROM_ALL tools/make_example.cpp)
+target_link_libraries(make_example PRIVATE splashcore)
+target_compile_definitions(make_example PRIVATE SPLASHEDIT_EXAMPLE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/examples/courtyard")
+if(MSVC)
+    target_compile_options(make_example PRIVATE /W4)
+else()
+    target_compile_options(make_example PRIVATE -Wall -Wextra)
+endif()
+
 if(NOT SPLASHEDIT_BUILD_EDITOR)
     return()
 endif()
@@ -75,11 +86,13 @@ add_executable(splashedit
     src/ui/theme.cpp
     src/ui/widgets.cpp
     src/viewport/ps1view.cpp
-    src/mockup/main_screen.cpp)
+    src/mockup/main_screen.cpp
+    src/editor/document.cpp)
 target_include_directories(splashedit PRIVATE src)
 target_include_directories(splashedit SYSTEM PRIVATE ${stb_SOURCE_DIR})
-target_link_libraries(splashedit PRIVATE imgui)
-target_compile_definitions(splashedit PRIVATE SPLASHEDIT_ASSET_DIR="${CMAKE_CURRENT_SOURCE_DIR}/assets")
+target_link_libraries(splashedit PRIVATE imgui splashcore)
+target_compile_definitions(splashedit PRIVATE SPLASHEDIT_ASSET_DIR="${CMAKE_CURRENT_SOURCE_DIR}/assets"
+    SPLASHEDIT_EXAMPLE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/examples/courtyard")
 if(WIN32)
     target_compile_definitions(splashedit PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
 endif()
