@@ -22,6 +22,10 @@ struct State {
     int viewMode = 0;    // 0 PS1, 1 clean
     bool maximized = false;
     std::string saveError;  // last Ctrl+S failure, shown in the status bar; empty after a good save
+    // Add object (+ / Ctrl+A) and Add component pickers: open next frame, and the shared search text.
+    bool openAddObject = false;
+    bool openAddComponent = false;
+    std::string pickQuery;
     // Gizmo snapping: move to 0.25 m, rotate to 15 degrees, scale to 0.1.
     // Ctrl snaps while it is off.
     bool snap = true;
