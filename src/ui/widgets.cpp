@@ -119,10 +119,14 @@ bool button(const char* id, ImVec2 pos, const char* ic, const char* label, Butto
     return h.clicked;
 }
 
-bool iconButton(const char* id, ImRect r, const char* ic, bool toggled, const char* tip, ImU32 iconColor) {
+bool iconButton(const char* id, ImRect r, const char* ic, bool toggled, const char* tip, ImU32 iconColor, bool enabled) {
     Hit h = interact(id, r);
     if (tip) tooltip(tip);
     ImDrawList* dl = ImGui::GetWindowDrawList();
+    if (!enabled) {
+        textCentered(dl, r, fonts().medium, type::icon, (color::textFaint & 0x00ffffffu) | (110u << IM_COL32_A_SHIFT), ic);
+        return false;
+    }
     if (toggled)
         dl->AddRectFilled(r.Min, r.Max, color::accentSoft, radius::button);
     else if (h.hover > 0)

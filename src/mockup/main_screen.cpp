@@ -65,7 +65,7 @@ static void windowControls(ImDrawList* dl, ImRect bar) {
     }
 }
 
-static ImRect titleBar(State& st, ImDrawList* dl, ImVec2 size, const editor::Document& doc) {
+static ImRect titleBar(State& st, ImDrawList* dl, ImVec2 size, editor::Document& doc) {
     Fonts& f = fonts();
     ImRect bar(ImVec2(0, 0), ImVec2(size.x, size::titleBar));
     dl->AddRectFilled(bar.Min, bar.Max, color::chrome);
@@ -100,7 +100,7 @@ static ImRect titleBar(State& st, ImDrawList* dl, ImVec2 size, const editor::Doc
     const char* stem = doc.sceneStem().c_str();
     text(dl, ImVec2(x, ty), f.medium, type::body, color::text, stem);
     x += measure(f.medium, type::body, stem).x + space::sm;
-    dl->AddCircleFilled(ImVec2(x + 3, bar.GetCenter().y + 1), 3, color::textFaint, 12);
+    if (doc.dirty()) dl->AddCircleFilled(ImVec2(x + 3, bar.GetCenter().y + 1), 3, color::textFaint, 12);
 
     // The three actions a user takes every minute, centred.
     float wPlay = 0, wRun = 0, wExport = 0;
@@ -122,8 +122,12 @@ static ImRect titleBar(State& st, ImDrawList* dl, ImVec2 size, const editor::Doc
 
     // Undo / redo just left of the window controls.
     float rx = size.x - 46 * 3 - space::sm;
-    iconButton("redo", ImRect(ImVec2(rx - 30, bar.Min.y + 6), ImVec2(rx, bar.Max.y - 6)), icon::redo, false, "Redo (Ctrl+Y)");
-    iconButton("undo", ImRect(ImVec2(rx - 62, bar.Min.y + 6), ImVec2(rx - 32, bar.Max.y - 6)), icon::undo, false, "Undo (Ctrl+Z)");
+    if (iconButton("redo", ImRect(ImVec2(rx - 30, bar.Min.y + 6), ImVec2(rx, bar.Max.y - 6)), icon::redo, false, "Redo (Ctrl+Y)",
+                   color::textDim, doc.canRedo()))
+        doc.redo();
+    if (iconButton("undo", ImRect(ImVec2(rx - 62, bar.Min.y + 6), ImVec2(rx - 32, bar.Max.y - 6)), icon::undo, false, "Undo (Ctrl+Z)",
+                   color::textDim, doc.canUndo()))
+        doc.undo();
     windowControls(dl, bar);
     (void)st;
     return bar;
@@ -680,7 +684,7 @@ static void inspector(ImDrawList* dl, ImRect r, editor::Document& doc) {
     ImGui::PopClipRect();
 }
 
-static void statusBar(ImDrawList* dl, ImVec2 size) {
+static void statusBar(ImDrawList* dl, ImVec2 size, const editor::Document& doc, const State& st) {
     Fonts& f = fonts();
     ImRect bar(ImVec2(0, size.y - size::statusBar), size);
     dl->AddRectFilled(bar.Min, bar.Max, color::chrome);
@@ -695,10 +699,11 @@ static void statusBar(ImDrawList* dl, ImVec2 size) {
                "Scene data, Lua and the engine in main RAM.");
 
     // Right side: problems and save state.
-    const char* saved = "All changes saved";
+    const char* saved = !st.saveError.empty() ? st.saveError.c_str() : doc.dirty() ? "Unsaved changes" : "All changes saved";
     ImVec2 s = measure(f.regular, type::caption, saved);
     float rx = size.x - space::md - s.x;
-    text(dl, ImVec2(rx, bar.Min.y + (size::statusBar - s.y) * 0.5f), f.regular, type::caption, color::textFaint, saved);
+    text(dl, ImVec2(rx, bar.Min.y + (size::statusBar - s.y) * 0.5f), f.regular, type::caption,
+         st.saveError.empty() ? color::textFaint : color::bad, saved);
     const char* prob = "1 suggestion";
     ImVec2 ps = measure(f.medium, type::caption, prob);
     ImRect pr(ImVec2(rx - space::xl - ps.x - 22, bar.Min.y + 5), ImVec2(rx - space::xl + 8, bar.Max.y - 5));
@@ -708,7 +713,24 @@ static void statusBar(ImDrawList* dl, ImVec2 size) {
     text(dl, ImVec2(pr.Min.x + 26, bar.Min.y + (size::statusBar - ps.y) * 0.5f), f.medium, type::caption, color::warn, prob);
 }
 
+// Document-wide shortcuts. Skipped while a text field has the keyboard.
+static void shortcuts(State& st, editor::Document& doc) {
+    ImGuiIO& io = ImGui::GetIO();
+    if (io.WantTextInput) return;
+    auto pressed = [](ImGuiKey k) { return ImGui::IsKeyPressed(k, false); };
+    auto repeat = [](ImGuiKey k) { return ImGui::IsKeyPressed(k, true); };
+    const bool ctrl = io.KeyCtrl, shift = io.KeyShift;
+    if (ctrl && !shift && repeat(ImGuiKey_Z)) doc.undo();
+    if (ctrl && ((shift && repeat(ImGuiKey_Z)) || repeat(ImGuiKey_Y))) doc.redo();
+    if (ctrl && pressed(ImGuiKey_S)) {
+        auto err = doc.save();
+        st.saveError = err ? "Save failed: " + *err : std::string();
+        if (err) std::fprintf(stderr, "save failed: %s\n", err->c_str());
+    }
+}
+
 ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view, ImVec2 size) {
+    shortcuts(st, doc);
     ImGui::SetNextWindowPos(ImVec2(0, 0));
     ImGui::SetNextWindowSize(size);
     ImGui::Begin("##main", nullptr,
@@ -726,7 +748,7 @@ ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view,
     sceneTree(dl, left, doc);
     viewportPanel(st, dl, mid, doc, view);
     inspector(dl, right, doc);
-    statusBar(dl, size);
+    statusBar(dl, size, doc, st);
     ImGui::End();
     return bar;
 }

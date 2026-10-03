@@ -1,6 +1,8 @@
 #include "editor/document.hh"
 
+#include <algorithm>
 #include <exception>
+#include <functional>
 #include <system_error>
 #include <unordered_set>
 
@@ -84,9 +86,12 @@ MeshInfo analyseMesh(const fs::path& file) {
 
 std::optional<std::string> Document::load(const fs::path& project, const fs::path& scene) {
     m_project = project;
+    m_sceneFile = scene;
     m_stem = scene.stem().string();
     if (m_stem.empty()) m_stem = "untitled";
     m_scene = {};
+    clearHistory();
+    ++m_loadId;
     m_selection.reset();
     m_collapsed.clear();
     m_meshes.clear();
@@ -111,6 +116,26 @@ std::optional<std::string> Document::load(const fs::path& project, const fs::pat
     for (const splash::Object& o : m_scene.objects) cacheAssets(o);
     return std::nullopt;
 }
+
+void Document::reset(splash::Scene scene, const fs::path& project, const std::string& stem) {
+    m_project = project;
+    m_stem = stem;
+    m_sceneFile = stem + ".scene";
+    m_scene = std::move(scene);
+    clearHistory();
+    ++m_loadId;
+    ++m_revision;
+    m_selection.reset();
+    m_collapsed.clear();
+    m_meshes.clear();
+    m_textures.clear();
+    m_files.clear();
+    m_projectFiles = 0;
+    recount();
+    for (const splash::Object& o : m_scene.objects) cacheAssets(o);
+}
+
+void Document::recount() { m_objectCount = countObjects(m_scene.objects); }
 
 void Document::cacheAssets(const splash::Object& o) {
     if (o.mesh) {
@@ -137,6 +162,228 @@ const splash::Object* Document::object(const ObjectPath& path) const {
 const splash::Object* Document::parent(const ObjectPath& path) const {
     if (path.size() < 2) return nullptr;
     return object(ObjectPath(path.begin(), path.end() - 1));
+}
+
+splash::Object* Document::objectMut(const ObjectPath& path) { return const_cast<splash::Object*>(object(path)); }
+
+std::vector<splash::Object>* Document::childrenMut(const ObjectPath& parentPath) {
+    if (parentPath.empty()) return &m_scene.objects;
+    splash::Object* o = objectMut(parentPath);
+    return o ? &o->children : nullptr;
+}
+
+std::vector<ObjectPath> Document::flatPaths() const {
+    std::vector<ObjectPath> out;
+    ObjectPath p;
+    std::function<void(const std::vector<splash::Object>&)> walk = [&](const std::vector<splash::Object>& objs) {
+        for (size_t i = 0; i < objs.size(); ++i) {
+            p.push_back(static_cast<int>(i));
+            out.push_back(p);
+            walk(objs[i].children);
+            p.pop_back();
+        }
+    };
+    walk(m_scene.objects);
+    return out;
+}
+
+namespace {
+
+// The object at `p` after a sibling was inserted at (delta +1) or removed
+// from (delta -1) `at`; nullopt if `p` was the removed object or inside it.
+std::optional<ObjectPath> shifted(ObjectPath p, const ObjectPath& at, int delta) {
+    const size_t d = at.size() - 1;
+    if (p.size() < at.size() || !std::equal(at.begin(), at.end() - 1, p.begin())) return p;
+    if (delta < 0 && p[d] == at[d]) return std::nullopt;
+    if (p[d] >= at[d]) p[d] += delta;
+    return p;
+}
+
+// Copies an object without its children, which can be large and which an
+// edit of the object itself never touches.
+splash::Object shallowCopy(splash::Object& o) {
+    std::vector<splash::Object> kids = std::move(o.children);
+    o.children.clear();
+    splash::Object copy = o;
+    o.children = std::move(kids);
+    return copy;
+}
+
+// Replaces everything but the children.
+void assignShallow(splash::Object& dst, const splash::Object& src) {
+    std::vector<splash::Object> kids = std::move(dst.children);
+    dst = src;
+    dst.children = std::move(kids);
+}
+
+class EditCommand : public Command {
+public:
+    EditCommand(ObjectPath path, splash::Object before, splash::Object after, std::string key)
+        : m_path(std::move(path)), m_before(std::move(before)), m_after(std::move(after)), m_key(std::move(key)) {}
+    void apply(Document& doc) override { set(doc, m_after); }
+    void revert(Document& doc) override { set(doc, m_before); }
+    bool merge(const Command& next) override {
+        auto* n = dynamic_cast<const EditCommand*>(&next);
+        if (!n || m_key.empty() || n->m_key != m_key || n->m_path != m_path) return false;
+        m_after = n->m_after;
+        return true;
+    }
+
+private:
+    void set(Document& doc, const splash::Object& v) {
+        if (splash::Object* o = doc.objectMut(m_path)) assignShallow(*o, v);
+    }
+    ObjectPath m_path;
+    splash::Object m_before, m_after;
+    std::string m_key;
+};
+
+// Inserts (forward) or removes (inverse) one object with its subtree.
+class StructureCommand : public Command {
+public:
+    StructureCommand(ObjectPath path, splash::Object obj, bool insert) : m_path(std::move(path)), m_obj(std::move(obj)), m_insert(insert) {}
+    void apply(Document& doc) override { m_insert ? insert(doc) : remove(doc); }
+    void revert(Document& doc) override { m_insert ? remove(doc) : insert(doc); }
+
+private:
+    void insert(Document& doc) {
+        std::vector<splash::Object>* level = doc.childrenMut(ObjectPath(m_path.begin(), m_path.end() - 1));
+        if (!level) return;
+        size_t i = std::min(static_cast<size_t>(m_path.back()), level->size());
+        level->insert(level->begin() + static_cast<std::ptrdiff_t>(i), m_obj);
+        doc.shiftPaths(m_path, +1);
+        doc.recount();
+        doc.select(m_path);
+    }
+    void remove(Document& doc) {
+        std::vector<splash::Object>* level = doc.childrenMut(ObjectPath(m_path.begin(), m_path.end() - 1));
+        if (!level || static_cast<size_t>(m_path.back()) >= level->size()) return;
+        auto it = level->begin() + m_path.back();
+        m_obj = std::move(*it);  // keeps the object as it is now for the inverse
+        level->erase(it);
+        doc.shiftPaths(m_path, -1);
+        doc.recount();
+    }
+    ObjectPath m_path;
+    splash::Object m_obj;
+    bool m_insert;
+};
+
+}  // namespace
+
+void Document::shiftPaths(const ObjectPath& at, int delta) {
+    if (at.empty()) return;
+    if (m_selection) m_selection = shifted(*m_selection, at, delta);
+    std::set<ObjectPath> collapsed;
+    for (const ObjectPath& p : m_collapsed)
+        if (p.empty()) collapsed.insert(p);
+        else if (auto q = shifted(p, at, delta)) collapsed.insert(*q);
+    m_collapsed = std::move(collapsed);
+}
+
+void Document::clearHistory() {
+    m_history.clear();
+    m_cursor = 0;
+    m_savedCursor = 0;
+    m_mergeOpen = false;
+}
+
+void Document::execute(std::unique_ptr<Command> cmd, bool mergeable) {
+    cmd->apply(*this);
+    ++m_revision;
+    if (mergeable && m_mergeOpen && m_cursor > 0 && m_cursor == m_history.size() && m_history[m_cursor - 1]->merge(*cmd)) {
+        // The merged step no longer matches what was saved, if it was the saved one.
+        if (m_savedCursor == m_cursor) m_savedCursor = kNever;
+        return;
+    }
+    if (m_savedCursor != kNever && m_savedCursor > m_cursor) m_savedCursor = kNever;  // the saved state is being dropped
+    m_history.resize(m_cursor);
+    m_history.push_back(std::move(cmd));
+    m_cursor = m_history.size();
+    m_mergeOpen = mergeable;
+}
+
+bool Document::edit(const ObjectPath& path, const std::function<void(splash::Object&)>& fn, const std::string& mergeKey) {
+    splash::Object* o = objectMut(path);
+    if (!o) return false;
+    splash::Object before = shallowCopy(*o);
+    splash::Object after = before;
+    fn(after);
+    after.children.clear();
+    execute(std::make_unique<EditCommand>(path, std::move(before), std::move(after), mergeKey), !mergeKey.empty());
+    return true;
+}
+
+bool Document::insertObject(const ObjectPath& path, splash::Object obj) {
+    if (path.empty() || !childrenMut(ObjectPath(path.begin(), path.end() - 1))) return false;
+    execute(std::make_unique<StructureCommand>(path, std::move(obj), true));
+    return true;
+}
+
+bool Document::removeObject(const ObjectPath& path) {
+    if (!object(path)) return false;
+    execute(std::make_unique<StructureCommand>(path, splash::Object{}, false));
+    return true;
+}
+
+std::optional<ObjectPath> Document::duplicateObject(const ObjectPath& path) {
+    const splash::Object* o = object(path);
+    if (!o) return std::nullopt;
+    // "Crate (3)" -> base "Crate"; the copy takes the next free number among its siblings.
+    auto split = [](const std::string& name, std::string* base) {
+        size_t open = name.rfind(" (");
+        if (open != std::string::npos && name.size() > open + 3 && name.back() == ')') {
+            std::string num = name.substr(open + 2, name.size() - open - 3);
+            if (num.find_first_not_of("0123456789") == std::string::npos) {
+                *base = name.substr(0, open);
+                return std::stoi(num);
+            }
+        }
+        *base = name;
+        return 0;
+    };
+    std::string base;
+    split(o->name, &base);
+    const ObjectPath parentPath(path.begin(), path.end() - 1);
+    int next = 1;
+    for (const splash::Object& sib : parentPath.empty() ? m_scene.objects : object(parentPath)->children) {
+        std::string b;
+        int n = split(sib.name, &b);
+        if (b == base) next = std::max(next, n + 1);
+    }
+    splash::Object copy = *o;
+    copy.name = base + " (" + std::to_string(std::max(next, 2)) + ")";
+    ObjectPath at = path;
+    ++at.back();
+    insertObject(at, std::move(copy));
+    return at;
+}
+
+bool Document::undo() {
+    if (!canUndo()) return false;
+    m_mergeOpen = false;
+    m_history[--m_cursor]->revert(*this);
+    ++m_revision;
+    return true;
+}
+
+bool Document::redo() {
+    if (!canRedo()) return false;
+    m_mergeOpen = false;
+    m_history[m_cursor++]->apply(*this);
+    ++m_revision;
+    return true;
+}
+
+std::optional<std::string> Document::save() {
+    try {
+        splash::saveScene(m_scene, scenePath());
+    } catch (const std::exception& e) {
+        return std::string(e.what());
+    }
+    m_savedCursor = m_cursor;
+    m_mergeOpen = false;  // an edit after saving starts a new step, so undo returns to the saved state
+    return std::nullopt;
 }
 
 bool Document::selectByName(const std::string& name) {

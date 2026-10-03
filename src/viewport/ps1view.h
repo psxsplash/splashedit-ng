@@ -2,6 +2,8 @@
 
 #include <imgui.h>
 
+#include "scene.hh"
+
 #include <cstdint>
 #include <map>
 #include <string>
@@ -65,6 +67,11 @@ class Ps1View {
     std::vector<Vertex> m_verts;
     std::vector<Batch> m_batches;
     std::map<std::string, unsigned> m_texCache;
+    std::map<std::string, splash::Mesh> m_meshCache;  // by project path, for the current load
+    unsigned m_meshCacheLoad = ~0u;
+    unsigned m_framedLoad = ~0u;
+    bool m_haveSceneBounds = false;
+    splash::Bounds m_sceneBounds;  // GL space, geometry only
 
     unsigned m_prog = 0, m_vao = 0, m_vbo = 0, m_fbo = 0, m_color = 0, m_depth = 0;
     unsigned m_white = 0, m_fallback = 0;

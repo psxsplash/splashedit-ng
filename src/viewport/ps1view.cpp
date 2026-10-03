@@ -261,8 +261,12 @@ void Ps1View::rebuild() {
 
     // Collect geometry into per-texture buckets.
     std::map<unsigned, std::vector<Vertex>> buckets;
+    std::map<std::string, splash::Mesh>& meshCache = m_meshCache;
+    if (m_doc->loadId() != m_meshCacheLoad) {
+        meshCache.clear();
+        m_meshCacheLoad = m_doc->loadId();
+    }
     auto meshCacheKey = [](const std::string& p) { return p; };
-    std::map<std::string, splash::Mesh> meshCache;
     for (const splash::FlatObject& fo : flats) {
         if (!fo.activeInHierarchy || !fo.object->mesh) continue;
         const splash::MeshComponent& mc = *fo.object->mesh;
@@ -331,7 +335,11 @@ void Ps1View::rebuild() {
             }
         }
     }
-    if (any) {
+    m_haveSceneBounds = any;
+    if (any) m_sceneBounds = bounds;
+    // Frame once per loaded scene; edits must not move the camera.
+    if (any && m_framedLoad != m_doc->loadId()) {
+        m_framedLoad = m_doc->loadId();
         Vec3 center{bounds.center.x, bounds.center.y, bounds.center.z};
         float radius = std::sqrt(splash::sqrMagnitude(bounds.extents));
         radius = std::max(radius, 1.0f);

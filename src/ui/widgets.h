@@ -34,8 +34,9 @@ void tooltip(const char* text);
 enum class ButtonKind { Primary, Secondary, Ghost };
 bool button(const char* id, ImVec2 pos, const char* icon, const char* label, ButtonKind kind, float* outWidth = nullptr,
             const char* tip = nullptr);
+// A disabled button keeps its tooltip but does not hover, press or click.
 bool iconButton(const char* id, ImRect r, const char* icon, bool toggled = false, const char* tip = nullptr,
-                ImU32 iconColor = theme::color::textDim);
+                ImU32 iconColor = theme::color::textDim, bool enabled = true);
 
 // Segmented control; returns new selection.
 int segmented(const char* id, ImVec2 pos, std::initializer_list<const char*> items, int selected, float* outWidth = nullptr);
