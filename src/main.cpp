@@ -226,11 +226,31 @@ std::filesystem::path firstScene(const std::filesystem::path& project) {
     return best;
 }
 
+// The directory holding the executable. A packaged editor ships assets/,
+// examples/, redux/ and engine/ next to itself.
+std::filesystem::path baseDir() {
+    const char* b = SDL_GetBasePath();  // owned by SDL
+    if (!b) return {};
+    return std::filesystem::path(reinterpret_cast<const char8_t*>(b));
+}
+
+// `rel` under the executable's directory when the package carries it, else
+// the source-tree path compiled in for development builds.
+std::string resourceDir(const char* rel, const char* compiled) {
+    std::error_code ec;
+    std::filesystem::path p = baseDir() / rel;
+    if (std::filesystem::is_directory(p, ec)) {
+        std::u8string u = p.u8string();
+        return std::string(u.begin(), u.end());
+    }
+    return compiled;
+}
+
 // Loads the scene named on the command line, or the bundled example. Errors
 // are reported and leave an empty scene open.
 void openDocument(editor::Document& doc, const Args& args) {
     bool bundled = !args.project;
-    std::filesystem::path project = bundled ? std::filesystem::path(SPLASHEDIT_EXAMPLE_DIR) : std::filesystem::path(args.project);
+    std::filesystem::path project = bundled ? std::filesystem::path(reinterpret_cast<const char8_t*>(resourceDir("examples/courtyard", SPLASHEDIT_EXAMPLE_DIR).c_str())) : std::filesystem::path(args.project);
     std::filesystem::path scene = args.scene ? std::filesystem::path(args.scene) : firstScene(project);
     if (scene.empty()) {
         std::fprintf(stderr, "no .scene file in %s; opening an empty scene\n", project.string().c_str());
@@ -266,7 +286,8 @@ int main(int argc, char** argv) {
         return 1;
     }
     SDL_SetWindowHitTest(window, hitTest, nullptr);
-    brand::setWindowIcon(window, SPLASHEDIT_ASSET_DIR);
+    const std::string assetDir = resourceDir("assets", SPLASHEDIT_ASSET_DIR);
+    brand::setWindowIcon(window, assetDir.c_str());
     SDL_GLContext ctx = SDL_GL_CreateContext(window);
     SDL_GL_MakeCurrent(window, ctx);
     SDL_GL_SetSwapInterval(1);
@@ -277,8 +298,8 @@ int main(int argc, char** argv) {
     ImGuiIO& io = ImGui::GetIO();
     io.IniFilename = nullptr;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
-    theme::load(SPLASHEDIT_ASSET_DIR);
-    brand::load(SPLASHEDIT_ASSET_DIR);
+    theme::load(assetDir.c_str());
+    brand::load(assetDir.c_str());
     ImGui_ImplSDL3_InitForOpenGL(window, ctx);
     ImGui_ImplOpenGL3_Init("#version 330 core");
 
@@ -289,6 +310,7 @@ int main(int argc, char** argv) {
     }
     mockup::State state;
     state.viewMode = args.viewMode;
+    state.play.bundleDir = baseDir();
     // Play's tool paths persist per user; screenshot runs read only the environment.
     if (!args.screenshot) {
         if (char* pref = SDL_GetPrefPath("psxsplash", "splashedit")) {

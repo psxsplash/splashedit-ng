@@ -6,7 +6,28 @@ on:
   pull_request:
 
 jobs:
+  # psxsplash.ps-exe is MIPS code, identical on every OS, so it is built once
+  # and shipped in each package.
+  engine:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: psxsplash/psxsplash
+          submodules: recursive
+      - name: Toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++-mipsel-linux-gnu
+      - name: Build
+        run: make -j4 PREFIX=mipsel-linux-gnu FORMAT=elf32-tradlittlemips
+      - uses: actions/upload-artifact@v4
+        with:
+          name: engine
+          path: psxsplash.ps-exe
+
   build:
+    needs: engine
     strategy:
       fail-fast: false
       matrix:
@@ -40,3 +61,52 @@ jobs:
           "$py" tests/lightcheck.py "$cli"
       - name: Editor tests
         run: ctest --test-dir build -C Release --output-on-failure
+      # One download: the editor with its assets, the example project, the
+      # engine and the latest pcsx-redux dev build for this OS.
+      - uses: actions/download-artifact@v4
+        with:
+          name: engine
+          path: pkg/engine
+      - name: Package
+        shell: bash
+        run: |
+          case "${{ runner.os }}" in
+            Windows) project=dev-win-x64 ;;
+            macOS) project=dev-macos-arm ;;
+            *) project=dev-linux-x64 ;;
+          esac
+          base=https://distrib.app/storage/manifests/pcsx-redux/$project
+          id=$(curl -fsSL "$base/manifest.json" | jq '[.builds[].id] | max')
+          path=$(curl -fsSL "$base/manifest-$id.json" | jq -r .path)
+          curl -fsSL -o "redux-download" "https://distrib.app$path"
+          mkdir -p pkg/redux pkg/examples
+          case "${{ runner.os }}" in
+            Windows)
+              (cd pkg/redux && cmake -E tar xf ../../redux-download)
+              cp build/Release/splashedit.exe pkg/ ;;
+            macOS)
+              mnt=$(mktemp -d)
+              hdiutil attach -nobrowse -readonly -mountpoint "$mnt" redux-download
+              cp -R "$mnt/PCSX-Redux.app" pkg/redux/
+              hdiutil detach "$mnt"
+              cp build/splashedit pkg/ ;;
+            *)
+              (cd pkg/redux && cmake -E tar xf ../../redux-download && mv PCSX-Redux-*.AppImage pcsx-redux && chmod +x pcsx-redux)
+              cp build/splashedit pkg/ ;;
+          esac
+          cp -R assets pkg/
+          cp -R examples/courtyard pkg/examples/
+          ls -R pkg | head -40
+          test -f pkg/engine/psxsplash.ps-exe
+          test -f pkg/redux/pcsx-redux.exe || test -f pkg/redux/pcsx-redux || test -d pkg/redux/PCSX-Redux.app
+          # upload-artifact drops the executable bit, so Linux and macOS ship a tarball.
+          mv pkg splashedit
+          if [ "${{ runner.os }}" = Windows ]; then
+            cmake -E tar cf splashedit-windows.zip --format=zip splashedit
+          else
+            tar czf "splashedit-$(echo ${{ runner.os }} | tr A-Z a-z).tar.gz" splashedit
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: splashedit-${{ runner.os }}
+          path: splashedit-*.*

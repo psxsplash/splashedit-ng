@@ -3,6 +3,7 @@
 #include <cstdlib>
 #include <exception>
 #include <fstream>
+#include <initializer_list>
 #include <system_error>
 
 namespace fs = std::filesystem;
@@ -72,10 +73,25 @@ static fs::path onPath(const char* name) {
     return {};
 }
 
-PlayTools withDefaults(PlayTools t) {
+static void fromBundle(fs::path& p, const fs::path& bundle, std::initializer_list<const char*> candidates) {
+    if (!p.empty() || bundle.empty()) return;
+    std::error_code ec;
+    for (const char* c : candidates) {
+        fs::path f = bundle / fromUtf8(c);
+        if (fs::is_regular_file(f, ec)) {
+            p = f;
+            return;
+        }
+    }
+}
+
+PlayTools withDefaults(PlayTools t, const fs::path& bundle) {
     fromEnv(t.redux, "SPLASHEDIT_REDUX");
     fromEnv(t.psxsplash, "SPLASHEDIT_PSXSPLASH");
     fromEnv(t.bios, "SPLASHEDIT_BIOS");
+    fromBundle(t.redux, bundle,
+               {"redux/pcsx-redux.exe", "redux/PCSX-Redux.app/Contents/MacOS/PCSX-Redux", "redux/pcsx-redux"});
+    fromBundle(t.psxsplash, bundle, {"engine/psxsplash.ps-exe"});
     if (t.redux.empty()) t.redux = onPath("pcsx-redux");
     return t;
 }

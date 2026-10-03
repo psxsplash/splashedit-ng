@@ -109,7 +109,7 @@ static void togglePlay(State& st, const editor::Document& doc) {
     }
     if (p.build.valid()) return;
     p.message.clear();
-    if (!editor::missingTools(editor::withDefaults(p.tools)).empty()) {
+    if (!editor::missingTools(editor::withDefaults(p.tools, p.bundleDir)).empty()) {
         p.openSetup = true;
         return;
     }
@@ -137,7 +137,7 @@ static void updatePlay(State& st) {
         return;
     }
     std::string err;
-    if (!p.emu.start(editor::reduxCommand(editor::withDefaults(p.tools), playDir()), &err))
+    if (!p.emu.start(editor::reduxCommand(editor::withDefaults(p.tools, p.bundleDir), playDir()), &err))
         p.message = "Could not start pcsx-redux: " + err;
     else
         p.startedAt = SDL_GetTicks();
@@ -210,7 +210,7 @@ static void playSetup(State& st, const editor::Document& doc, ImVec2 size) {
          "Play exports the scene and boots it in pcsx-redux on your psxsplash build.");
     y += 30;
 
-    const editor::PlayTools eff = editor::withDefaults(p.tools);
+    const editor::PlayTools eff = editor::withDefaults(p.tools, p.bundleDir);
     struct Row {
         const char* label;
         const std::filesystem::path* path;
