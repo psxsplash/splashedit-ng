@@ -4,6 +4,7 @@
 #include <imgui_internal.h>
 
 #include <string>
+#include <vector>
 
 #include "unitymath.hh"
 
@@ -22,6 +23,11 @@ struct State {
     bool maximized = false;
     std::string saveError;  // last Ctrl+S failure, shown in the status bar; empty after a good save
     bool snap = true;       // grid snapping for the move gizmo (Ctrl snaps while it is off)
+
+    // F2 rename in the tree: the object's path, and whether the editor still has to open.
+    bool renaming = false;
+    bool renameStart = false;
+    std::vector<int> renamePath;
 
     // Viewport mouse: which button started the current press, and whether it
     // moved far enough to count as a drag rather than a click.

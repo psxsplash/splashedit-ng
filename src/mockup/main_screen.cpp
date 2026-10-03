@@ -154,9 +154,11 @@ static std::string fileName(const std::string& projectPath) {
 }
 
 struct TreeCtx {
+    State& st;
     editor::Document& doc;
     ImRect panel;
     float y;
+    bool renameShown = false;
 };
 
 // Clicks left of the chevron's right edge toggle; anywhere else selects.
@@ -192,6 +194,21 @@ static void treeObjects(TreeCtx& c, const std::vector<splash::Object>& objs, edi
             if (row.hasChildren && chevronClicked(rr, row.depth)) c.doc.toggleExpanded(path);
             else c.doc.select(path);
         }
+        // F2: the label becomes a text field.
+        if (c.st.renaming && c.st.renamePath == path) {
+            c.renameShown = true;
+            if (c.st.renameStart) {
+                beginTextEdit("rename", o.name);
+                c.st.renameStart = false;
+            }
+            float lx = rr.Min.x + space::xs + row.depth * 16.0f + 16 + 22;
+            ImRect field(ImVec2(lx - space::xs - 2, rr.Min.y + 2), ImVec2(rr.Max.x - 2, rr.Max.y - 2));
+            std::string typed;
+            TextEdit res = textEdit("rename", field, fonts().medium, type::body, lx, field.Max.x - space::xs, &typed);
+            if (res == TextEdit::Commit && !typed.empty() && typed != o.name)
+                c.doc.edit(path, [&](splash::Object& ob) { ob.name = typed; });
+            if (res != TextEdit::Editing) c.st.renaming = false;
+        }
         c.y += size::row;
         if (row.hasChildren && open) treeObjects(c, o.children, path);
         ImGui::PopID();
@@ -199,7 +216,7 @@ static void treeObjects(TreeCtx& c, const std::vector<splash::Object>& objs, edi
     }
 }
 
-static void sceneTree(ImDrawList* dl, ImRect r, editor::Document& doc) {
+static void sceneTree(State& st, ImDrawList* dl, ImRect r, editor::Document& doc) {
     panel(dl, r);
     std::string count = std::to_string(doc.objectCount()) + (doc.objectCount() == 1 ? " object" : " objects");
     float y = panelHeader(dl, r, "Scene", count.c_str());
@@ -221,9 +238,10 @@ static void sceneTree(ImDrawList* dl, ImRect r, editor::Document& doc) {
         if (top.hasChildren && chevronClicked(rr, 0)) doc.toggleExpanded(root);
         else doc.select(std::nullopt);
     }
-    TreeCtx ctx{doc, r, y + size::row};
+    TreeCtx ctx{st, doc, r, y + size::row};
     editor::ObjectPath path;
     if (rootOpen) treeObjects(ctx, doc.scene().objects, path);
+    if (st.renaming && !ctx.renameShown) st.renaming = false;  // the row is collapsed away or gone
     ImGui::PopClipRect();
 
     // Footer: the project's folder, collapsed.
@@ -1054,6 +1072,16 @@ static void shortcuts(State& st, editor::Document& doc) {
         if (pressed(ImGuiKey_E)) st.tool = 2;
         if (pressed(ImGuiKey_R)) st.tool = 3;
     }
+    // Object commands on the selection.
+    if (const std::optional<editor::ObjectPath> sel = doc.selection()) {
+        if (!ctrl && pressed(ImGuiKey_Delete)) doc.removeObject(*sel);
+        if (ctrl && !shift && pressed(ImGuiKey_D)) doc.duplicateObject(*sel);
+        if (!ctrl && pressed(ImGuiKey_F2)) {
+            st.renaming = true;
+            st.renameStart = true;
+            st.renamePath = *sel;
+        }
+    }
     if (ctrl && pressed(ImGuiKey_S)) {
         auto err = doc.save();
         st.saveError = err ? "Save failed: " + *err : std::string();
@@ -1077,7 +1105,7 @@ ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view,
     ImRect left(ImVec2(g, top), ImVec2(g + 272, bottom));
     ImRect right(ImVec2(size.x - g - 352, top), ImVec2(size.x - g, bottom));
     ImRect mid(ImVec2(left.Max.x + g, top), ImVec2(right.Min.x - g, bottom));
-    sceneTree(dl, left, doc);
+    sceneTree(st, dl, left, doc);
     viewportPanel(st, dl, mid, doc, view);
     inspector(dl, right, doc);
     statusBar(dl, size, doc, st);
