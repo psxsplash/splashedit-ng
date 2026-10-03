@@ -55,7 +55,18 @@ struct ExpObject {
     std::vector<PsxTexture*> finalTextures;  // deduplicated, after packing
     std::vector<int> vertexBone;             // skinned only: bone per mesh vertex
     std::vector<uint8_t> triBones;           // skinned only: bone per Tri vertex, Tri order
+    bool dynamicLit = false;                 // runtime point lights are applied on the console
+    bool dynamicLitSmooth = false;           // per vertex instead of per triangle
 };
+
+// A runtime point light (light table, v24). Scene order is table order, which
+// decides which four light a crowded mesh (MAX_LIGHTS_PER_MESH).
+struct RuntimeLight {
+    const FlatObject* flat;
+    const LightComponent* light;
+};
+constexpr size_t kMaxSceneLights = 16;   // MAX_SCENE_LIGHTS in psxsplash lightmath.hh
+constexpr size_t kMaxLightsPerMesh = 4;  // MAX_LIGHTS_PER_MESH
 
 // String.Substring(0, 24) counts UTF-16 code units; names are stored as UTF-8.
 std::string truncateUtf16(const std::string& s, size_t units) {
@@ -244,6 +255,25 @@ void buildTris(ExpObject& e, float gte, const std::vector<SceneLight>& lights, E
                 for (int v : {a, b, c}) e.triBones.push_back(uint8_t(e.vertexBone[size_t(v)]));
         }
     }
+}
+
+// Same test the engine runs: does the light's range reach the mesh's world AABB?
+bool lightReaches(const RuntimeLight& rl, const Mat34& m, const Bounds& local) {
+    float range = rl.light->range;
+    if (range <= 0) return false;
+    Vec3 ext = local.extents, center = local.center;
+    Vec3 mn{std::numeric_limits<float>::max(), std::numeric_limits<float>::max(), std::numeric_limits<float>::max()};
+    Vec3 mx{std::numeric_limits<float>::lowest(), std::numeric_limits<float>::lowest(),
+            std::numeric_limits<float>::lowest()};
+    for (int i = 0; i < 8; i++) {
+        Vec3 world = m.point(center + Vec3{(i & 1) ? ext.x : -ext.x, (i & 2) ? ext.y : -ext.y, (i & 4) ? ext.z : -ext.z});
+        mn = vmin(mn, world);
+        mx = vmax(mx, world);
+    }
+    Vec3 p = rl.flat->worldPosition;
+    Vec3 c = vmax(mn, vmin(mx, p));
+    Vec3 d{c.x - p.x, c.y - p.y, c.z - p.z};
+    return d.x * d.x + d.y * d.y + d.z * d.z < range * range;
 }
 
 void writeWorldAabb(BinWriter& w, const Mat34& m, const Bounds& local, float gte) {
@@ -879,12 +909,29 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
         return it->second;
     };
 
-    std::vector<SceneLight> lights;
+    // Every light bakes into meshes that are not lit at runtime; a runtime-lit
+    // mesh bakes only the non-runtime ones, so nothing is counted twice.
+    std::vector<SceneLight> lights, bakedOnlyLights;
+    std::vector<RuntimeLight> runtimeLights;
     for (const FlatObject& fo : flat) {
-        if (!fo.object->light || !fo.object->light->enabled) continue;
+        if (!fo.object->light) continue;
         const LightComponent& l = *fo.object->light;
-        lights.push_back({l.kind, fo.worldPosition, rotate(fo.worldRotation, {0, 0, 1}), l.color[0], l.color[1],
-                          l.color[2], l.intensity, l.spotAngle, l.innerSpotAngle});
+        // Disabled runtime lights are still exported so Lua can switch them on.
+        if (l.runtime && fo.activeInHierarchy) runtimeLights.push_back({&fo, &l});
+        if (!l.enabled) continue;
+        SceneLight sl{l.kind, fo.worldPosition, rotate(fo.worldRotation, {0, 0, 1}), l.color[0], l.color[1],
+                      l.color[2], l.intensity, l.spotAngle, l.innerSpotAngle};
+        lights.push_back(sl);
+        if (!l.runtime) bakedOnlyLights.push_back(sl);
+    }
+    if (runtimeLights.size() > kMaxSceneLights) {
+        std::string dropped;
+        for (size_t i = kMaxSceneLights; i < runtimeLights.size(); i++)
+            dropped += (dropped.empty() ? "" : ", ") + runtimeLights[i].flat->object->name;
+        res.warnings.push_back("the scene has " + std::to_string(runtimeLights.size()) +
+                               " runtime point lights and the PS1 holds " + std::to_string(kMaxSceneLights) +
+                               "; left out: " + dropped);
+        runtimeLights.resize(kMaxSceneLights);
     }
 
     std::vector<ExpObject> exporters;
@@ -997,7 +1044,28 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     }
     if (!res.ok()) return res;
 
-    for (ExpObject& e : exporters) buildTris(e, gte, lights, res);
+    for (ExpObject& e : exporters) {
+        if (runtimeLights.empty() || e.obj->skin) continue;  // the engine does not light skinned meshes
+        size_t reaching = 0;
+        std::string names;
+        for (const RuntimeLight& rl : runtimeLights)
+            if (lightReaches(rl, e.flat->localToWorld, e.mesh->bounds())) {
+                reaching++;
+                names += (names.empty() ? "" : ", ") + rl.flat->object->name;
+            }
+        switch (e.mc->dynamicLighting) {
+            case DynamicLighting::On:
+            case DynamicLighting::Smooth: e.dynamicLit = true; break;
+            case DynamicLighting::Off: e.dynamicLit = false; break;
+            case DynamicLighting::Auto: e.dynamicLit = reaching > 0; break;
+        }
+        e.dynamicLitSmooth = e.dynamicLit && e.mc->dynamicLighting == DynamicLighting::Smooth;
+        if (e.dynamicLit && reaching > kMaxLightsPerMesh)
+            res.warnings.push_back(e.obj->name + ": " + std::to_string(reaching) +
+                                   " runtime point lights reach it and the PS1 lights a mesh with " +
+                                   std::to_string(kMaxLightsPerMesh) + " (the first in scene order): " + names);
+    }
+    for (ExpObject& e : exporters) buildTris(e, gte, e.dynamicLit ? bakedOnlyLights : lights, res);
     if (!res.ok()) return res;
 
     // UI: image textures (packed after the object textures, as 2.4.0 does),
@@ -1208,10 +1276,11 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     }
 
     BinWriter w;
-    // ---- header (144 bytes, v23)
+    // ---- header (144 bytes, v23; 148 with the v24 light table offset)
+    bool hasLights = !runtimeLights.empty();
     w.u8('S');
     w.u8('P');
-    w.u16(23);
+    w.u16(hasLights ? 24 : 23);
     w.u16(uint16_t(luaFiles.size()));
     w.u16(uint16_t(exporters.size()));
     w.u16(uint16_t(vram.atlases.size()));
@@ -1289,6 +1358,8 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     w.u16(0);  // sprite anims
     w.u32(hashSceneId(scene.settings.networkId));
     w.u32(0);  // tilemap table offset
+    size_t lightTableOffsetPos = w.pos();
+    if (hasLights) w.u32(0);
 
     // ---- Lua metadata
     std::vector<size_t> luaOffsetPos;
@@ -1310,7 +1381,8 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
         writeRotation(w, e.flat->worldRotation);
         w.u16(uint16_t(e.tris.size()));
         w.i16(e.obj->script ? luaIndex(e.obj->script->lua) : int16_t(-1));
-        w.u32((e.obj->active ? 1u : 0u) | (e.obj->skin ? 0x10u : 0u));
+        w.u32((e.obj->active ? 1u : 0u) | (e.obj->skin ? 0x10u : 0u) | (hasLights && e.dynamicLit ? 0x10000u : 0u) |
+              (hasLights && e.dynamicLitSmooth ? 0x20000u : 0u));
         {
             auto it = std::find_if(interactables.begin(), interactables.end(),
                                    [&](const FlatObject* fo) { return fo->object == e.obj; });
@@ -1576,6 +1648,36 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     }
     if (!canvases.empty() || !fontSheets.empty())
         writeUi(w, uiTableOffsetPos, canvases, uiTextures, fontSheets, fontVram, fontIndex, options.vram);
+
+    // ---- point lights (v24): {u16 count, u16 0}, 28-byte records, then names
+    if (hasLights) {
+        w.align4();
+        w.patchU32(lightTableOffsetPos, uint32_t(w.pos()));
+        w.u16(uint16_t(runtimeLights.size()));
+        w.u16(0);
+        std::vector<size_t> namePos;
+        for (const RuntimeLight& rl : runtimeLights) {
+            const LightComponent& l = *rl.light;
+            Vec3 p = rl.flat->worldPosition;
+            w.i32(toWorldFixed12(p.x / gte));
+            w.i32(toWorldFixed12(-p.y / gte));
+            w.i32(toWorldFixed12(p.z / gte));
+            w.i32(toWorldFixed12(std::max(0.f, l.range) / gte));
+            w.u16(uint16_t(clampv(roundToInt(l.intensity * 4096.f), 0, 65535)));
+            for (int c = 0; c < 3; c++) w.u8(uint8_t(clampv(roundToInt(l.color[c] * 255.f), 0, 255)));
+            w.u8(l.enabled ? 1 : 0);
+            w.u16(0);
+            namePos.push_back(w.pos());
+            w.u32(0);
+        }
+        for (size_t i = 0; i < runtimeLights.size(); i++) {
+            std::string name = truncateUtf16(runtimeLights[i].flat->object->name, 24);
+            if (name.empty()) continue;
+            w.patchU32(namePos[i], uint32_t(w.pos()));
+            w.bytes(name.data(), name.size());
+            w.u8(0);
+        }
+    }
 
     fs::path outPath = out;
     w.save(outPath);
