@@ -24,3 +24,10 @@ jobs:
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
       - name: Build
         run: cmake --build build --config Release --parallel
+      - name: Test
+        shell: bash
+        run: |
+          cli=build/cli/splashpack-cli
+          [ -f build/cli/Release/splashpack-cli.exe ] && cli=build/cli/Release/splashpack-cli.exe
+          py=python3; command -v python3 >/dev/null || py=python
+          "$py" tests/roundtrip.py "$cli"
