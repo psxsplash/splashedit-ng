@@ -15,6 +15,7 @@
 
 #include "editor/document.hh"
 #include "editor/gizmo.hh"
+#include "ui/brand.h"
 #include "ui/icons.h"
 #include "ui/widgets.h"
 #include "viewport/ps1view.h"
@@ -74,14 +75,9 @@ static ImRect titleBar(State& st, ImDrawList* dl, ImVec2 size, editor::Document&
     ImRect bar(ImVec2(0, 0), ImVec2(size.x, size::titleBar));
     dl->AddRectFilled(bar.Min, bar.Max, color::chrome);
 
-    // App mark: a tilted square, the splash, in the accent colour.
-    ImVec2 c(22, bar.GetCenter().y);
-    ImVec2 d[4] = {{c.x, c.y - 9}, {c.x + 9, c.y}, {c.x, c.y + 9}, {c.x - 9, c.y}};
-    dl->AddConvexPolyFilled(d, 4, color::accent);
-    ImVec2 e[4] = {{c.x, c.y - 4}, {c.x + 4, c.y}, {c.x, c.y + 4}, {c.x - 4, c.y}};
-    dl->AddConvexPolyFilled(e, 4, color::chrome);
-
-    float x = 44;
+    // App mark: the psxsplash wordmark.
+    const float logoH = bar.GetHeight() - 12;
+    float x = space::sm + brand::drawLogo(dl, ImVec2(space::sm, bar.Min.y + 6), logoH) + space::xs;
     const char* menus[] = {"File", "Edit", "Object", "Build", "View", "Help"};
     for (const char* m : menus) {
         ImVec2 s = measure(f.medium, type::body, m);

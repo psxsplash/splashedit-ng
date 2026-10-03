@@ -20,6 +20,7 @@
 #include "editor/document.hh"
 #include "gl.h"
 #include "mockup/main_screen.h"
+#include "ui/brand.h"
 #include "ui/theme.h"
 #include "viewport/ps1view.h"
 
@@ -247,6 +248,7 @@ int main(int argc, char** argv) {
         return 1;
     }
     SDL_SetWindowHitTest(window, hitTest, nullptr);
+    brand::setWindowIcon(window, SPLASHEDIT_ASSET_DIR);
     SDL_GLContext ctx = SDL_GL_CreateContext(window);
     SDL_GL_MakeCurrent(window, ctx);
     SDL_GL_SetSwapInterval(1);
@@ -258,6 +260,7 @@ int main(int argc, char** argv) {
     io.IniFilename = nullptr;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
     theme::load(SPLASHEDIT_ASSET_DIR);
+    brand::load(SPLASHEDIT_ASSET_DIR);
     ImGui_ImplSDL3_InitForOpenGL(window, ctx);
     ImGui_ImplOpenGL3_Init("#version 330 core");
 
