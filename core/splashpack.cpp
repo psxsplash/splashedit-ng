@@ -582,6 +582,200 @@ void writeUi(BinWriter& w, size_t tableOffsetPos, const std::vector<UICanvas>& c
         w.u8(0);
     }
 }
+
+// ---- cutscenes (cutscene.hh, splashpack.cpp in psxsplash)
+
+constexpr int kMaxCutscenes = 16, kMaxTracks = 8, kMaxKeyframes = 64, kMaxAudioEvents = 64;
+
+void writeCutscenes(BinWriter& w, size_t tableOffsetPos, const std::vector<Cutscene>& cutscenes,
+                    const std::vector<std::string>& objectNames, const std::vector<std::string>& clipNames,
+                    const std::vector<UICanvas>& canvases, const VramSettings& vs, float gte, ExportResult& res) {
+    if (cutscenes.size() > size_t(kMaxCutscenes))
+        res.errors.push_back(std::to_string(cutscenes.size()) + " cutscenes, psxsplash loads at most " +
+                             std::to_string(kMaxCutscenes));
+    auto findElement = [&](const std::string& path) -> const UIElement* {
+        size_t slash = path.find('/');
+        if (slash == std::string::npos) return nullptr;
+        for (const UICanvas& cv : canvases)
+            if (cv.name == path.substr(0, slash))
+                for (const UIElement& e : cv.elements)
+                    if (e.name == path.substr(slash + 1)) return &e;
+        return nullptr;
+    };
+    auto hasCanvas = [&](const std::string& n) {
+        return std::any_of(canvases.begin(), canvases.end(), [&](const UICanvas& c) { return c.name == n; });
+    };
+    std::vector<std::string> seen;
+    for (const Cutscene& c : cutscenes) {
+        std::string where = "cutscene '" + c.name + "'";
+        if (std::find(seen.begin(), seen.end(), c.name) != seen.end()) res.errors.push_back("two cutscenes are named '" + c.name + "'");
+        seen.push_back(c.name);
+        if (c.tracks.size() > size_t(kMaxTracks))
+            res.errors.push_back(where + ": " + std::to_string(c.tracks.size()) + " tracks, at most " + std::to_string(kMaxTracks));
+        if (c.audioEvents.size() > size_t(kMaxAudioEvents))
+            res.errors.push_back(where + ": more than " + std::to_string(kMaxAudioEvents) + " audio events");
+        for (const CutsceneTrack& t : c.tracks) {
+            if (t.keyframes.size() > size_t(kMaxKeyframes))
+                res.errors.push_back(where + ": a track has more than " + std::to_string(kMaxKeyframes) + " keyframes");
+            int ty = int(t.type);
+            bool object = ty >= 2 && ty <= 4 || t.type == TrackType::ObjectUVOffset;
+            if (object && std::find(objectNames.begin(), objectNames.end(), truncateUtf16(t.target, 24)) == objectNames.end())
+                res.errors.push_back(where + ": no exported object named '" + t.target + "' (objects need a mesh)");
+            if (t.type == TrackType::UICanvasVisible && !hasCanvas(t.target))
+                res.errors.push_back(where + ": no canvas named '" + t.target + "'");
+            if (ty >= 6 && ty <= 9 && !findElement(t.target))
+                res.errors.push_back(where + ": no UI element '" + t.target + "' (write it as canvas/element)");
+        }
+        for (const CutsceneAudioEvent& a : c.audioEvents)
+            if (std::find(clipNames.begin(), clipNames.end(), a.clip) == clipNames.end())
+                res.errors.push_back(where + ": no audio clip named '" + a.clip + "'");
+    }
+    if (!res.ok()) return;
+
+    w.align4();
+    w.patchU32(tableOffsetPos, uint32_t(w.pos()));
+    std::vector<size_t> dataPos, namePos;
+    std::vector<std::string> names;
+    for (const Cutscene& c : cutscenes) {
+        names.push_back(truncateUtf16(c.name, 24));
+        dataPos.push_back(w.pos());
+        w.u32(0);
+        w.u8(uint8_t(names.back().size()));
+        w.u8(0);
+        w.u16(0);
+        namePos.push_back(w.pos());
+        w.u32(0);
+    }
+    for (size_t ci = 0; ci < cutscenes.size(); ci++) {
+        const Cutscene& c = cutscenes[ci];
+        std::string where = "cutscene '" + c.name + "'";
+        w.align4();
+        w.patchU32(dataPos[ci], uint32_t(w.pos()));
+        w.u16(uint16_t(c.durationFrames));
+        w.u8(uint8_t(c.tracks.size()));
+        w.u8(uint8_t(c.audioEvents.size()));
+        size_t tracksPos = w.pos();
+        w.u32(0);
+        size_t audioPos = w.pos();
+        w.u32(0);
+        w.u8(0);  // skin anim events
+        w.u8(0);
+        w.u16(0);
+        w.u32(0);
+
+        w.align4();
+        w.patchU32(tracksPos, uint32_t(w.pos()));
+        std::vector<size_t> trackNamePos, keyPos;
+        std::vector<std::string> trackNames;
+        for (const CutsceneTrack& t : c.tracks) {
+            int ty = int(t.type);
+            bool named = (ty >= 2 && ty <= 9) || t.type == TrackType::ObjectUVOffset;
+            std::string n = named ? (ty >= 5 && ty <= 9 ? truncateBytes(t.target, 255) : truncateUtf16(t.target, 24)) : "";
+            w.u8(uint8_t(t.type));
+            w.u8(uint8_t(t.keyframes.size()));
+            w.u8(uint8_t(n.size()));
+            w.u8(0);
+            trackNamePos.push_back(w.pos());
+            w.u32(0);
+            keyPos.push_back(w.pos());
+            w.u32(0);
+            trackNames.push_back(n);
+        }
+        bool clamped = false;
+        auto coord = [&](float v) {
+            int f = roundToInt((v / gte) * 4096.f);
+            if (f < -32768 || f > 32767) clamped = true;
+            return int16_t(clampv(f, -32768, 32767));
+        };
+        auto angle = [&](float deg) {
+            int f = roundToInt(deg * 1024.f / 180.f);
+            return int16_t(clampv(f, -32768, 32767));
+        };
+        auto byteOf = [](float v, int lo, int hi) { return int16_t(clampv(roundToInt(v), lo, hi)); };
+        for (size_t ti = 0; ti < c.tracks.size(); ti++) {
+            const CutsceneTrack& t = c.tracks[ti];
+            std::vector<Keyframe> keys = t.keyframes;
+            std::stable_sort(keys.begin(), keys.end(), [](const Keyframe& a, const Keyframe& b) { return a.frame < b.frame; });
+            // UI positions are offsets from the element's anchor: the same
+            // anchor rounding correction as the element itself.
+            int dx = 0, dy = 0;
+            if (t.type == TrackType::UIPosition)
+                if (const UIElement* e = findElement(t.target)) {
+                    dx = bakeAxis(e->anchorMin[0], e->anchorMax[0], 0, 0, vs.resolutionX).pos;
+                    dy = bakeAxis(e->anchorMin[1], e->anchorMax[1], 0, 0, vs.resolutionY).pos;
+                }
+            w.align4();
+            w.patchU32(keyPos[ti], keys.empty() ? 0 : uint32_t(w.pos()));
+            for (const Keyframe& k : keys) {
+                w.u16(uint16_t((int(k.interp) << 13) | (k.frame & 0x1FFF)));
+                const auto& v = k.value;
+                int16_t o[3] = {0, 0, 0};
+                switch (t.type) {
+                case TrackType::CameraPosition:
+                case TrackType::ObjectPosition:
+                    o[0] = coord(v[0]), o[1] = coord(-v[1]), o[2] = coord(v[2]);
+                    break;
+                case TrackType::CameraRotation:
+                case TrackType::ObjectRotation:
+                    o[0] = angle(-v[0]), o[1] = angle(v[1]), o[2] = angle(-v[2]);
+                    break;
+                case TrackType::ObjectActive:
+                case TrackType::UICanvasVisible:
+                case TrackType::UIElementVisible:
+                case TrackType::RumbleSmall:
+                    o[0] = v[0] > 0.5f ? 1 : 0;
+                    break;
+                case TrackType::UIProgress:
+                    o[0] = byteOf(v[0], 0, 100);
+                    break;
+                case TrackType::UIPosition:
+                    o[0] = int16_t(clampv(roundToInt(v[0]) + dx, -32768, 32767));
+                    o[1] = int16_t(clampv(roundToInt(v[1]) + dy, -32768, 32767));
+                    break;
+                case TrackType::UIColor:
+                    for (int i = 0; i < 3; i++) o[i] = byteOf(v[size_t(i)] * 255.f, 0, 255);
+                    break;
+                case TrackType::CameraH:
+                    o[0] = byteOf(v[0], 1, 1024);
+                    break;
+                case TrackType::RumbleLarge:
+                    o[0] = byteOf(v[0], 0, 255);
+                    break;
+                case TrackType::ObjectUVOffset:
+                    o[0] = byteOf(v[0], 0, 255), o[1] = byteOf(v[1], 0, 255);
+                    break;
+                }
+                for (int16_t x : o) w.i16(x);
+            }
+        }
+        if (clamped)
+            res.warnings.push_back(where + ": a position key is farther than 8 PSX units (" +
+                                   std::to_string(int(8 * gte)) + " scene units) from the origin and was clamped");
+        for (size_t ti = 0; ti < c.tracks.size(); ti++) {
+            if (trackNames[ti].empty()) continue;
+            w.patchU32(trackNamePos[ti], uint32_t(w.pos()));
+            w.bytes(trackNames[ti]);
+            w.u8(0);
+        }
+        if (!c.audioEvents.empty()) {
+            std::vector<CutsceneAudioEvent> ev = c.audioEvents;
+            std::stable_sort(ev.begin(), ev.end(), [](const auto& a, const auto& b) { return a.frame < b.frame; });
+            w.align4();
+            w.patchU32(audioPos, uint32_t(w.pos()));
+            for (const CutsceneAudioEvent& a : ev) {
+                w.u16(uint16_t(a.frame));
+                w.u8(uint8_t(std::find(clipNames.begin(), clipNames.end(), a.clip) - clipNames.begin()));
+                w.u8(uint8_t(a.volume));
+                w.u8(uint8_t(a.pan));
+                w.u8(0);
+                w.u16(0);
+            }
+        }
+        w.patchU32(namePos[ci], uint32_t(w.pos()));
+        w.bytes(names[ci]);
+        w.u8(0);
+    }
+}
 }  // namespace
 
 ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs::path& out,
@@ -923,9 +1117,10 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     w.u16(0);  // rooms
     w.u16(0);  // portals
     w.u16(0);  // room tri refs
-    w.u16(0);  // cutscenes
+    w.u16(uint16_t(scene.cutscenes.size()));
     w.u16(0);  // room cells
-    w.u32(0);  // cutscene table offset
+    size_t cutsceneTableOffsetPos = w.pos();
+    w.u32(0);
     w.u16(uint16_t(canvases.size()));
     w.u8(uint8_t(fontSheets.size()));
     w.u8(0);
@@ -1167,6 +1362,14 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
         }
     }
 
+    if (!scene.cutscenes.empty()) {
+        std::vector<std::string> objectNames, clipNames;
+        for (ExpObject& e : exporters) objectNames.push_back(truncateUtf16(e.obj->name, 24));
+        for (const FlatObject* fo : audioSources) clipNames.push_back(fo->object->audio->clipName);
+        writeCutscenes(w, cutsceneTableOffsetPos, scene.cutscenes, objectNames, clipNames, canvases, options.vram,
+                       gte, res);
+        if (!res.ok()) return res;
+    }
     if (!canvases.empty() || !fontSheets.empty())
         writeUi(w, uiTableOffsetPos, canvases, uiTextures, fontSheets, fontVram, fontIndex, options.vram);
 

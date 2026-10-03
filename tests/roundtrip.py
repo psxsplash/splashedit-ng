@@ -79,6 +79,15 @@ for name, edit in [('font with source and bitmap', lambda d: d['fonts'][0].updat
     rc, err = resave(d, '.scene')
     check(name + ' refused', rc != 0, err)
 
+cs = json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'cutscene', 'cutscene.scene')))
+cs['cutscenes'][0]['tracks'][0]['keyframes'][0]['tension'] = 0.5
+cs['cutscenes'][0]['camera'] = 'main'
+rc, out = resave(cs, '.scene')
+check('cutscene values and unknown keys survive', rc == 0 and out['cutscenes'][0]['camera'] == 'main'
+      and out['cutscenes'][0]['tracks'][0]['keyframes'][0] == dict(cs['cutscenes'][0]['tracks'][0]['keyframes'][0], interp='linear'), out)
+rc, err = resave(dict(cs, cutscenes=[dict(cs['cutscenes'][0], durationFrames=0)]), '.scene')
+check('cutscene duration 0 refused', rc != 0, err)
+
 mesh = {'format': 'splashedit-ng/mesh', 'version': 1, 'positions': [0, 0, 0, 1, 0, 0, 0, 1, 0],
         'colors': [1, 1, 1, 1] * 3, 'submeshes': [[0, 1, 2]]}
 rc, out = resave(mesh, '.mesh')

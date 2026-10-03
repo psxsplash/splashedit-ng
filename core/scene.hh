@@ -243,11 +243,55 @@ struct UICanvas {
     ExtraKeys extra;
 };
 
+// Cutscene track types, numbered as psxsplash's TrackType.
+enum class TrackType : uint8_t {
+    CameraPosition = 0, CameraRotation = 1, ObjectPosition = 2, ObjectRotation = 3, ObjectActive = 4,
+    UICanvasVisible = 5, UIElementVisible = 6, UIProgress = 7, UIPosition = 8, UIColor = 9, CameraH = 10,
+    RumbleSmall = 11, RumbleLarge = 12, ObjectUVOffset = 13
+};
+enum class Interp : uint8_t { Linear = 0, Step = 1, EaseIn = 2, EaseOut = 3, EaseInOut = 4 };
+
+// A key. `value` is in the track's own units: world units for positions,
+// degrees for rotations, 0/1 for on/off tracks, 0..100 for progress, pixels
+// for UI position and UV offset, 0..1 colour, raw projection H, 0..255 rumble.
+struct Keyframe {
+    int frame = 0;  // 0..8191
+    std::array<float, 3> value{0, 0, 0};
+    Interp interp = Interp::Linear;
+    ExtraKeys extra;
+};
+
+struct CutsceneTrack {
+    TrackType type = TrackType::ObjectPosition;
+    // Object tracks: object name. UI canvas tracks: canvas name. UI element
+    // tracks: "canvas/element". Camera and rumble tracks: empty.
+    std::string target;
+    std::vector<Keyframe> keyframes;
+    ExtraKeys extra;
+};
+
+struct CutsceneAudioEvent {
+    int frame = 0;
+    std::string clip;  // an audio component's clipName
+    int volume = 100;  // 0..128
+    int pan = 64;      // 0..127
+    ExtraKeys extra;
+};
+
+struct Cutscene {
+    std::string name;
+    int durationFrames = 90;  // at 60 frames per second
+    std::vector<CutsceneTrack> tracks;
+    std::vector<CutsceneAudioEvent> audioEvents;
+    ExtraKeys extra;
+};
+
 struct Scene {
     SceneSettings settings;
     std::vector<Object> objects;
     std::vector<UIFont> fonts;
     std::vector<UICanvas> canvases;
+    std::vector<Cutscene> cutscenes;
     ExtraKeys extra;
 };
 

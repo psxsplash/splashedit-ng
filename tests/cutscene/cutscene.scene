@@ -1,0 +1,28 @@
+{
+  "format": "splashedit-ng/scene",
+  "version": 1,
+  "settings": {"gteScaling": 100.0, "sceneType": "exterior",
+               "fog": {"enabled": false, "color": [0.0, 0.0, 0.0], "density": 5}, "networkId": "", "script": "play.lua"},
+  "objects": [
+    {"name": "Crate", "active": true,
+     "transform": {"position": [0.0, 0.0, 4.0], "rotation": [0.0, 0.0, 0.0, 1.0], "scale": [1.0, 1.0, 1.0]},
+     "components": [{"type": "mesh", "mesh": "../../examples/courtyard/meshes/crate.mesh",
+                     "materials": [{"texture": "../../examples/courtyard/textures/crate.png", "color": [1.0, 1.0, 1.0, 1.0]}],
+                     "bitDepth": 8, "vertexColors": "flat", "flatColor": [128, 128, 128]}],
+     "children": []}
+  ],
+  "canvases": [
+    {"name": "hud", "elements": [
+      {"type": "progress", "name": "t", "rect": [10, -20, 300, 10], "anchorMin": [0, 1], "anchorMax": [0, 1],
+       "color": [0.2, 0.9, 0.2], "background": [0.3, 0.1, 0.1], "value": 0}
+    ]}
+  ],
+  "cutscenes": [
+    {"name": "slide", "durationFrames": 120, "tracks": [
+      {"type": "objectPosition", "target": "Crate",
+       "keyframes": [{"frame": 0, "value": [-1.5, 0, 4]}, {"frame": 120, "value": [1.5, 0, 4]}]},
+      {"type": "uiProgress", "target": "hud/t",
+       "keyframes": [{"frame": 0, "value": [0, 0, 0]}, {"frame": 120, "value": [100, 0, 0]}]}
+    ]}
+  ]
+}
