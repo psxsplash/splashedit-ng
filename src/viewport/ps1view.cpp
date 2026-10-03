@@ -5,7 +5,12 @@
 #include <cstddef>
 #include <cstdio>
 
+#include <stb_image.h>
+
+#include "editor/document.hh"
 #include "gl.h"
+#include "scene.hh"
+#include "unitymath.hh"
 
 namespace viewport {
 
@@ -98,19 +103,18 @@ in vec2 vUvPersp;
 in vec3 vCol;
 flat in float vTex;
 in float vDepth;
-uniform sampler2D uAtlas;
+uniform sampler2D uTex;
 uniform int uClean;
 uniform vec3 uFog;
 out vec4 oColor;
 const float kDither[16] = float[16](-4, 0, -3, 1, 2, -2, 3, -1, -3, 1, -4, 0, 3, -1, 2, -2);
 void main() {
     vec2 uv = uClean == 0 ? vUvAffine : vUvPersp;
-    vec2 t = vec2((vTex + fract(uv.x)) / 3.0, fract(uv.y));
     vec3 c;
     if (vTex < 0.0) {
         c = vCol;  // sky backdrop, untextured and unfogged
     } else {
-        c = texture(uAtlas, t).rgb * vCol * 2.0;
+        c = texture(uTex, fract(uv)).rgb * vCol * 2.0;
         float fog = clamp((vDepth - 10.0) / 22.0, 0.0, 1.0);
         c = mix(c, uFog, fog * 0.85);
     }
@@ -137,121 +141,210 @@ static unsigned compile(unsigned type, const char* src) {
     return s;
 }
 
-// Small deterministic hash for procedural textures.
+// Small deterministic hash for the fallback texture.
 static float hash(int x, int y, int seed) {
     unsigned h = (unsigned)x * 374761393u + (unsigned)y * 668265263u + (unsigned)seed * 2246822519u;
     h = (h ^ (h >> 13)) * 1274126177u;
     return ((h ^ (h >> 16)) & 0xffff) / 65535.0f;
 }
 
-static void put(std::vector<uint8_t>& p, int x, int y, float r, float g, float b) {
-    size_t i = (size_t)(y * 64 * 3 + x) * 4;
-    p[i] = (uint8_t)std::clamp(r * 255.0f, 0.0f, 255.0f);
-    p[i + 1] = (uint8_t)std::clamp(g * 255.0f, 0.0f, 255.0f);
-    p[i + 2] = (uint8_t)std::clamp(b * 255.0f, 0.0f, 255.0f);
-}
-
-static void makeAtlas(std::vector<uint8_t>& px) {
+// A 64x64 flagstone pattern, the fallback for a texture that fails to load.
+static void makeFallback(std::vector<uint8_t>& px) {
     const int T = 64;
-    px.assign(T * 3 * T * 4, 255);
+    px.assign((size_t)T * T * 4, 255);
     for (int y = 0; y < T; ++y)
         for (int x = 0; x < T; ++x) {
-            // 0: flagstones, two per tile with offset grout.
-            {
-                int bx = x / 32, by = y / 32;
-                bool grout = (x % 32) < 2 || (y % 32) < 2;
-                float n = hash(x / 2, y / 2, 1) * 0.12f + hash(bx, by, 7) * 0.1f;
-                float base = grout ? 0.2f : 0.36f + n;
-                put(px, x, y, base * 1.0f, base * 0.95f, base * 0.9f);
-            }
-            // 1: bricks, 4 rows of 2 per tile, staggered.
-            {
-                int row = y / 16;
-                int xo = (x + (row & 1) * 16) % 64;
-                bool mortar = (y % 16) < 2 || (xo % 32) < 2;
-                float n = hash(x / 2, y / 2, 3) * 0.1f + hash(xo / 32 + row * 5, row, 11) * 0.14f;
-                if (mortar)
-                    put(px, 64 + x, y, 0.3f, 0.27f, 0.25f);
-                else
-                    put(px, 64 + x, y, 0.5f + n, 0.27f + n * 0.6f, 0.2f + n * 0.4f);
-            }
-            // 2: crate, planks with a frame and cross brace.
-            {
-                bool frame = x < 6 || x > 57 || y < 6 || y > 57;
-                bool brace = std::abs(x - y) < 5 || std::abs(x + y - 63) < 5;
-                float grain = hash(x / 8, y, 5) * 0.08f + ((y % 13) == 0 ? -0.08f : 0.0f);
-                float b = frame || brace ? 0.62f : 0.5f;
-                if ((x % 16) == 0 && !frame) b = 0.36f;
-                put(px, 128 + x, y, b + grain, b * 0.72f + grain, b * 0.42f + grain * 0.5f);
-            }
+            bool grout = (x % 32) < 2 || (y % 32) < 2;
+            float n = hash(x / 2, y / 2, 1) * 0.12f + hash(x / 32, y / 32, 7) * 0.1f;
+            float base = grout ? 0.2f : 0.36f + n;
+            size_t i = (size_t)(y * T + x) * 4;
+            px[i] = (uint8_t)std::clamp(base * 255.0f, 0.0f, 255.0f);
+            px[i + 1] = (uint8_t)std::clamp(base * 0.95f * 255.0f, 0.0f, 255.0f);
+            px[i + 2] = (uint8_t)std::clamp(base * 0.9f * 255.0f, 0.0f, 255.0f);
         }
 }
 
-static Vec3 lightAt(Vec3 p, Vec3 n) {
-    Vec3 c = {0.34f, 0.35f, 0.44f};
-    Vec3 sunDir = normalize({0.45f, 1.0f, 0.35f});
-    float d = std::max(0.0f, dot(n, sunDir));
-    c = c + Vec3{0.46f, 0.44f, 0.46f} * d;
-    // Warm point light by the back wall.
-    Vec3 lp = {-2.6f, 2.4f, -5.0f};
-    Vec3 l = lp - p;
-    float dist = std::sqrt(dot(l, l));
-    float atten = std::max(0.0f, 1.0f - dist / 9.0f);
-    float nd = std::max(0.0f, dot(n, normalize(l)));
-    c = c + Vec3{1.05f, 0.62f, 0.26f} * (atten * atten * (0.3f + 0.7f * nd));
+// A point light as the lighting pass consumes it, in Unity world space.
+struct PointLight {
+    splash::Vec3 pos;
+    Vec3 color;  // colour * intensity
+    float range;
+};
+
+// Per-vertex lighting in Unity world space, matching the exporter's look:
+// ambient + one directional + attenuated point lights. The default
+// directional (used when the scene has none) reproduces the old torch scene's
+// sun. Returns colour scaled so the shader's `* 2.0` keeps the PS1 brightness.
+static Vec3 shade(splash::Vec3 p, splash::Vec3 n, const std::vector<PointLight>& lights, Vec3 ambient, Vec3 sunDir,
+                  Vec3 sunColor) {
+    Vec3 nn{n.x, n.y, n.z};
+    Vec3 c = ambient;
+    c = c + sunColor * std::max(0.0f, dot(nn, sunDir));
+    for (const PointLight& pl : lights) {
+        Vec3 l{pl.pos.x - p.x, pl.pos.y - p.y, pl.pos.z - p.z};
+        float dist = std::sqrt(dot(l, l));
+        float atten = std::max(0.0f, 1.0f - dist / pl.range);
+        float nd = std::max(0.0f, dot(nn, normalize(l)));
+        c = c + pl.color * (atten * atten * (0.3f + 0.7f * nd));
+    }
     return {std::min(c.x, 1.0f) * 0.62f, std::min(c.y, 1.0f) * 0.62f, std::min(c.z, 1.0f) * 0.62f};
 }
 
-void Ps1View::quad(Vec3 a, Vec3 b, Vec3 c, Vec3 d, Vec3 n, int tex, float uw, float vh) {
-    // a-b along u, a-d along v. Subdivided to ~1 m so vertex lighting has resolution.
-    int su = std::max(1, (int)std::round(std::sqrt(dot(b - a, b - a))));
-    int sv = std::max(1, (int)std::round(std::sqrt(dot(d - a, d - a))));
-    (void)c;
-    for (int j = 0; j < sv; ++j)
-        for (int i = 0; i < su; ++i) {
-            auto at = [&](int ii, int jj) {
-                float fu = (float)ii / su, fv = (float)jj / sv;
-                Vec3 p = a + (b - a) * fu + (d - a) * fv;
-                Vec3 col = lightAt(p, n);
-                return Vertex{p.x, p.y, p.z, fu * uw, fv * vh, col.x, col.y, col.z, (float)tex};
-            };
-            Vertex v00 = at(i, j), v10 = at(i + 1, j), v11 = at(i + 1, j + 1), v01 = at(i, j + 1);
-            m_verts.insert(m_verts.end(), {v00, v10, v11, v00, v11, v01});
-        }
+void Ps1View::appendSky(std::vector<Vertex>& out) {
+    // Vertical gradient far behind the scene (right-handed GL space: -Z is away).
+    Vertex lo0{-60, -4, -30, 0, 0, 0.13f, 0.12f, 0.20f, -1}, lo1{60, -4, -30, 0, 0, 0.13f, 0.12f, 0.20f, -1};
+    Vertex hi0{-60, 30, -30, 0, 0, 0.05f, 0.06f, 0.10f, -1}, hi1{60, 30, -30, 0, 0, 0.05f, 0.06f, 0.10f, -1};
+    Vertex mid0{-60, 6, -30, 0, 0, 0.20f, 0.15f, 0.24f, -1}, mid1{60, 6, -30, 0, 0, 0.20f, 0.15f, 0.24f, -1};
+    out.insert(out.end(), {lo0, lo1, mid1, lo0, mid1, mid0, mid0, mid1, hi1, mid0, hi1, hi0});
 }
 
-void Ps1View::box(Vec3 mn, Vec3 mx, int tex, float s) {
-    float w = mx.x - mn.x, h = mx.y - mn.y, d = mx.z - mn.z;
-    // +Z, -Z, +X, -X, +Y
-    quad({mn.x, mn.y, mx.z}, {mx.x, mn.y, mx.z}, {mx.x, mx.y, mx.z}, {mn.x, mx.y, mx.z}, {0, 0, 1}, tex, w * s, h * s);
-    quad({mx.x, mn.y, mn.z}, {mn.x, mn.y, mn.z}, {mn.x, mx.y, mn.z}, {mx.x, mx.y, mn.z}, {0, 0, -1}, tex, w * s, h * s);
-    quad({mx.x, mn.y, mx.z}, {mx.x, mn.y, mn.z}, {mx.x, mx.y, mn.z}, {mx.x, mx.y, mx.z}, {1, 0, 0}, tex, d * s, h * s);
-    quad({mn.x, mn.y, mn.z}, {mn.x, mn.y, mx.z}, {mn.x, mx.y, mx.z}, {mn.x, mx.y, mn.z}, {-1, 0, 0}, tex, d * s, h * s);
-    quad({mn.x, mx.y, mx.z}, {mx.x, mx.y, mx.z}, {mx.x, mx.y, mn.z}, {mn.x, mx.y, mn.z}, {0, 1, 0}, tex, w * s, d * s);
-}
+unsigned Ps1View::textureFor(const std::string& projectPath) {
+    if (projectPath.empty()) return m_white;
+    auto it = m_texCache.find(projectPath);
+    if (it != m_texCache.end()) return it->second;
 
-void Ps1View::buildScene() {
-    m_verts.clear();
-    // Sky backdrop: a vertical gradient far behind the courtyard.
-    {
-        Vertex lo0{-60, -4, -30, 0, 0, 0.13f, 0.12f, 0.20f, -1}, lo1{60, -4, -30, 0, 0, 0.13f, 0.12f, 0.20f, -1};
-        Vertex hi0{-60, 30, -30, 0, 0, 0.05f, 0.06f, 0.10f, -1}, hi1{60, 30, -30, 0, 0, 0.05f, 0.06f, 0.10f, -1};
-        Vertex mid0{-60, 6, -30, 0, 0, 0.20f, 0.15f, 0.24f, -1}, mid1{60, 6, -30, 0, 0, 0.20f, 0.15f, 0.24f, -1};
-        m_verts.insert(m_verts.end(), {lo0, lo1, mid1, lo0, mid1, mid0, mid0, mid1, hi1, mid0, hi1, hi0});
+    unsigned id = m_fallback;
+    std::string file = m_doc->resolve(projectPath).string();
+    int w = 0, h = 0, n = 0;
+    stbi_set_flip_vertically_on_load(1);  // row 0 at the bottom, so UV v=0 is the bottom edge
+    unsigned char* data = stbi_load(file.c_str(), &w, &h, &n, 4);
+    if (data) {
+        glGenTextures(1, &id);
+        glBindTexture(GL_TEXTURE_2D, id);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        stbi_image_free(data);
+    } else {
+        std::fprintf(stderr, "viewport: cannot load texture %s\n", file.c_str());
     }
-    // Floor and the two walls of a courtyard corner.
-    quad({-9, 0, 9}, {9, 0, 9}, {9, 0, -6}, {-9, 0, -6}, {0, 1, 0}, 0, 9, 7.5f);
-    quad({-7, 0, -6}, {7, 0, -6}, {7, 4.5f, -6}, {-7, 4.5f, -6}, {0, 0, 1}, 1, 7, 2.25f);
-    quad({-7, 0, 5}, {-7, 0, -6}, {-7, 4.5f, -6}, {-7, 4.5f, 5}, {1, 0, 0}, 1, 5.5f, 2.25f);
-    // Pillars, a raised platform and steps.
-    box({-3.9f, 0, -3.9f}, {-3.1f, 3.6f, -3.1f}, 0, 1);
-    box({2.6f, 0, -4.4f}, {3.4f, 3.6f, -3.6f}, 0, 1);
-    box({1.5f, 0, -6}, {6.5f, 0.8f, -4.6f}, 0, 1);
-    box({2.5f, 0, -4.6f}, {5.5f, 0.4f, -4.0f}, 0, 1);
-    // Crates; the first is the selected object.
-    box({-0.5f, 0, -1.5f}, {0.5f, 1, -0.5f}, 2, 1);
-    box({-2.2f, 0, -2.4f}, {-1.2f, 1, -1.4f}, 2, 1);
-    box({-2.0f, 1, -2.2f}, {-1.3f, 1.7f, -1.5f}, 2, 1);
+    m_texCache[projectPath] = id;
+    return id;
+}
+
+void Ps1View::rebuild() {
+    m_verts.clear();
+    m_batches.clear();
+    if (!m_doc) {
+        appendSky(m_verts);
+        m_batches.push_back({m_white, 0, (int)m_verts.size()});
+        m_built = true;
+        return;
+    }
+
+    const splash::Scene& scene = m_doc->scene();
+    std::vector<splash::FlatObject> flats = splash::flatten(scene);
+
+    // Gather lights, and work out the default directional when there is none.
+    std::vector<PointLight> points;
+    bool haveDirectional = false;
+    Vec3 sunDir = normalize({0.45f, 1.0f, -0.35f});  // Unity-space twin of the old GL sun {0.45,1,0.35}
+    Vec3 sunColor{0.46f, 0.44f, 0.46f};
+    const Vec3 ambient{0.34f, 0.35f, 0.44f};
+    for (const splash::FlatObject& fo : flats) {
+        if (!fo.activeInHierarchy || !fo.object->light) continue;
+        const splash::LightComponent& lc = *fo.object->light;
+        if (!lc.enabled) continue;
+        Vec3 col{lc.color[0] * lc.intensity, lc.color[1] * lc.intensity, lc.color[2] * lc.intensity};
+        if (lc.kind == splash::LightKind::Directional) {
+            if (!haveDirectional) {
+                // Unity forward is +Z; the direction towards the light is -forward.
+                splash::Vec3 fwd = splash::rotate(fo.worldRotation, {0, 0, 1});
+                sunDir = normalize({-fwd.x, -fwd.y, -fwd.z});
+                sunColor = col;
+                haveDirectional = true;
+            }
+        } else if (lc.kind == splash::LightKind::Point) {
+            points.push_back({fo.localToWorld.position(), col, lc.range > 0 ? lc.range : 1.0f});
+        }
+    }
+
+    // Collect geometry into per-texture buckets.
+    std::map<unsigned, std::vector<Vertex>> buckets;
+    auto meshCacheKey = [](const std::string& p) { return p; };
+    std::map<std::string, splash::Mesh> meshCache;
+    for (const splash::FlatObject& fo : flats) {
+        if (!fo.activeInHierarchy || !fo.object->mesh) continue;
+        const splash::MeshComponent& mc = *fo.object->mesh;
+        if (mc.mesh.empty() || mc.materials.empty()) continue;
+        const splash::Mesh* mesh = nullptr;
+        auto mit = meshCache.find(meshCacheKey(mc.mesh));
+        if (mit != meshCache.end()) {
+            mesh = &mit->second;
+        } else {
+            try {
+                splash::Mesh m = splash::loadMesh(m_doc->resolve(mc.mesh));
+                mesh = &(meshCache[meshCacheKey(mc.mesh)] = std::move(m));
+            } catch (const std::exception& e) {
+                std::fprintf(stderr, "viewport: cannot load mesh %s: %s\n", mc.mesh.c_str(), e.what());
+                continue;
+            }
+        }
+        if (mesh->positions.empty() || mesh->normals.size() != mesh->positions.size()) continue;
+
+        // World positions and normals (Unity space); render space negates Z.
+        std::vector<splash::Vec3> wp(mesh->positions.size()), wn(mesh->positions.size());
+        for (size_t i = 0; i < mesh->positions.size(); ++i) {
+            wp[i] = fo.localToWorld.point(mesh->positions[i]);
+            wn[i] = splash::normalized(splash::rotate(fo.worldRotation, mesh->normals[i]));
+        }
+        const bool haveUv = mesh->uv.size() == mesh->positions.size();
+
+        for (size_t sub = 0; sub < mesh->submeshes.size(); ++sub) {
+            const splash::Material& mat = mc.materials[std::min(sub, mc.materials.size() - 1)];
+            unsigned tex = textureFor(mat.texture);
+            bool textured = !mat.texture.empty();
+            std::vector<Vertex>& bucket = buckets[tex];
+            const std::vector<int>& tri = mesh->submeshes[sub];
+            for (int idx : tri) {
+                size_t i = (size_t)idx;
+                Vec3 col = shade(wp[i], wn[i], points, ambient, sunDir, sunColor);
+                if (!textured) col = {col.x * mat.color[0], col.y * mat.color[1], col.z * mat.color[2]};
+                splash::Vec2 uv = haveUv ? mesh->uv[i] : splash::Vec2{};
+                bucket.push_back({wp[i].x, wp[i].y, -wp[i].z, uv.x, uv.y, col.x, col.y, col.z, 0.0f});
+            }
+        }
+    }
+
+    // Sky first (its own batch), then one batch per texture.
+    appendSky(m_verts);
+    m_batches.push_back({m_white, 0, (int)m_verts.size()});
+    for (auto& [tex, verts] : buckets) {
+        if (verts.empty()) continue;
+        int start = (int)m_verts.size();
+        m_verts.insert(m_verts.end(), verts.begin(), verts.end());
+        m_batches.push_back({tex, start, (int)verts.size()});
+    }
+
+    // Frame the scene bounds from the current eye direction so any scene fits.
+    splash::Bounds bounds;
+    bool any = false;
+    for (const Batch& b : m_batches) {
+        if (b.tex == m_white && b.start == 0) continue;  // skip the sky
+        for (int i = b.start; i < b.start + b.count; ++i) {
+            Vec3 gp{m_verts[(size_t)i].px, m_verts[(size_t)i].py, m_verts[(size_t)i].pz};
+            if (!any) {
+                bounds = splash::Bounds({gp.x, gp.y, gp.z}, {0, 0, 0});
+                any = true;
+            } else {
+                bounds.encapsulate({gp.x, gp.y, gp.z});
+            }
+        }
+    }
+    if (any) {
+        Vec3 center{bounds.center.x, bounds.center.y, bounds.center.z};
+        float radius = std::sqrt(splash::sqrMagnitude(bounds.extents));
+        radius = std::max(radius, 1.0f);
+        // Keep the old courtyard's eye direction. The distance is a fixed
+        // multiple of the bounding radius: it crops a large flat floor the way
+        // the original tuned camera did, while scaling to frame other scenes.
+        Vec3 dir = normalize(Vec3{7.6f, 5.2f, 9.2f} - Vec3{-0.9f, 0.9f, -2.0f});
+        float dist = radius * 1.15f;
+        m_target = center;
+        m_eye = center + dir * dist;
+    }
+
+    m_built = true;
 }
 
 bool Ps1View::init() {
@@ -264,12 +357,10 @@ bool Ps1View::init() {
     glGetProgramiv(m_prog, GL_LINK_STATUS, &ok);
     if (!ok) return false;
 
-    buildScene();
     glGenVertexArrays(1, &m_vao);
     glBindVertexArray(m_vao);
     glGenBuffers(1, &m_vbo);
     glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
-    glBufferData(GL_ARRAY_BUFFER, m_verts.size() * sizeof(Vertex), m_verts.data(), GL_STATIC_DRAW);
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, px));
     glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, u));
     glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, r));
@@ -277,11 +368,18 @@ bool Ps1View::init() {
     for (int i = 0; i < 4; ++i) glEnableVertexAttribArray(i);
     glBindVertexArray(0);
 
-    std::vector<uint8_t> atlas;
-    makeAtlas(atlas);
-    glGenTextures(1, &m_tex[0]);
-    glBindTexture(GL_TEXTURE_2D, m_tex[0]);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 192, 64, 0, GL_RGBA, GL_UNSIGNED_BYTE, atlas.data());
+    const uint8_t whitePx[4] = {255, 255, 255, 255};
+    glGenTextures(1, &m_white);
+    glBindTexture(GL_TEXTURE_2D, m_white);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, whitePx);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+
+    std::vector<uint8_t> fb;
+    makeFallback(fb);
+    glGenTextures(1, &m_fallback);
+    glBindTexture(GL_TEXTURE_2D, m_fallback);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 64, 64, 0, GL_RGBA, GL_UNSIGNED_BYTE, fb.data());
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 
@@ -292,6 +390,14 @@ bool Ps1View::init() {
 }
 
 unsigned Ps1View::render(int panelW, int panelH, int lines) {
+    if (!m_built || (m_doc && m_doc->revision() != m_builtRevision)) {
+        if (m_doc) m_builtRevision = m_doc->revision();
+        rebuild();
+        glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
+        glBufferData(GL_ARRAY_BUFFER, m_verts.size() * sizeof(Vertex), m_verts.data(), GL_STATIC_DRAW);
+        m_vboCap = m_verts.size();
+    }
+
     int h = clean ? panelH : lines;
     int w = clean ? panelW : std::max(1, (int)std::round((float)lines * panelW / panelH));
     if (w != m_fboW || h != m_fboH) {
@@ -307,8 +413,7 @@ unsigned Ps1View::render(int panelW, int panelH, int lines) {
         glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, m_depth);
     }
 
-    Vec3 eye = {7.6f, 5.2f, 9.2f}, target = {-0.9f, 0.9f, -2.0f};
-    m_viewProj = Mat4::perspective(0.95f, (float)panelW / panelH, 0.1f, 80.0f) * Mat4::lookAt(eye, target, {0, 1, 0});
+    m_viewProj = Mat4::perspective(0.95f, (float)panelW / panelH, 0.1f, 200.0f) * Mat4::lookAt(m_eye, m_target, {0, 1, 0});
 
     const float fog[3] = {0.10f, 0.11f, 0.17f};
     glBindFramebuffer(GL_FRAMEBUFFER, m_fbo);
@@ -324,11 +429,13 @@ unsigned Ps1View::render(int panelW, int panelH, int lines) {
     glUniform2f(glGetUniformLocation(m_prog, "uRes"), (float)w, (float)h);
     glUniform1i(glGetUniformLocation(m_prog, "uClean"), clean ? 1 : 0);
     glUniform3f(glGetUniformLocation(m_prog, "uFog"), fog[0], fog[1], fog[2]);
-    glUniform1i(glGetUniformLocation(m_prog, "uAtlas"), 0);
+    glUniform1i(glGetUniformLocation(m_prog, "uTex"), 0);
     glActiveTexture_(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, m_tex[0]);
     glBindVertexArray(m_vao);
-    glDrawArrays(GL_TRIANGLES, 0, (int)m_verts.size());
+    for (const Batch& b : m_batches) {
+        glBindTexture(GL_TEXTURE_2D, b.tex);
+        glDrawArrays(GL_TRIANGLES, b.start, b.count);
+    }
     glBindVertexArray(0);
     glDisable(GL_DEPTH_TEST);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);

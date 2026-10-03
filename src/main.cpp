@@ -146,6 +146,7 @@ int main(int argc, char** argv) {
     state.viewMode = args.viewMode;
     editor::Document doc;
     openDocument(doc, args);
+    view.setDocument(doc);
 
     int frame = 0;
     bool running = true;
