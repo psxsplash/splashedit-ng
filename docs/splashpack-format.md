@@ -2,8 +2,8 @@
 
 Sources read (all via `git show origin/main:<path>`, never the working checkout):
 
-- Writer repo `/home/pixel/sources/splashedit`, origin/main = `64785e3` ("Merge pull request #52 from psxsplash/fix-stream-hang")
-- Reader repo `/home/pixel/sources/psxsplash`, origin/main = `c1df566` ("Merge pull request #55 from psxsplash/fix-heap-symbols")
+- Writer repo `splashedit`, origin/main = `64785e3` ("Merge pull request #52 from psxsplash/fix-stream-hang")
+- Reader repo `psxsplash`, origin/main = `c1df566` ("Merge pull request #55 from psxsplash/fix-heap-symbols")
 
 Conventions: little-endian everywhere (.NET `BinaryWriter` on x86, MIPS LE reader). All offsets are absolute byte offsets from file start.
 "W:" = writer file `Runtime/<file>.cs` (line numbers are origin/main line numbers, where I give them); "R:" = reader file under `src/`.
@@ -465,9 +465,9 @@ M16. **ArrangeAtlasesInVRAM "unplaced" test**: `if (atlas.PositionX == 0 && atla
 ## 8. Commands run
 
 ```
-git -C /home/pixel/sources/splashedit fetch -q origin && git -C /home/pixel/sources/splashedit log -1 --oneline origin/main
-git -C /home/pixel/sources/psxsplash fetch -q origin; git -C ... log -1 --oneline origin/main
-git -C /home/pixel/sources/psxsplash grep -n -i 'splashpack' origin/main -- src
+git -C splashedit fetch -q origin && git -C splashedit log -1 --oneline origin/main
+git -C psxsplash fetch -q origin; git -C ... log -1 --oneline origin/main
+git -C psxsplash grep -n -i 'splashpack' origin/main -- src
 git show origin/main:Runtime/{PSXSceneWriter,Utils,PSXMesh,BVH,PSXObjectExporter,PSXSceneExporter,PSXTexture2D,ImageProcessing,TexturePacker,PSXNavRegionBuilder,PSXRoom,PSXCanvasData,PSXUIExporter,PSXUILayout,PSXUIElementType,PSXFontAsset,PSXCutsceneExporter,PSXTrackType,PSXInterpMode,PSXPointLightExporter,PSXLightingBaker,PSXAnimationExporter,PSXSkinnedMeshExporter,PSXSpriteExporter,PSXTilemapExporter,PSXWorldStreaming,PSXLoaderPackWriter(header+greps),PSXInteractable,PSXAgent,PSXTriggerBox,PSXPlayer,PSXAudioClip}.cs   (sed/grep slices)
 git show origin/main:src/{splashpack.hh,splashpack.cpp,gameobject.hh,mesh.hh,bvh.hh,interactable.hh,navregion.hh,navregion.cpp,cutscene.hh,uisystem.hh,uisystem.cpp,spritesystem.cpp,tilesystem.cpp,streamplanner.hh,worldstreamer.cpp,lua.h,scenemanager.cpp(slices),skinmesh.hh,lightmath.hh}
 grep -n -i 'guid|GetAssetPath|DateTime|Random|GetHashCode|Time\.|Environment\.' over the writer files
