@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "unitymath.hh"
+#include "editor/live_export.hh"
 
 namespace viewport {
 class Ps1View;
@@ -29,6 +30,9 @@ struct State {
     // Gizmo snapping: move to 0.25 m, rotate to 15 degrees, scale to 0.1.
     // Ctrl snaps while it is off.
     bool snap = true;
+
+    // Background dry-run export feeding the status bar's budget meters and problem count.
+    editor::LiveExport live;
 
     // F2 rename in the tree: the object's path, and whether the editor still has to open.
     bool renaming = false;

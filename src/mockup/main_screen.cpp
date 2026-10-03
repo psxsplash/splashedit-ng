@@ -13,6 +13,7 @@
 #include <optional>
 #include <string>
 
+#include "budget.hh"
 #include "editor/catalog.hh"
 #include "editor/document.hh"
 #include "editor/gizmo.hh"
@@ -1632,19 +1633,50 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
     }
 }
 
+static std::string kb(size_t bytes) {
+    char b[32];
+    std::snprintf(b, sizeof b, "%zu", (bytes + 512) / 1024);
+    return b;
+}
+
+static std::string mb(size_t bytes) {
+    char b[32];
+    std::snprintf(b, sizeof b, "%.2f", double(bytes) / (1024.0 * 1024.0));
+    return b;
+}
+
 static void statusBar(ImDrawList* dl, ImVec2 size, const editor::Document& doc, const State& st) {
     Fonts& f = fonts();
     ImRect bar(ImVec2(0, size.y - size::statusBar), size);
     dl->AddRectFilled(bar.Min, bar.Max, color::chrome);
     float x = space::md;
-    x += meter("m_vram", ImVec2(x, bar.Min.y), icon::grid, "VRAM", 0.61f, "626 / 1024 KB",
-               "Framebuffers, textures, palettes and fonts, after packing.") + space::xl;
-    x += meter("m_poly", ImVec2(x, bar.Min.y), icon::box, "Triangles in view", 0.84f, "2,520 / 3,000",
-               "Most triangles visible from any spot the camera can reach.") + space::xl;
-    x += meter("m_spu", ImVec2(x, bar.Min.y), icon::music, "SPU RAM", 0.19f, "96 / 512 KB", "Sound samples loaded with this scene.") +
-         space::xl;
-    x += meter("m_ram", ImVec2(x, bar.Min.y), icon::hardDrive, "RAM", 0.58f, "1.16 / 2 MB",
-               "Scene data, Lua and the engine in main RAM.");
+    const std::optional<splash::ExportResult>& res = st.live.result();
+    if (res && res->ok()) {
+        const splash::ExportStats& s = res->stats;
+        splash::Budget v = splash::vramBudget(s), a = splash::spuBudget(s), r = splash::ramBudget(s);
+        std::string vs = kb(v.used) + " / " + kb(v.capacity) + " KB";
+        std::string as = kb(a.used) + " / " + kb(a.capacity) + " KB";
+        std::string rs = mb(r.used) + " / " + mb(r.capacity) + " MB";
+        char ts[32];
+        std::snprintf(ts, sizeof ts, "%d", s.triangles);
+        x += meter("m_vram", ImVec2(x, bar.Min.y), icon::grid, "VRAM", v.fraction(), vs.c_str(),
+                   "Framebuffers, texture atlases, palettes and fonts, as the export packs them.") +
+             space::xl;
+        x += meter("m_spu", ImVec2(x, bar.Min.y), icon::music, "SPU RAM", a.fraction(), as.c_str(),
+                   "Sound samples, placed the way psxsplash uploads them.") +
+             space::xl;
+        x += meter("m_ram", ImVec2(x, bar.Min.y), icon::hardDrive, "RAM", r.fraction(), rs.c_str(),
+                   "Scene data and the renderer's buffers in psxsplash's heap, at the peak of loading. "
+                   "Lua's own allocations are not counted.") +
+             space::xl;
+        meter("m_tris", ImVec2(x, bar.Min.y), icon::box, "Triangles", -1, ts,
+              "Triangles in the exported meshes. How many are drawn depends on the camera.");
+    } else {
+        const char* msg = res ? "Export failed: see problems" : "Measuring...";
+        ImVec2 ms = measure(f.regular, type::caption, msg);
+        text(dl, ImVec2(x, bar.Min.y + (size::statusBar - ms.y) * 0.5f), f.regular, type::caption,
+             res ? color::bad : color::textFaint, msg);
+    }
 
     // Right side: problems and save state.
     const char* saved = !st.saveError.empty() ? st.saveError.c_str() : doc.dirty() ? "Unsaved changes" : "All changes saved";
@@ -1652,13 +1684,53 @@ static void statusBar(ImDrawList* dl, ImVec2 size, const editor::Document& doc, 
     float rx = size.x - space::md - s.x;
     text(dl, ImVec2(rx, bar.Min.y + (size::statusBar - s.y) * 0.5f), f.regular, type::caption,
          st.saveError.empty() ? color::textFaint : color::bad, saved);
-    const char* prob = "1 suggestion";
-    ImVec2 ps = measure(f.medium, type::caption, prob);
+    if (!res) return;
+    const size_t nErr = res->errors.size(), nWarn = res->warnings.size();
+    std::string prob = nErr ? std::to_string(nErr) + (nErr == 1 ? " error" : " errors")
+                       : nWarn ? std::to_string(nWarn) + (nWarn == 1 ? " warning" : " warnings")
+                               : "No problems";
+    if (nErr && nWarn) prob += ", " + std::to_string(nWarn) + (nWarn == 1 ? " warning" : " warnings");
+    ImVec2 ps = measure(f.medium, type::caption, prob.c_str());
     ImRect pr(ImVec2(rx - space::xl - ps.x - 22, bar.Min.y + 5), ImVec2(rx - space::xl + 8, bar.Max.y - 5));
+    const bool any = nErr || nWarn;
+    const ImU32 tone = nErr ? color::bad : nWarn ? color::warn : color::textFaint;
     Hit h = interact("problems", pr);
-    dl->AddRectFilled(pr.Min, pr.Max, rgb(0xf0a43a, (int)(30 + 30 * h.hover)), radius::pill);
-    text(dl, ImVec2(pr.Min.x + 8, bar.Min.y + 7), f.medium, type::label, color::warn, icon::warning);
-    text(dl, ImVec2(pr.Min.x + 26, bar.Min.y + (size::statusBar - ps.y) * 0.5f), f.medium, type::caption, color::warn, prob);
+    if (any) {
+        dl->AddRectFilled(pr.Min, pr.Max, nErr ? rgb(0xef5a6f, (int)(30 + 30 * h.hover)) : rgb(0xf0a43a, (int)(30 + 30 * h.hover)),
+                          radius::pill);
+        text(dl, ImVec2(pr.Min.x + 8, bar.Min.y + 7), f.medium, type::label, tone, icon::warning);
+        if (h.clicked) ImGui::OpenPopup("##problems");
+    }
+    text(dl, ImVec2(pr.Min.x + 26, bar.Min.y + (size::statusBar - ps.y) * 0.5f), f.medium, type::caption, tone, prob.c_str());
+
+    ImGui::SetNextWindowPos(ImVec2(pr.Max.x, pr.Min.y - space::xs), ImGuiCond_Always, ImVec2(1, 1));
+    ImGui::SetNextWindowSizeConstraints(ImVec2(320, 0), ImVec2(560, size.y * 0.5f));
+    ImGui::PushStyleColor(ImGuiCol_PopupBg, color::raised);
+    ImGui::PushStyleColor(ImGuiCol_Border, color::borderStrong);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(space::md, space::md));
+    ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, radius::card);
+    ImGui::PushStyleVar(ImGuiStyleVar_PopupBorderSize, 1.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(space::sm, space::sm));
+    const bool problemsOpen = ImGui::BeginPopup("##problems", ImGuiWindowFlags_NoSavedSettings);
+    ImGui::PopStyleVar(4);
+    ImGui::PopStyleColor(2);
+    if (problemsOpen) {
+        ImGui::PushFont(f.regular, type::caption);
+        ImGui::PushTextWrapPos(540);
+        for (const std::string& e : res->errors) {
+            ImGui::PushStyleColor(ImGuiCol_Text, color::bad);
+            ImGui::TextUnformatted(e.c_str());
+            ImGui::PopStyleColor();
+        }
+        for (const std::string& w : res->warnings) {
+            ImGui::PushStyleColor(ImGuiCol_Text, color::warn);
+            ImGui::TextUnformatted(w.c_str());
+            ImGui::PopStyleColor();
+        }
+        ImGui::PopTextWrapPos();
+        ImGui::PopFont();
+        ImGui::EndPopup();
+    }
 }
 
 // Document-wide shortcuts. Skipped while a text field has the keyboard.
@@ -1696,6 +1768,7 @@ static void shortcuts(State& st, editor::Document& doc) {
 
 ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view, ImVec2 size) {
     shortcuts(st, doc);
+    st.live.update(doc, ImGui::GetTime());
     ImGui::SetNextWindowPos(ImVec2(0, 0));
     ImGui::SetNextWindowSize(size);
     ImGui::Begin("##main", nullptr,

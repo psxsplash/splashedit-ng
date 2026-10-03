@@ -19,11 +19,27 @@ struct ExportOptions {
     std::vector<std::string> objectOrder;
     // Store Lua scripts as psxlua bytecode (compileLua) instead of source.
     bool luaBytecode = false;
+    // Build everything but write no files; ExportResult::stats still fills in.
+    bool dryRun = false;
+};
+
+// What one export puts on the console, in bytes unless noted.
+struct ExportStats {
+    size_t splashpackBytes = 0, vramFileBytes = 0, spuFileBytes = 0;
+    // VRAM: display and draw buffers, texture atlases (each width x 256 at
+    // 16 bits per texel), CLUTs and font sheets.
+    size_t framebufferBytes = 0, atlasBytes = 0, clutBytes = 0, fontBytes = 0;
+    size_t vramBytes() const { return framebufferBytes + atlasBytes + clutBytes + fontBytes; }
+    // SPU RAM end address after psxsplash uploads every clip: the engine
+    // starts at 0x1010 and rounds each clip's address and size up to 16 bytes.
+    size_t spuEnd = 0;
+    int triangles = 0;
 };
 
 struct ExportResult {
     std::vector<std::string> errors;
     std::vector<std::string> warnings;
+    ExportStats stats;
     bool ok() const { return errors.empty(); }
 };
 

@@ -52,7 +52,7 @@ SDL_HitTestResult hitTest(SDL_Window* win, const SDL_Point* p, void*) {
 // Scripted input for screenshot mode, so interactions can be checked headless.
 // Actions run one after another from frame 5, in command-line order.
 struct Action {
-    enum Kind { Click, DoubleClick, Drag, Key, Wheel, Text } kind;
+    enum Kind { Click, DoubleClick, Drag, Key, Wheel, Text, Wait } kind;
     explicit Action(Kind k) : kind(k) {}
     float x0 = 0, y0 = 0, x1 = 0, y1 = 0;
     int button = 0;
@@ -61,6 +61,7 @@ struct Action {
     bool ctrl = false, shift = false;
     bool hold = false;  // a drag that never lets go (mid-drag screenshots)
     std::string text;
+    int waitFrames = 0;
 };
 
 struct Args {
@@ -105,6 +106,7 @@ int actionFrames(const Action& a) {
         case Action::Click: return 6;
         case Action::DoubleClick: return 8;
         case Action::Drag: return 20;
+        case Action::Wait: return a.waitFrames;
         default: return 4;
     }
 }
@@ -152,6 +154,8 @@ void playAction(ImGuiIO& io, const Action& a, int f) {
         case Action::Text:
             if (f == 0) io.AddInputCharactersUTF8(a.text.c_str());
             break;
+        case Action::Wait:
+            break;
     }
 }
 
@@ -185,6 +189,11 @@ Args parse(int argc, char** argv) {
             const char* spec = next();
             if (parseKey(spec, act)) a.actions.push_back(act);
             else std::fprintf(stderr, "unknown key '%s'\n", spec);
+        } else if (!std::strcmp(argv[i], "--wait")) {
+            // Idle frames before the next action (lets the background export finish).
+            Action act(Action::Wait);
+            act.waitFrames = std::atoi(next());
+            a.actions.push_back(act);
         } else if (!std::strcmp(argv[i], "--text")) {
             Action act(Action::Text);
             act.text = next();

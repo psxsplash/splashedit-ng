@@ -67,6 +67,7 @@ struct RuntimeLight {
 };
 constexpr size_t kMaxSceneLights = 16;   // MAX_SCENE_LIGHTS in psxsplash lightmath.hh
 constexpr size_t kMaxLightsPerMesh = 4;  // MAX_LIGHTS_PER_MESH
+constexpr size_t kSpuStart = 0x1010;      // SPU_RAM_START in psxsplash audiomanager.hh
 
 // String.Substring(0, 24) counts UTF-16 code units; names are stored as UTF-8.
 std::string truncateUtf16(const std::string& s, size_t units) {
@@ -1715,7 +1716,8 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     }
 
     fs::path outPath = out;
-    w.save(outPath);
+    if (!options.dryRun) w.save(outPath);
+    res.stats.splashpackBytes = w.pos();
 
     // ---- .vram
     BinWriter v;
@@ -1754,7 +1756,8 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
         v.bytes(px.data(), px.size());
         v.align4();
     }
-    v.save(fs::path(outPath).replace_extension(".vram"));
+    if (!options.dryRun) v.save(fs::path(outPath).replace_extension(".vram"));
+    res.stats.vramFileBytes = v.pos();
 
     // ---- .spu
     BinWriter s;
@@ -1770,7 +1773,21 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
         for (uint8_t b : audioData[i]) s.u8(b);
         s.align4();
     }
-    s.save(fs::path(outPath).replace_extension(".spu"));
+    if (!options.dryRun) s.save(fs::path(outPath).replace_extension(".spu"));
+    res.stats.spuFileBytes = s.pos();
+
+    ExportStats& st = res.stats;
+    const VramSettings& vs = options.vram;
+    st.framebufferBytes = size_t(vs.resolutionX) * size_t(vs.resolutionY) * 2 * (vs.dualBuffering ? 2 : 1);
+    for (const Atlas& a : vram.atlases) {
+        st.atlasBytes += size_t(a.width) * Atlas::kHeight * 2;
+        for (const PsxTexture* t : a.textures)
+            if (t->hasPalette) st.clutBytes += t->palette.size() * 2;
+    }
+    for (const FontSheet& f : fontSheets) st.fontBytes += f.packed4bpp().size();
+    st.spuEnd = kSpuStart;
+    for (const std::vector<uint8_t>& d : audioData) st.spuEnd = ((st.spuEnd + 15) & ~size_t(15)) + ((d.size() + 15) & ~size_t(15));
+    for (const ExpObject& e : exporters) st.triangles += int(e.tris.size());
     return res;
 }
 

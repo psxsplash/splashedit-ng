@@ -773,8 +773,9 @@ float problemCard(const char* id, ImVec2 pos, float width, const char* title, co
 float meter(const char* id, ImVec2 pos, const char* ic, const char* label, float fraction, const char* value, const char* tip) {
     Fonts& f = fonts();
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    ImU32 col = fraction < 0.75f ? color::good : fraction < 0.9f ? color::warn : color::bad;
-    float barW = 64;
+    // A negative fraction is a plain readout: no bar.
+    ImU32 col = fraction < 0 ? color::textDim : fraction < 0.75f ? color::good : fraction < 0.9f ? color::warn : color::bad;
+    float barW = fraction < 0 ? -space::sm : 64;
     float labelW = measure(f.medium, type::caption, label).x;
     float valueW = measure(f.regular, type::caption, value).x;
     float w = 18 + labelW + space::sm + barW + space::sm + valueW;
@@ -789,8 +790,10 @@ float meter(const char* id, ImVec2 pos, const char* ic, const char* label, float
     text(dl, ImVec2(x, centerY(f.medium, type::caption, r.Min.y, r.Max.y)), f.medium, type::caption, color::textDim, label);
     x += labelW + space::sm;
     float cy = r.GetCenter().y;
-    dl->AddRectFilled(ImVec2(x, cy - 2.5f), ImVec2(x + barW, cy + 2.5f), color::active, 3);
-    dl->AddRectFilled(ImVec2(x, cy - 2.5f), ImVec2(x + barW * std::min(fraction, 1.0f), cy + 2.5f), col, 3);
+    if (fraction >= 0) {
+        dl->AddRectFilled(ImVec2(x, cy - 2.5f), ImVec2(x + barW, cy + 2.5f), color::active, 3);
+        dl->AddRectFilled(ImVec2(x, cy - 2.5f), ImVec2(x + barW * std::min(fraction, 1.0f), cy + 2.5f), col, 3);
+    }
     x += barW + space::sm;
     text(dl, ImVec2(x, centerY(f.regular, type::caption, r.Min.y, r.Max.y)), f.regular, type::caption, color::text, value);
     return w;

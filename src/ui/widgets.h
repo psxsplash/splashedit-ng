@@ -123,6 +123,7 @@ void slider(const char* id, ImRect r, float t, const char* value);
 float problemCard(const char* id, ImVec2 pos, float width, const char* title, const char* body, const char* fixLabel);
 
 // Budget meter for the status bar. Returns its width.
+// fraction < 0 draws no bar (a plain count).
 float meter(const char* id, ImVec2 pos, const char* icon, const char* label, float fraction, const char* value, const char* tip);
 
 }  // namespace ui
