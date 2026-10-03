@@ -7,12 +7,15 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <string>
+#include <system_error>
 #include <vector>
 
-#define STB_IMAGE_WRITE_IMPLEMENTATION
+// The implementation comes from splashcore (core/stb_impl.cpp).
 #include <stb_image_write.h>
 
+#include "editor/document.hh"
 #include "gl.h"
 #include "mockup/main_screen.h"
 #include "ui/theme.h"
@@ -49,6 +52,9 @@ struct Args {
     float mouseX = -1, mouseY = -1;
     int frames = 30;
     int viewMode = 0;
+    const char* project = nullptr;  // project root; default: the bundled example
+    const char* scene = nullptr;    // relative to the project; default: first *.scene in it
+    const char* select = nullptr;   // object name to select at startup
 };
 
 Args parse(int argc, char** argv) {
@@ -60,8 +66,40 @@ Args parse(int argc, char** argv) {
         else if (!std::strcmp(argv[i], "--mouse")) std::sscanf(next(), "%f,%f", &a.mouseX, &a.mouseY);
         else if (!std::strcmp(argv[i], "--frames")) a.frames = std::atoi(next());
         else if (!std::strcmp(argv[i], "--clean")) a.viewMode = 1;
+        else if (!std::strcmp(argv[i], "--project")) a.project = next();
+        else if (!std::strcmp(argv[i], "--scene")) a.scene = next();
+        else if (!std::strcmp(argv[i], "--select")) a.select = next();
     }
     return a;
+}
+
+// First *.scene directly inside `project`, by name, or empty if none.
+std::filesystem::path firstScene(const std::filesystem::path& project) {
+    std::filesystem::path best;
+    std::error_code ec;
+    for (std::filesystem::directory_iterator it(project, ec), end; !ec && it != end; it.increment(ec))
+        if (it->path().extension() == ".scene" && (best.empty() || it->path().filename() < best))
+            best = it->path().filename();
+    return best;
+}
+
+// Loads the scene named on the command line, or the bundled example. Errors
+// are reported and leave an empty scene open.
+void openDocument(editor::Document& doc, const Args& args) {
+    bool bundled = !args.project;
+    std::filesystem::path project = bundled ? std::filesystem::path(SPLASHEDIT_EXAMPLE_DIR) : std::filesystem::path(args.project);
+    std::filesystem::path scene = args.scene ? std::filesystem::path(args.scene) : firstScene(project);
+    if (scene.empty()) {
+        std::fprintf(stderr, "no .scene file in %s; opening an empty scene\n", project.string().c_str());
+        doc.load(project, "untitled.scene");
+        return;
+    }
+    if (auto err = doc.load(project, scene)) {
+        std::fprintf(stderr, "could not load %s: %s; opening an empty scene\n", (project / scene).string().c_str(), err->c_str());
+        return;
+    }
+    const char* select = args.select ? args.select : bundled && !args.scene ? "Crate" : nullptr;
+    if (select && !doc.selectByName(select)) std::fprintf(stderr, "no object named '%s' in the scene\n", select);
 }
 
 }  // namespace
@@ -106,6 +144,8 @@ int main(int argc, char** argv) {
     }
     mockup::State state;
     state.viewMode = args.viewMode;
+    editor::Document doc;
+    openDocument(doc, args);
 
     int frame = 0;
     bool running = true;
@@ -122,7 +162,7 @@ int main(int argc, char** argv) {
             if (args.mouseX >= 0) io.AddMousePosEvent(args.mouseX, args.mouseY);
         }
         ImGui::NewFrame();
-        g_hit.titleBar = mockup::drawMainScreen(state, view, io.DisplaySize);
+        g_hit.titleBar = mockup::drawMainScreen(state, doc, view, io.DisplaySize);
         g_hit.overItem = ImGui::IsAnyItemHovered();
         ImGui::Render();
 

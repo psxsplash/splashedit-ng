@@ -54,7 +54,8 @@ struct TreeRow {
     bool warning = false;
     bool hidden = false;
 };
-void treeRow(const char* id, ImRect r, const TreeRow& row);
+// Returns the row's hit state so the caller can tell a chevron click from a row click.
+Hit treeRow(const char* id, ImRect r, const TreeRow& row);
 
 // Collapsible inspector section. Returns open state.
 bool section(const char* id, ImRect r, const char* icon, ImU32 iconColor, const char* title, bool open, bool enabled = true,

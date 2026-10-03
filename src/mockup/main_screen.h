@@ -6,6 +6,9 @@
 namespace viewport {
 class Ps1View;
 }
+namespace editor {
+class Document;
+}
 
 namespace mockup {
 
@@ -15,8 +18,8 @@ struct State {
     bool maximized = false;
 };
 
-// Draws the static main-screen mockup filling `size`. Returns the title-bar
+// Draws the main screen for `doc` filling `size`. Returns the title-bar
 // rect so the platform layer can make it draggable.
-ImRect drawMainScreen(State& state, viewport::Ps1View& view, ImVec2 size);
+ImRect drawMainScreen(State& state, editor::Document& doc, viewport::Ps1View& view, ImVec2 size);
 
 }  // namespace mockup
