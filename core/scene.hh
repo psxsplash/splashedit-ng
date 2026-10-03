@@ -19,6 +19,7 @@ enum class BitDepth : uint8_t { Bpp4 = 4, Bpp8 = 8, Bpp16 = 16 };
 enum class VertexColorMode : uint8_t { Baked, Flat, Mesh };
 enum class ColliderKind : uint8_t { None, Static, Dynamic };
 enum class LightKind : uint8_t { Directional, Point, Spot };
+enum class DynamicLighting : uint8_t { Auto, On, Off, Smooth };
 enum class SceneType : uint8_t { Exterior = 0, Interior = 1 };
 enum class NavPartition : uint8_t { Watershed = 0, Monotone = 1, Layer = 2 };
 
@@ -51,6 +52,8 @@ struct MeshComponent {
     std::array<uint8_t, 3> flatColor{128, 128, 128};
     bool smoothNormals = true;
     int uvOffsetMaterial = 0;
+    // Auto: lit by runtime lights whose range reaches the mesh bounds.
+    DynamicLighting dynamicLighting = DynamicLighting::Auto;
     ExtraKeys extra;
 };
 
@@ -73,6 +76,9 @@ struct LightComponent {
     float spotAngle = 30;
     float innerSpotAngle = 0;
     bool enabled = true;
+    // Point lights only: computed on the console (and switchable from Lua)
+    // instead of baked into vertex colours.
+    bool runtime = false;
     ExtraKeys extra;
 };
 

@@ -54,6 +54,11 @@ const std::initializer_list<std::pair<const char*, ColliderKind>> kColliderKinds
     {"none", ColliderKind::None}, {"static", ColliderKind::Static}, {"dynamic", ColliderKind::Dynamic}};
 const std::initializer_list<std::pair<const char*, LightKind>> kLightKinds = {
     {"directional", LightKind::Directional}, {"point", LightKind::Point}, {"spot", LightKind::Spot}};
+const std::initializer_list<std::pair<const char*, DynamicLighting>> kDynamicLighting = {
+    {"auto", DynamicLighting::Auto},
+    {"on", DynamicLighting::On},
+    {"off", DynamicLighting::Off},
+    {"smooth", DynamicLighting::Smooth}};
 const std::initializer_list<std::pair<const char*, SceneType>> kSceneTypes = {
     {"exterior", SceneType::Exterior}, {"interior", SceneType::Interior}};
 const std::initializer_list<std::pair<const char*, NavPartition>> kPartitions = {
@@ -120,7 +125,8 @@ json writeMesh(const MeshComponent& m) {
               {"vertexColors", enumTo(m.vertexColors, kColorModes)},
               {"flatColor", json::array({m.flatColor[0], m.flatColor[1], m.flatColor[2]})},
               {"smoothNormals", m.smoothNormals},
-              {"uvOffsetMaterial", m.uvOffsetMaterial}};
+              {"uvOffsetMaterial", m.uvOffsetMaterial},
+              {"dynamicLighting", enumTo(m.dynamicLighting, kDynamicLighting)}};
     putExtras(j, m.extra);
     return j;
 }
@@ -151,7 +157,8 @@ json writeLight(const LightComponent& l) {
               {"range", l.range},
               {"spotAngle", l.spotAngle},
               {"innerSpotAngle", l.innerSpotAngle},
-              {"enabled", l.enabled}};
+              {"enabled", l.enabled},
+              {"runtime", l.runtime}};
     putExtras(j, l.extra);
     return j;
 }
@@ -238,6 +245,7 @@ Object readObject(const json& j) {
                 for (int i = 0; i < 3; i++) m.flatColor[i] = c["flatColor"].at(i).get<uint8_t>();
             m.smoothNormals = c.value("smoothNormals", true);
             m.uvOffsetMaterial = c.value("uvOffsetMaterial", 0);
+            if (c.contains("dynamicLighting")) m.dynamicLighting = enumFrom(c["dynamicLighting"], kDynamicLighting);
             m.extra = extrasOf(c, writeMesh(m));
             o.mesh = m;
         } else if (type == "collider") {
@@ -260,6 +268,8 @@ Object readObject(const json& j) {
             l.spotAngle = c.value("spotAngle", 30.f);
             l.innerSpotAngle = c.value("innerSpotAngle", 0.f);
             l.enabled = c.value("enabled", true);
+            l.runtime = c.value("runtime", false);
+            if (l.runtime && l.kind != LightKind::Point) fail("only point lights can be runtime lights");
             l.extra = extrasOf(c, writeLight(l));
             o.light = l;
         } else if (type == "player") {

@@ -1,0 +1,300 @@
+{
+ "format": "splashedit-ng/scene",
+ "version": 1,
+ "settings": {
+  "gteScaling": 100.0,
+  "sceneType": "exterior",
+  "fog": {
+   "enabled": false,
+   "color": [
+    0,
+    0,
+    0
+   ],
+   "density": 5
+  },
+  "networkId": ""
+ },
+ "objects": [
+  {
+   "name": "Lit",
+   "active": true,
+   "transform": {
+    "position": [
+     0.0,
+     0.0,
+     4.0
+    ],
+    "rotation": [
+     0,
+     0,
+     0,
+     1
+    ],
+    "scale": [
+     1,
+     1,
+     1
+    ]
+   },
+   "components": [
+    {
+     "type": "mesh",
+     "mesh": "../../examples/courtyard/meshes/crate.mesh",
+     "materials": [
+      {
+       "texture": "../../examples/courtyard/textures/crate.png",
+       "color": [
+        1,
+        1,
+        1,
+        1
+       ]
+      }
+     ],
+     "bitDepth": 8,
+     "vertexColors": "baked"
+    }
+   ],
+   "children": []
+  },
+  {
+   "name": "Far",
+   "active": true,
+   "transform": {
+    "position": [
+     30.0,
+     0.0,
+     4.0
+    ],
+    "rotation": [
+     0,
+     0,
+     0,
+     1
+    ],
+    "scale": [
+     1,
+     1,
+     1
+    ]
+   },
+   "components": [
+    {
+     "type": "mesh",
+     "mesh": "../../examples/courtyard/meshes/crate.mesh",
+     "materials": [
+      {
+       "texture": "../../examples/courtyard/textures/crate.png",
+       "color": [
+        1,
+        1,
+        1,
+        1
+       ]
+      }
+     ],
+     "bitDepth": 8,
+     "vertexColors": "baked"
+    }
+   ],
+   "children": []
+  },
+  {
+   "name": "Smooth",
+   "active": true,
+   "transform": {
+    "position": [
+     -2.0,
+     0.0,
+     4.0
+    ],
+    "rotation": [
+     0,
+     0,
+     0,
+     1
+    ],
+    "scale": [
+     1,
+     1,
+     1
+    ]
+   },
+   "components": [
+    {
+     "type": "mesh",
+     "mesh": "../../examples/courtyard/meshes/crate.mesh",
+     "materials": [
+      {
+       "texture": "../../examples/courtyard/textures/crate.png",
+       "color": [
+        1,
+        1,
+        1,
+        1
+       ]
+      }
+     ],
+     "bitDepth": 8,
+     "vertexColors": "baked",
+     "dynamicLighting": "smooth"
+    }
+   ],
+   "children": []
+  },
+  {
+   "name": "Unlit",
+   "active": true,
+   "transform": {
+    "position": [
+     2.0,
+     0.0,
+     4.0
+    ],
+    "rotation": [
+     0,
+     0,
+     0,
+     1
+    ],
+    "scale": [
+     1,
+     1,
+     1
+    ]
+   },
+   "components": [
+    {
+     "type": "mesh",
+     "mesh": "../../examples/courtyard/meshes/crate.mesh",
+     "materials": [
+      {
+       "texture": "../../examples/courtyard/textures/crate.png",
+       "color": [
+        1,
+        1,
+        1,
+        1
+       ]
+      }
+     ],
+     "bitDepth": 8,
+     "vertexColors": "baked",
+     "dynamicLighting": "off"
+    }
+   ],
+   "children": []
+  },
+  {
+   "name": "Sun",
+   "active": true,
+   "transform": {
+    "position": [
+     0,
+     10,
+     0
+    ],
+    "rotation": [
+     0,
+     0,
+     0,
+     1
+    ],
+    "scale": [
+     1,
+     1,
+     1
+    ]
+   },
+   "components": [
+    {
+     "type": "light",
+     "kind": "directional",
+     "color": [
+      1,
+      1,
+      1
+     ],
+     "intensity": 0.3
+    }
+   ],
+   "children": []
+  },
+  {
+   "name": "Red",
+   "active": true,
+   "transform": {
+    "position": [
+     0.0,
+     0.5,
+     2.8
+    ],
+    "rotation": [
+     0,
+     0,
+     0,
+     1
+    ],
+    "scale": [
+     1,
+     1,
+     1
+    ]
+   },
+   "components": [
+    {
+     "type": "light",
+     "kind": "point",
+     "color": [
+      1,
+      0.2,
+      0.1
+     ],
+     "intensity": 2.0,
+     "range": 3.0,
+     "runtime": true
+    }
+   ],
+   "children": []
+  },
+  {
+   "name": "Spare",
+   "active": true,
+   "transform": {
+    "position": [
+     0,
+     5,
+     0
+    ],
+    "rotation": [
+     0,
+     0,
+     0,
+     1
+    ],
+    "scale": [
+     1,
+     1,
+     1
+    ]
+   },
+   "components": [
+    {
+     "type": "light",
+     "kind": "point",
+     "color": [
+      0,
+      0,
+      1
+     ],
+     "intensity": 1.0,
+     "range": 1.0,
+     "runtime": true,
+     "enabled": false
+    }
+   ],
+   "children": []
+  }
+ ]
+}

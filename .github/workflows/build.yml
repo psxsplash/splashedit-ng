@@ -37,5 +37,6 @@ jobs:
           "$py" tests/cutscenecheck.py "$cli"
           "$py" tests/skincheck.py "$cli"
           "$py" tests/animcheck.py "$cli"
+          "$py" tests/lightcheck.py "$cli"
       - name: Editor tests
         run: ctest --test-dir build -C Release --output-on-failure

@@ -58,10 +58,10 @@ Components so far (more are added feature by feature, matching the splashpack se
 
 | type | fields |
 |---|---|
-| `mesh` | `mesh` (path to a `.mesh`), `materials` (one per submesh: `texture` path or null, `color` RGBA 0..1), `bitDepth` 4/8/16, `vertexColors` `baked`/`flat`/`mesh`, `flatColor` RGB 0..255, `smoothNormals`, `uvOffsetMaterial` |
+| `mesh` | `mesh` (path to a `.mesh`), `materials` (one per submesh: `texture` path or null, `color` RGBA 0..1), `bitDepth` 4/8/16, `vertexColors` `baked`/`flat`/`mesh`, `flatColor` RGB 0..255, `smoothNormals`, `uvOffsetMaterial`, `dynamicLighting` `auto`/`on`/`off`/`smooth` (whether runtime point lights light it on the console: `auto` when one reaches its bounds, `smooth` lights per vertex at about nine times the cost) |
 | `collider` | `kind`: `none`, `static`, `dynamic`; `platform` bool |
 | `script` | `lua`: path to a `.lua` file |
-| `light` | `kind` `directional`/`point`/`spot`, `color` RGB 0..1, `intensity`, `range`, `spotAngle`, `innerSpotAngle`, `enabled` true |
+| `light` | `kind` `directional`/`point`/`spot`, `color` RGB 0..1, `intensity`, `range`, `spotAngle`, `innerSpotAngle`, `enabled` true, `runtime` false (point lights only: lit on the console and switchable from Lua instead of baked; up to 16 per scene and 4 per mesh, in scene order; a mesh lit at runtime leaves runtime lights out of its baked colours, any other mesh bakes them) |
 | `player` | `playerHeight` 1.8 (eye height above the feet), `playerRadius` 0.5, `moveSpeed` 3, `sprintSpeed` 8 (units/s), nav bake fields (below), `jumpHeight` 2, `gravity` 20 |
 | `navigation` | nav bake without a player: `agentHeight` 1.8, `agentRadius` 0.5, nav bake fields (below), `spawnAnchor` object name or null (null = this object) |
 | `trigger` | `size` [1, 1, 1] box size before the object's transform, `lua` script path or null. The written box is the world AABB of the transformed box; the script gets `onTriggerEnter(index)` and `onTriggerExit(index)` |
