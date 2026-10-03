@@ -94,6 +94,7 @@ std::optional<std::string> Document::load(const fs::path& project, const fs::pat
     m_files.clear();
     m_objectCount = 0;
     m_projectFiles = 0;
+    ++m_revision;
 
     std::error_code ec;
     for (fs::recursive_directory_iterator it(project, fs::directory_options::skip_permission_denied, ec), end; !ec && it != end;

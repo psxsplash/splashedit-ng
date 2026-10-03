@@ -6,6 +6,8 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <map>
+#include <optional>
 #include <string>
 
 #include "editor/document.hh"
@@ -293,18 +295,77 @@ static void axisWidget(ImDrawList* dl, ImVec2 c) {
     }
 }
 
-static void viewportPanel(State& st, ImDrawList* dl, ImRect r, viewport::Ps1View& view) {
+// Scene data is Unity-space (Y-up, left-handed, +Z into the back wall); the
+// renderer is right-handed GL, so world points cross over by negating Z.
+static viewport::Vec3 toGl(splash::Vec3 p) { return {p.x, p.y, -p.z}; }
+
+// Local-space bounds of a mesh, loaded and cached by project path. Empty when
+// the mesh is missing or unreadable.
+static const std::optional<splash::Bounds>& localBounds(const editor::Document& doc, const std::string& path) {
+    static std::map<std::string, std::optional<splash::Bounds>> cache;
+    auto it = cache.find(path);
+    if (it != cache.end()) return it->second;
+    std::optional<splash::Bounds> b;
+    try {
+        b = splash::loadMesh(doc.resolve(path)).bounds();
+    } catch (...) {
+    }
+    return cache.emplace(path, b).first->second;
+}
+
+// World AABB of the selected object's mesh in GL space, or a small box at its
+// origin when it has no usable mesh.
+static void selectedBoxGl(const editor::Document& doc, const splash::FlatObject& fo, viewport::Vec3* lo,
+                          viewport::Vec3* hi) {
+    if (fo.object->mesh && !fo.object->mesh->mesh.empty()) {
+        if (const std::optional<splash::Bounds>& lb = localBounds(doc, fo.object->mesh->mesh)) {
+            splash::Vec3 mn = lb->min(), mx = lb->max();
+            splash::Vec3 wmin, wmax;
+            for (int c = 0; c < 8; ++c) {
+                splash::Vec3 corner{c & 1 ? mx.x : mn.x, c & 2 ? mx.y : mn.y, c & 4 ? mx.z : mn.z};
+                splash::Vec3 w = fo.localToWorld.point(corner);
+                wmin = c == 0 ? w : splash::vmin(wmin, w);
+                wmax = c == 0 ? w : splash::vmax(wmax, w);
+            }
+            *lo = toGl(wmin);
+            *hi = toGl(wmax);
+            return;
+        }
+    }
+    splash::Vec3 p = fo.localToWorld.position();
+    *lo = toGl({p.x - 0.25f, p.y - 0.25f, p.z - 0.25f});
+    *hi = toGl({p.x + 0.25f, p.y + 0.25f, p.z + 0.25f});
+}
+
+static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document& doc, viewport::Ps1View& view) {
     Fonts& f = fonts();
     view.clean = st.viewMode == 1;
     unsigned tex = view.render((int)r.GetWidth(), (int)r.GetHeight(), 240);
     dl->AddImageRounded((ImTextureID)(intptr_t)tex, r.Min, r.Max, ImVec2(0, 1), ImVec2(1, 0), IM_COL32_WHITE, radius::window);
 
     ImVec2 mn = r.Min, sz = r.GetSize();
-    sceneIcon(dl, view, mn, sz, {-2.6f, 2.4f, -5.0f}, icon::lightbulb, kind::light);
-    sceneIcon(dl, view, mn, sz, {1.6f, 0.3f, 2.2f}, icon::gamepad, kind::player);
-    sceneIcon(dl, view, mn, sz, {-4.8f, 1.2f, 1.5f}, icon::volume, kind::audio);
-    selectionOutline(dl, view, mn, sz, {-0.5f, 0, -1.5f}, {0.5f, 1, -0.5f});
-    moveGizmo(dl, view, mn, sz, {0.0f, 0.5f, -1.0f});
+    std::vector<splash::FlatObject> flats = splash::flatten(doc.scene());
+    const splash::Object* sel = doc.selected();
+    // Icons: a lightbulb for lights, a generic marker for objects with neither
+    // mesh nor light (cameras, spawns, audio, logic, grouping nodes).
+    for (const splash::FlatObject& fo : flats) {
+        viewport::Vec3 p = toGl(fo.localToWorld.position());
+        if (fo.object->light)
+            sceneIcon(dl, view, mn, sz, p, icon::lightbulb, kind::light);
+        else if (!fo.object->mesh)
+            sceneIcon(dl, view, mn, sz, p, icon::square, kind::folder);
+    }
+    // Selection outline and move gizmo follow the selected object.
+    if (sel) {
+        for (const splash::FlatObject& fo : flats)
+            if (fo.object == sel) {
+                viewport::Vec3 lo, hi;
+                selectedBoxGl(doc, fo, &lo, &hi);
+                selectionOutline(dl, view, mn, sz, lo, hi);
+                moveGizmo(dl, view, mn, sz, toGl(fo.localToWorld.position()));
+                break;
+            }
+    }
 
     // Floating toolbars.
     ImVec2 p = r.Min + ImVec2(space::md, space::md);
@@ -662,7 +723,7 @@ ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view,
     ImRect right(ImVec2(size.x - g - 352, top), ImVec2(size.x - g, bottom));
     ImRect mid(ImVec2(left.Max.x + g, top), ImVec2(right.Min.x - g, bottom));
     sceneTree(dl, left, doc);
-    viewportPanel(st, dl, mid, view);
+    viewportPanel(st, dl, mid, doc, view);
     inspector(dl, right, doc);
     statusBar(dl, size);
     ImGui::End();

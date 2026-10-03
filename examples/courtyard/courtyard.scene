@@ -47,7 +47,7 @@
             "position": [
               0.0,
               -0.1,
-              1.5
+              -1.5
             ],
             "rotation": [
               0.0,
@@ -67,11 +67,11 @@
               "mesh": "meshes/floor.mesh",
               "materials": [
                 {
-                  "texture": null,
+                  "texture": "textures/stone.png",
                   "color": [
-                    0.62,
-                    0.58,
-                    0.52,
+                    1.0,
+                    1.0,
+                    1.0,
                     1.0
                   ]
                 }
@@ -101,7 +101,7 @@
             "position": [
               0.0,
               2.25,
-              -6.15
+              6.15
             ],
             "rotation": [
               0.0,
@@ -121,11 +121,11 @@
               "mesh": "meshes/back_wall.mesh",
               "materials": [
                 {
-                  "texture": null,
+                  "texture": "textures/brick.png",
                   "color": [
-                    0.55,
-                    0.5,
-                    0.47,
+                    1.0,
+                    1.0,
+                    1.0,
                     1.0
                   ]
                 }
@@ -155,7 +155,7 @@
             "position": [
               -7.15,
               2.25,
-              -0.5
+              0.5
             ],
             "rotation": [
               0.0,
@@ -175,11 +175,11 @@
               "mesh": "meshes/side_wall.mesh",
               "materials": [
                 {
-                  "texture": null,
+                  "texture": "textures/brick.png",
                   "color": [
-                    0.55,
-                    0.5,
-                    0.47,
+                    1.0,
+                    1.0,
+                    1.0,
                     1.0
                   ]
                 }
@@ -209,7 +209,7 @@
             "position": [
               -3.5,
               1.8,
-              -3.5
+              3.5
             ],
             "rotation": [
               0.0,
@@ -229,11 +229,11 @@
               "mesh": "meshes/pillar.mesh",
               "materials": [
                 {
-                  "texture": null,
+                  "texture": "textures/stone.png",
                   "color": [
-                    0.62,
-                    0.58,
-                    0.52,
+                    1.0,
+                    1.0,
+                    1.0,
                     1.0
                   ]
                 }
@@ -263,7 +263,7 @@
             "position": [
               3.0,
               1.8,
-              -4.0
+              4.0
             ],
             "rotation": [
               0.0,
@@ -283,11 +283,11 @@
               "mesh": "meshes/pillar.mesh",
               "materials": [
                 {
-                  "texture": null,
+                  "texture": "textures/stone.png",
                   "color": [
-                    0.62,
-                    0.58,
-                    0.52,
+                    1.0,
+                    1.0,
+                    1.0,
                     1.0
                   ]
                 }
@@ -317,7 +317,7 @@
             "position": [
               4.0,
               0.4,
-              -5.3
+              5.3
             ],
             "rotation": [
               0.0,
@@ -337,11 +337,11 @@
               "mesh": "meshes/platform.mesh",
               "materials": [
                 {
-                  "texture": null,
+                  "texture": "textures/stone.png",
                   "color": [
-                    0.62,
-                    0.58,
-                    0.52,
+                    1.0,
+                    1.0,
+                    1.0,
                     1.0
                   ]
                 }
@@ -396,11 +396,11 @@
             "position": [
               0.0,
               0.5,
-              -1.0
+              1.0
             ],
             "rotation": [
               0.0,
-              0.13052619,
+              -0.13052619,
               0.0,
               0.9914449
             ],
@@ -450,7 +450,7 @@
             "position": [
               -1.7,
               0.5,
-              -1.9
+              1.9
             ],
             "rotation": [
               0.0,
@@ -504,11 +504,11 @@
             "position": [
               -1.65,
               1.35,
-              -1.85
+              1.85
             ],
             "rotation": [
               0.0,
-              -0.087155744,
+              0.087155744,
               0.0,
               0.9961947
             ],
@@ -560,7 +560,7 @@
         "position": [
           1.6,
           0.0,
-          2.2
+          -2.2
         ],
         "rotation": [
           0.0,
@@ -584,13 +584,13 @@
         "position": [
           7.6,
           5.2,
-          9.2
+          -9.2
         ],
         "rotation": [
-          0.046900615,
-          -0.93790716,
           0.14017116,
-          0.31381935
+          -0.31381935,
+          0.046900615,
+          0.93790716
         ],
         "scale": [
           1.0,
@@ -608,7 +608,7 @@
         "position": [
           -2.6,
           2.4,
-          -5.0
+          5.0
         ],
         "rotation": [
           0.0,
@@ -628,11 +628,11 @@
           "kind": "point",
           "color": [
             1.0,
-            0.63,
-            0.32
+            0.59,
+            0.25
           ],
-          "intensity": 1.6,
-          "range": 8.0,
+          "intensity": 1.05,
+          "range": 9.0,
           "spotAngle": 30.0,
           "innerSpotAngle": 0.0,
           "enabled": true
@@ -647,7 +647,7 @@
         "position": [
           -4.8,
           1.2,
-          1.5
+          -1.5
         ],
         "rotation": [
           0.0,

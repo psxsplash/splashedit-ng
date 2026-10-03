@@ -48,6 +48,9 @@ public:
     const std::string& sceneStem() const { return m_stem; }
     int objectCount() const { return m_objectCount; }
     int projectFileCount() const { return m_projectFiles; }
+    // Bumped whenever the scene's geometry changes (currently: on load), so the
+    // viewport can tell when to rebuild its vertex buffer.
+    unsigned revision() const { return m_revision; }
 
     const splash::Object* object(const ObjectPath& path) const;
     // Parent of the object at `path`, or nullptr for a top-level object.
@@ -86,6 +89,7 @@ private:
     std::string m_stem;
     int m_objectCount = 0;
     int m_projectFiles = 0;
+    unsigned m_revision = 0;
     std::optional<ObjectPath> m_selection;
     std::set<ObjectPath> m_collapsed;
     std::map<std::string, MeshInfo> m_meshes;
