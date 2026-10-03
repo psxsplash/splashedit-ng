@@ -1263,8 +1263,9 @@ static void viewportInput(State& st, ImRect r, editor::Document& doc, viewport::
     }
 }
 
-// The controller on port 1, from the keyboard while the game has the viewport.
-static uint16_t keyboardPad() {
+// The controller on port 1, from the keyboard and the first connected gamepad,
+// while the game has the viewport.
+static uint16_t hostPad() {
     struct Map {
         ImGuiKey key;
         uint16_t bit;
@@ -1276,7 +1277,20 @@ static uint16_t keyboardPad() {
         {ImGuiKey_S, padbit::triangle},       {ImGuiKey_Q, padbit::l1},           {ImGuiKey_W, padbit::r1},
         {ImGuiKey_1, padbit::l2},             {ImGuiKey_2, padbit::r2},
     };
+    static const Map gamepad[] = {
+        {ImGuiKey_GamepadDpadUp, padbit::up},       {ImGuiKey_GamepadDpadDown, padbit::down},
+        {ImGuiKey_GamepadDpadLeft, padbit::left},   {ImGuiKey_GamepadDpadRight, padbit::right},
+        {ImGuiKey_GamepadLStickUp, padbit::up},     {ImGuiKey_GamepadLStickDown, padbit::down},
+        {ImGuiKey_GamepadLStickLeft, padbit::left}, {ImGuiKey_GamepadLStickRight, padbit::right},
+        {ImGuiKey_GamepadStart, padbit::start},     {ImGuiKey_GamepadBack, padbit::select},
+        {ImGuiKey_GamepadFaceDown, padbit::cross},  {ImGuiKey_GamepadFaceRight, padbit::circle},
+        {ImGuiKey_GamepadFaceLeft, padbit::square}, {ImGuiKey_GamepadFaceUp, padbit::triangle},
+        {ImGuiKey_GamepadL1, padbit::l1},           {ImGuiKey_GamepadR1, padbit::r1},
+        {ImGuiKey_GamepadL2, padbit::l2},           {ImGuiKey_GamepadR2, padbit::r2},
+    };
     uint16_t pad = 0xffff;
+    for (const Map& m : gamepad)
+        if (ImGui::IsKeyDown(m.key)) pad &= (uint16_t)~m.bit;
     if (ImGui::GetIO().WantTextInput) return pad;
     for (const Map& m : map)
         if (ImGui::IsKeyDown(m.key)) pad &= (uint16_t)~m.bit;
@@ -1296,7 +1310,7 @@ static void gamePanel(State& st, ImDrawList* dl, ImRect r) {
         dl->AddImage((ImTextureID)(intptr_t)tex, g.Min, g.Max);
     else
         textCentered(dl, r, f.regular, type::body, color::textDim, "Waiting for pcsx-redux...");
-    p.game.setPads(keyboardPad(), 0xffff);
+    p.game.setPads(hostPad(), 0xffff);
     const char* info = "Arrows  ·  Z X A S  ·  Q W 1 2  ·  Enter Start  ·  Backspace Select";
     ImVec2 is = measure(f.regular, type::caption, info);
     ImRect chip(ImVec2(r.Min.x + space::md, r.Max.y - space::md - 24), ImVec2(r.Min.x + space::md + is.x + 20, r.Max.y - space::md));
