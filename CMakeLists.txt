@@ -131,6 +131,7 @@ target_link_libraries(imgui PUBLIC SDL3::SDL3 Freetype::Freetype OpenGL::GL)
 add_executable(splashedit
     src/main.cpp
     src/gl.cpp
+    src/ui/brand.cpp
     src/ui/theme.cpp
     src/ui/widgets.cpp
     src/viewport/ps1view.cpp
