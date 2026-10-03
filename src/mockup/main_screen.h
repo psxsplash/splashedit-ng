@@ -12,6 +12,7 @@
 #include "editor/live_export.hh"
 #include "editor/play.hh"
 #include "emulator.h"
+#include "game_view.h"
 
 namespace viewport {
 class Ps1View;
@@ -45,6 +46,9 @@ struct State {
         editor::PlayTools tools;             // as set by the user; withDefaults() fills the rest
         std::future<splash::ExportResult> build;
         Emulator emu;
+        GameView game;            // what redux shows, once it has published a frame
+        bool showGame = false;    // viewport shows the game rather than the scene
+        uint64_t startedAt = 0;   // SDL ticks when redux started, to notice it never publishing
         std::string message;  // why the last Play did not start, for the status bar
         bool openSetup = false, openOutput = false;
     } play;

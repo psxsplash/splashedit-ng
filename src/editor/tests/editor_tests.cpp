@@ -616,12 +616,12 @@ void testPlay() {
     CHECK(editor::missingTools(real).size() == 1);
     real.bios.clear();
     std::vector<std::string> cmd = editor::reduxCommand(t, "/b");
-    std::vector<std::string> want = {(const char*)u8"/opt/rédux/pcsx-redux", "-run", "-fastboot", "-stdout",
-                                     "-loadexe", "/x/psxsplash.ps-exe", "-pcdrv", "-pcdrvbase", "/b"};
+    std::vector<std::string> want = {(const char*)u8"/opt/rédux/pcsx-redux", "-run", "-fastboot", "-no-ui",
+                                     "-shmdisplay", "-loadexe", "/x/psxsplash.ps-exe", "-pcdrv", "-pcdrvbase", "/b"};
     CHECK(cmd == want);
     t.bios = "/x/openbios.bin";
     cmd = editor::reduxCommand(t, "/b");
-    CHECK(cmd.size() == want.size() + 2 && cmd[4] == "-bios" && cmd[5] == "/x/openbios.bin");
+    CHECK(cmd.size() == want.size() + 2 && cmd[5] == "-bios" && cmd[6] == "/x/openbios.bin");
 }
 
 }  // namespace

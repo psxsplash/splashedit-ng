@@ -28,6 +28,11 @@ bool Emulator::start(const std::vector<std::string>& cmd, std::string* error) {
     return true;
 }
 
+int64_t Emulator::pid() const {
+    if (!m_proc) return 0;
+    return SDL_GetNumberProperty(SDL_GetProcessProperties(m_proc), SDL_PROP_PROCESS_PID_NUMBER, 0);
+}
+
 void Emulator::addText(const char* data, size_t n) {
     for (size_t i = 0; i < n; ++i) {
         char c = data[i];
