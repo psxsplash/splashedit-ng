@@ -22,13 +22,14 @@
 #include "mockup/main_screen.h"
 #include "ui/brand.h"
 #include "ui/theme.h"
+#include "ui/widgets.h"
 #include "viewport/ps1view.h"
 
 namespace {
 
 struct HitTestState {
     ImRect titleBar;
-    bool overItem = false;
+    std::vector<ImRect> controls;  // title bar rectangles that take clicks
 };
 HitTestState g_hit;
 
@@ -45,7 +46,13 @@ SDL_HitTestResult hitTest(SDL_Window* win, const SDL_Point* p, void*) {
     if (b) return SDL_HITTEST_RESIZE_BOTTOM;
     if (l) return SDL_HITTEST_RESIZE_LEFT;
     if (r) return SDL_HITTEST_RESIZE_RIGHT;
-    if (g_hit.titleBar.Contains(ImVec2((float)p->x, (float)p->y)) && !g_hit.overItem) return SDL_HITTEST_DRAGGABLE;
+    // Decided from geometry, not hover: on Windows the pointer over a draggable
+    // area produces no mouse motion, so the UI never learns it is over a button.
+    ImVec2 pt((float)p->x, (float)p->y);
+    if (!g_hit.titleBar.Contains(pt)) return SDL_HITTEST_NORMAL;
+    for (const ImRect& r : g_hit.controls)
+        if (r.Contains(pt)) return SDL_HITTEST_NORMAL;
+    return SDL_HITTEST_DRAGGABLE;
     return SDL_HITTEST_NORMAL;
 }
 
@@ -330,8 +337,11 @@ int main(int argc, char** argv) {
             if (args.mouseX >= 0 && frame >= timelineEnd) io.AddMousePosEvent(args.mouseX, args.mouseY);
         }
         ImGui::NewFrame();
+        ui::interactiveRects().clear();
         g_hit.titleBar = mockup::drawMainScreen(state, doc, view, io.DisplaySize);
-        g_hit.overItem = ImGui::IsAnyItemHovered();
+        g_hit.controls.clear();
+        for (const ImRect& r : ui::interactiveRects())
+            if (r.Overlaps(g_hit.titleBar)) g_hit.controls.push_back(r);
         ImGui::Render();
 
         int fw, fh;

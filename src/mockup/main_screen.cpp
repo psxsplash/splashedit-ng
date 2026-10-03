@@ -19,6 +19,7 @@
 #include "editor/catalog.hh"
 #include "editor/document.hh"
 #include "editor/gizmo.hh"
+#include <SDL3/SDL.h>
 #include <SDL3/SDL_dialog.h>
 
 #include "ui/brand.h"
@@ -68,6 +69,21 @@ static void windowControls(ImDrawList* dl, ImRect bar) {
     for (int i = 0; i < 3; ++i) {
         ImRect r(ImVec2(bar.Max.x - w * (3 - i), bar.Min.y), ImVec2(bar.Max.x - w * (2 - i), bar.Max.y));
         Hit h = interact(ids[i], r);
+        if (h.clicked) {
+            SDL_Window* win = SDL_GL_GetCurrentWindow();
+            if (i == 0) SDL_MinimizeWindow(win);
+            if (i == 1) {
+                if (SDL_GetWindowFlags(win) & SDL_WINDOW_MAXIMIZED)
+                    SDL_RestoreWindow(win);
+                else
+                    SDL_MaximizeWindow(win);
+            }
+            if (i == 2) {
+                SDL_Event quit{};
+                quit.type = SDL_EVENT_QUIT;
+                SDL_PushEvent(&quit);
+            }
+        }
         if (h.hover > 0) dl->AddRectFilled(r.Min, r.Max, i == 2 ? rgb(0xe0475a, (int)(255 * h.hover)) : rgb(0x2a2f39, (int)(255 * h.hover)));
         ImVec2 c = r.GetCenter();
         ImU32 col = i == 2 && h.hover > 0.5f ? rgb(0xffffff) : color::textDim;

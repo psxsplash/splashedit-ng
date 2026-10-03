@@ -49,7 +49,13 @@ void textCentered(ImDrawList* dl, ImRect r, ImFont* font, float size, ImU32 col,
     text(dl, ImVec2(r.Min.x + (r.GetWidth() - s.x) * 0.5f, centerY(font, size, r.Min.y, r.Max.y)), font, size, col, t);
 }
 
+std::vector<ImRect>& interactiveRects() {
+    static std::vector<ImRect> rects;
+    return rects;
+}
+
 Hit interact(const char* id, ImRect r) {
+    interactiveRects().push_back(r);
     Hit h;
     ImGuiID gid = ImGui::GetID(id);
     ImGui::SetCursorScreenPos(r.Min);

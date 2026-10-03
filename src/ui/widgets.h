@@ -34,6 +34,10 @@ struct Hit {
 // Registers an interactive rectangle at an absolute screen position.
 Hit interact(const char* id, ImRect r);
 
+// Every rectangle interact() registered since the last clear. The window hit test
+// uses it to keep clicks on title bar controls away from window dragging.
+std::vector<ImRect>& interactiveRects();
+
 void tooltip(const char* text);
 
 enum class ButtonKind { Primary, Secondary, Ghost };
