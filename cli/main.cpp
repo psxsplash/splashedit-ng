@@ -9,6 +9,7 @@
 #include <vector>
 #include <string>
 
+#include "luacompile.hh"
 #include "splashpack.hh"
 #include "texture.hh"
 
@@ -34,12 +35,16 @@ static std::vector<std::string> readNameTable(const std::string& path) {
 static int usage() {
     std::fprintf(stderr,
                  "usage: splashpack-cli export <scene> -o <out.splashpack> [--project <dir>] [--order-from <ref.splashpack>]\n"
+                 "                              [--lua-bytecode]\n"
                  "  --project defaults to the directory holding the scene file\n"
+                 "  --lua-bytecode stores Lua scripts compiled (as luac_psx would) instead of as source\n"
                  "  --order-from (parity tests) orders objects like the name table of ref\n"
                  "usage: splashpack-cli texstats <image> [--bpp 4|8|16] [--cutout] [--out <decoded.png>]\n"
                  "  converts one image the way export does and prints its error against the source\n"
                  "usage: splashpack-cli resave <in.scene|in.mesh> <out>\n"
-                 "  loads and saves a scene or mesh file\n");
+                 "  loads and saves a scene or mesh file\n"
+                 "usage: splashpack-cli luac <in.lua> -o <out.luac>\n"
+                 "  compiles one Lua file to PS1 bytecode, as --lua-bytecode does\n");
     return 2;
 }
 
@@ -96,11 +101,30 @@ static int resave(int argc, char** argv) {
     }
 }
 
+static int luac(int argc, char** argv) {
+    if (argc != 5 || std::strcmp(argv[3], "-o") != 0) return usage();
+    try {
+        std::ifstream in(argv[2], std::ios::binary);
+        if (!in) throw std::runtime_error(std::string("cannot open ") + argv[2]);
+        std::string src((std::istreambuf_iterator<char>(in)), {});
+        std::vector<uint8_t> bc = splash::compileLua(src, fs::path(argv[2]).filename().string());
+        std::ofstream out(argv[4], std::ios::binary);
+        out.write(reinterpret_cast<const char*>(bc.data()), std::streamsize(bc.size()));
+        if (!out) throw std::runtime_error(std::string("cannot write ") + argv[4]);
+        return 0;
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "error: %s\n", e.what());
+        return 1;
+    }
+}
+
 int main(int argc, char** argv) {
     if (argc >= 2 && std::strcmp(argv[1], "texstats") == 0) return texstats(argc, argv);
     if (argc >= 2 && std::strcmp(argv[1], "resave") == 0) return resave(argc, argv);
+    if (argc >= 2 && std::strcmp(argv[1], "luac") == 0) return luac(argc, argv);
     if (argc < 2 || std::strcmp(argv[1], "export") != 0) return usage();
     std::string scenePath, outPath, project, orderFrom;
+    bool luaBytecode = false;
     for (int i = 2; i < argc; i++) {
         std::string a = argv[i];
         if (a == "-o" && i + 1 < argc)
@@ -109,6 +133,8 @@ int main(int argc, char** argv) {
             project = argv[++i];
         else if (a == "--order-from" && i + 1 < argc)
             orderFrom = argv[++i];
+        else if (a == "--lua-bytecode")
+            luaBytecode = true;
         else if (scenePath.empty())
             scenePath = a;
         else
@@ -120,6 +146,7 @@ int main(int argc, char** argv) {
         fs::path root = project.empty() ? fs::path(scenePath).parent_path() : fs::path(project);
         splash::ExportOptions opt;
         if (!orderFrom.empty()) opt.objectOrder = readNameTable(orderFrom);
+        opt.luaBytecode = luaBytecode;
         splash::ExportResult r = splash::exportSplashpack(scene, root, outPath, opt);
         for (auto& m : r.warnings) std::fprintf(stderr, "warning: %s\n", m.c_str());
         for (auto& m : r.errors) std::fprintf(stderr, "error: %s\n", m.c_str());

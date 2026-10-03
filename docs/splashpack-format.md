@@ -178,6 +178,12 @@ Reader (R:splashpack.cpp): `cursor += sizeof(SPLASHPACKTextureAtlas)` / `sizeof(
 
 ### 2.11 Lua data (by offset). Per lua file: `AlignToFourBytes`, offset recorded, then raw bytecode (or UTF-8 source). `luaOffset` backfilled at the very end (`BackfillOffsets(..., "lua")`).
 
+`splashpack-cli export` writes the source by default. With `--lua-bytecode` it writes bytecode from
+`core/luacompile.cpp`, which builds psxlua's compiler for the host and gives the same bytes as
+`luac_psx` (Lua 5.2, 32-bit integer numbers, debug info stripped). The engine loads both with
+`luaL_loadbuffer`, which treats data starting with `\x1bLua` as bytecode. An engine built with
+`NOPARSER=1` has no parser and only accepts bytecode.
+
 ### 2.12 Mesh data (by per-object meshOffset). Per exporter in index order: `AlignToFourBytes`, offset recorded, then `Triangles.Count` x 52-byte `Tri`. Streamed objects emit nothing and `meshOffset = 0`. Tri record:
 
 | off | size | field |

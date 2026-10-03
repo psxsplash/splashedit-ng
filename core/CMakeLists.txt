@@ -19,6 +19,42 @@ else()
     target_compile_options(recast PRIVATE -ffp-contract=off)
 endif()
 
+# psxlua's compiler with PS1 number semantics (core/psxlua/psxlua_host.h,
+# force-included) and PS1 chunk layout (core/psxlua/ldump_psx.c).
+set(PSXLUA_DIR ${psxlua_SOURCE_DIR}/src)
+add_library(psxlua STATIC
+    ${PSXLUA_DIR}/lapi.c
+    ${PSXLUA_DIR}/lcode.c
+    ${PSXLUA_DIR}/lctype.c
+    ${PSXLUA_DIR}/ldebug.c
+    ${PSXLUA_DIR}/ldo.c
+    ${PSXLUA_DIR}/lfunc.c
+    ${PSXLUA_DIR}/lgc.c
+    ${PSXLUA_DIR}/llex.c
+    ${PSXLUA_DIR}/llibc.c
+    ${PSXLUA_DIR}/lmem.c
+    ${PSXLUA_DIR}/lobject.c
+    ${PSXLUA_DIR}/lopcodes.c
+    ${PSXLUA_DIR}/lparser.c
+    ${PSXLUA_DIR}/lstate.c
+    ${PSXLUA_DIR}/lstring.c
+    ${PSXLUA_DIR}/ltable.c
+    ${PSXLUA_DIR}/ltm.c
+    ${PSXLUA_DIR}/lundump.c
+    ${PSXLUA_DIR}/lvm.c
+    ${PSXLUA_DIR}/lzio.c
+    psxlua/ldump_psx.c
+    psxlua/psxlua_compile.c)
+target_include_directories(psxlua PRIVATE ${PSXLUA_DIR})
+target_include_directories(psxlua PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/psxlua)
+target_compile_definitions(psxlua PRIVATE LUA_COMPAT_ALL)
+set(PSXLUA_HOST_H ${CMAKE_CURRENT_SOURCE_DIR}/psxlua/psxlua_host.h)
+if(MSVC)
+    target_compile_options(psxlua PRIVATE /FI${PSXLUA_HOST_H} /w)
+else()
+    target_compile_options(psxlua PRIVATE -include ${PSXLUA_HOST_H} -w -fsigned-char -fwrapv)
+endif()
+
 add_library(splashcore STATIC
     scene.cpp
     texture.cpp
@@ -26,10 +62,11 @@ add_library(splashcore STATIC
     bvh.cpp
     navregion.cpp
     splashpack.cpp
+    luacompile.cpp
     stb_impl.cpp)
 target_include_directories(splashcore PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_include_directories(splashcore SYSTEM PRIVATE ${stb_SOURCE_DIR})
-target_link_libraries(splashcore PUBLIC nlohmann_json::nlohmann_json PRIVATE recast)
+target_link_libraries(splashcore PUBLIC nlohmann_json::nlohmann_json PRIVATE recast psxlua)
 # The writer reproduces SplashEdit 2.4's float results bit for bit: no FMA
 # contraction, no fast-math.
 if(MSVC)

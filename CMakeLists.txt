@@ -24,7 +24,14 @@ FetchContent_Declare(recastnavigation
     GIT_REPOSITORY https://github.com/recastnavigation/recastnavigation.git
     GIT_TAG 9f4ce64458dfae86e1239c525ddc219c4e9e06f1
     SOURCE_SUBDIR Recast/Source)
-FetchContent_MakeAvailable(stb nlohmann_json recastnavigation)
+# psxlua, the Lua 5.2 fork the engine runs, for the host-side compiler.
+# Fetch only (src has no CMakeLists.txt); core/CMakeLists.txt builds it.
+# Pin to the commit psxsplash's nugget uses.
+FetchContent_Declare(psxlua
+    GIT_REPOSITORY https://github.com/grumpycoders/psxlua.git
+    GIT_TAG abed030e686b4e34987851bd0a028c93b1f73967
+    SOURCE_SUBDIR src)
+FetchContent_MakeAvailable(stb nlohmann_json recastnavigation psxlua)
 
 option(SPLASHEDIT_BUILD_EDITOR "Build the editor (needs SDL3, FreeType, OpenGL)" ON)
 

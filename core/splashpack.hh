@@ -17,6 +17,8 @@ struct ExportOptions {
     // unordered FindObjectsByType result). Names not listed keep tree order
     // after the listed ones.
     std::vector<std::string> objectOrder;
+    // Store Lua scripts as psxlua bytecode (compileLua) instead of source.
+    bool luaBytecode = false;
 };
 
 struct ExportResult {

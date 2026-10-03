@@ -9,6 +9,7 @@
 
 #include "binwriter.hh"
 #include "bvh.hh"
+#include "luacompile.hh"
 #include "navregion.hh"
 #include "texture.hh"
 #include "vrampacker.hh"
@@ -440,7 +441,12 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     std::vector<std::string> luaData;
     for (const std::string& p : luaFiles) {
         try {
-            luaData.push_back(readFile(root / p));
+            std::string src = readFile(root / p);
+            if (options.luaBytecode) {
+                std::vector<uint8_t> bc = compileLua(src, p);
+                src.assign(bc.begin(), bc.end());
+            }
+            luaData.push_back(std::move(src));
         } catch (const std::exception& ex) {
             res.errors.push_back(ex.what());
         }

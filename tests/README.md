@@ -105,3 +105,28 @@ CLUT padding (half the pixels exact, half one dither step off). Against the wron
 and unknown keys survive. Bad versions and malformed mesh arrays must fail to load.
 
     python3 roundtrip.py <splashpack-cli>
+
+## Lua compiler
+
+`luacheck.py` compiles every `lua/*.lua` with `splashpack-cli luac` and compares the result with
+`lua/expected/*.luac` byte for byte. The expected files come from psxsplash's `tools/luac_psx`
+running in pcsx-redux, so CI checks the host compiler without an emulator. The script also checks
+that a changed source gives different bytes and that a syntax error is reported.
+
+    python3 luacheck.py <splashpack-cli>
+    splashpack-cli luac in.lua -o out.luac
+
+The files cover constant folding with 32-bit overflow, division and modulo by negative constants, hex and
+oversized literals, strings with escapes and zero bytes, long strings, more than 256 constants,
+closures, varargs, goto, methods, loops and a table constructor large enough to need an extra
+SETLIST argument.
+
+To regenerate the expected files, list the sources in a `manifest.txt` (source path, then output
+path, one per line) in a directory, and boot `luac_psx.ps-exe` with that directory as the PCdrv
+base. It writes `__done__` containing `OK` when it has finished.
+
+    pcsx-redux -testmode -stdout -safe -bios openbios.bin -loadexe luac_psx.ps-exe -run \
+        -pcdrv -pcdrvbase <dir>
+
+Two psxlua quirks the host build reproduces: `a ^ b` gives a to the power b + 1, and a decimal
+numeral with a leading zero (`010`, `0.5`) is a "malformed number".

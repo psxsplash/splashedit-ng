@@ -1,0 +1,3 @@
+# Compared byte for byte: no line ending conversion.
+*.lua -text
+*.luac binary
