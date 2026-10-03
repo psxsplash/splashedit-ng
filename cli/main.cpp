@@ -39,10 +39,10 @@ static std::vector<std::string> readNameTable(const std::string& path) {
 static int usage() {
     std::fprintf(stderr,
                  "usage: splashpack-cli export <scene> -o <out.splashpack> [--project <dir>] [--order-from <ref.splashpack>]\n"
-                 "                              [--lua-bytecode]\n"
+                 "                              [--lua-bytecode] [--stats]\n"
                  "  --project defaults to the directory holding the scene file\n"
                  "  --lua-bytecode stores Lua scripts compiled (as luac_psx would) instead of as source\n"
-                 "  --order-from (parity tests) orders objects like the name table of ref\n"
+                 "  --order-from (parity tests) orders objects like the name table of ref\n"                 "  --stats prints what the export takes in VRAM, SPU RAM and main RAM\n"
                  "usage: splashpack-cli texstats <image> [--bpp 4|8|16] [--cutout] [--out <decoded.png>]\n"
                  "  converts one image the way export does and prints its error against the source\n"
                  "usage: splashpack-cli audio <in.wav> -o <out.adpcm> [--rate <hz>] [--loop] [--trim]\n"
@@ -240,7 +240,7 @@ int main(int argc, char** argv) {
     if (argc >= 2 && std::strcmp(argv[1], "luac") == 0) return luac(argc, argv);
     if (argc < 2 || std::strcmp(argv[1], "export") != 0) return usage();
     std::string scenePath, outPath, project, orderFrom;
-    bool luaBytecode = false;
+    bool luaBytecode = false, stats = false;
     for (int i = 2; i < argc; i++) {
         std::string a = argv[i];
         if (a == "-o" && i + 1 < argc)
@@ -251,6 +251,8 @@ int main(int argc, char** argv) {
             orderFrom = argv[++i];
         else if (a == "--lua-bytecode")
             luaBytecode = true;
+        else if (a == "--stats")
+            stats = true;
         else if (scenePath.empty())
             scenePath = a;
         else
@@ -266,6 +268,13 @@ int main(int argc, char** argv) {
         splash::ExportResult r = splash::exportSplashpack(scene, root, outPath, opt);
         for (auto& m : r.warnings) std::fprintf(stderr, "warning: %s\n", m.c_str());
         for (auto& m : r.errors) std::fprintf(stderr, "error: %s\n", m.c_str());
+        if (stats && r.ok()) {
+            const splash::ExportStats& st = r.stats;
+            std::printf("splashpack=%zu vram_file=%zu spu_file=%zu framebuffers=%zu atlases=%zu cluts=%zu fonts=%zu "
+                        "vram=%zu spu_end=%zu triangles=%d\n",
+                        st.splashpackBytes, st.vramFileBytes, st.spuFileBytes, st.framebufferBytes, st.atlasBytes,
+                        st.clutBytes, st.fontBytes, st.vramBytes(), st.spuEnd, st.triangles);
+        }
         return r.ok() ? 0 : 1;
     } catch (const std::exception& e) {
         std::fprintf(stderr, "error: %s\n", e.what());

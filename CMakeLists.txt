@@ -64,9 +64,11 @@ add_library(splasheditdoc STATIC
     src/editor/catalog.cpp
     src/editor/document.cpp
     src/editor/pick.cpp
-    src/editor/gizmo.cpp)
+    src/editor/gizmo.cpp
+    src/editor/live_export.cpp)
 target_include_directories(splasheditdoc PUBLIC src)
-target_link_libraries(splasheditdoc PUBLIC splashcore)
+find_package(Threads REQUIRED)
+target_link_libraries(splasheditdoc PUBLIC splashcore Threads::Threads)
 if(MSVC)
     target_compile_options(splasheditdoc PRIVATE /W4 /utf-8)
 else()
@@ -76,6 +78,7 @@ endif()
 enable_testing()
 add_executable(editor_tests src/editor/tests/editor_tests.cpp)
 target_link_libraries(editor_tests PRIVATE splasheditdoc)
+target_compile_definitions(editor_tests PRIVATE SPLASHEDIT_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 if(MSVC)
     target_compile_options(editor_tests PRIVATE /W4 /utf-8)
 else()

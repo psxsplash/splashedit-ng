@@ -3,13 +3,19 @@
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <vector>
 #include <string>
 #include <system_error>
 
 #include "editor/catalog.hh"
 #include "editor/document.hh"
 #include "editor/gizmo.hh"
+#include "editor/live_export.hh"
 #include "editor/pick.hh"
+#include "budget.hh"
+#include "splashpack.hh"
 
 namespace {
 
@@ -463,6 +469,85 @@ void testCatalog() {
     CHECK(d.undo() && !d.object({3}));
 }
 
+// Export stats: a dry run writes nothing and reports the sizes a real export
+// writes; SPU use follows psxsplash's allocator, recomputed here from the .spu.
+void testExportStats() {
+    namespace fs = std::filesystem;
+    const fs::path src = SPLASHEDIT_SOURCE_DIR;
+    const fs::path project = src / "examples" / "courtyard";
+    splash::Scene scene = splash::loadScene(project / "courtyard.scene");
+    for (const char* clip : {"short11.wav", "sine22.wav"}) {
+        splash::Object o = named(clip);
+        splash::AudioComponent a;
+        a.clip = (fs::path("..") / ".." / "tests" / "audio" / clip).generic_string();
+        a.clipName = clip;
+        a.sampleRate = 11025;
+        o.audio = a;
+        scene.objects.push_back(o);
+    }
+    const fs::path dir = g_outDir / "stats";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    splash::ExportOptions dry;
+    dry.dryRun = true;
+    splash::ExportResult d = splash::exportSplashpack(scene, project, dir / "scene.splashpack", dry);
+    CHECK(d.ok());
+    CHECK(fs::is_empty(dir));
+    splash::ExportResult r = splash::exportSplashpack(scene, project, dir / "scene.splashpack");
+    CHECK(r.ok());
+    std::error_code ec;
+    CHECK(d.stats.splashpackBytes == fs::file_size(dir / "scene.splashpack", ec));
+    CHECK(d.stats.vramFileBytes == fs::file_size(dir / "scene.vram", ec));
+    CHECK(d.stats.spuFileBytes == fs::file_size(dir / "scene.spu", ec));
+    CHECK(d.stats.framebufferBytes == 320 * 240 * 2 * 2);
+    CHECK(d.stats.atlasBytes > 0 && d.stats.triangles > 0);
+
+    // .spu: "SA", u16 count, then per clip u32 size, u16 rate, u8 loop, u8 0, data, align 4.
+    std::ifstream in(dir / "scene.spu", std::ios::binary);
+    std::vector<unsigned char> b((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    size_t end = 0x1010, p = 4;
+    int clips = 0;
+    while (p + 8 <= b.size()) {
+        size_t n = b[p] | b[p + 1] << 8 | b[p + 2] << 16 | size_t(b[p + 3]) << 24;
+        end = (end + 15) / 16 * 16 + (n + 15) / 16 * 16;
+        p += (8 + n + 3) / 4 * 4;
+        clips++;
+    }
+    CHECK(clips == 2);
+    CHECK(d.stats.spuEnd == end);
+    CHECK(splash::spuBudget(d.stats).used == end);
+    CHECK(splash::ramBudget(d.stats).used ==
+          splash::kRendererBytes + std::max({d.stats.splashpackBytes, d.stats.vramFileBytes, d.stats.spuFileBytes}));
+}
+
+// LiveExport: waits for edits to settle, then exports the current revision.
+void testLiveExport() {
+    const std::filesystem::path project = std::filesystem::path(SPLASHEDIT_SOURCE_DIR) / "examples" / "courtyard";
+    editor::Document d;
+    CHECK(!d.load(project, "courtyard.scene"));
+    editor::LiveExport live(0.3);
+    live.update(d, 10.0);
+    CHECK(!live.busy());
+    live.update(d, 10.2);
+    CHECK(!live.busy());
+    live.update(d, 10.4);
+    CHECK(live.busy());
+    live.wait();
+    CHECK(live.result() && live.result()->ok());
+    CHECK(live.resultRevision() == d.revision());
+    const size_t before = live.result()->stats.splashpackBytes;
+    CHECK(d.duplicateObject({0}));
+    live.update(d, 10.5);
+    CHECK(!live.busy());
+    live.update(d, 10.9);
+    CHECK(live.busy());
+    live.wait();
+    CHECK(live.resultRevision() == d.revision());
+    CHECK(live.result()->stats.splashpackBytes > before);
+    live.update(d, 20.0);
+    CHECK(!live.busy());  // nothing changed since the last export
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -478,6 +563,8 @@ int main(int argc, char** argv) {
     testScaleClamp();
     testGizmoUndo();
     testCatalog();
+    testExportStats();
+    testLiveExport();
     if (g_failures) {
         std::fprintf(stderr, "editor_tests: %d of %d checks failed\n", g_failures, g_checks);
         return 1;
