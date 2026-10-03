@@ -121,6 +121,15 @@ static void togglePlay(State& st, const editor::Document& doc) {
 static void updatePlay(State& st) {
     State::Play& p = st.play;
     p.emu.poll();
+    if (p.emu.running()) {
+        if (!p.game.attached() && p.game.attach(p.emu.pid())) p.showGame = true;
+        p.game.update();
+        if (!p.game.attached() && p.message.empty() && SDL_GetTicks() - p.startedAt > 10000)
+            p.message = "pcsx-redux started but shows nothing here; it needs -shmdisplay support";
+    } else if (p.game.attached()) {
+        p.game.detach();
+        p.showGame = false;
+    }
     if (!p.build.valid() || p.build.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return;
     splash::ExportResult r = p.build.get();
     if (!r.ok()) {
@@ -130,6 +139,8 @@ static void updatePlay(State& st) {
     std::string err;
     if (!p.emu.start(editor::reduxCommand(editor::withDefaults(p.tools), playDir()), &err))
         p.message = "Could not start pcsx-redux: " + err;
+    else
+        p.startedAt = SDL_GetTicks();
 }
 
 // A file dialog answers on its own thread; the setup popup picks it up next frame.
@@ -1252,8 +1263,64 @@ static void viewportInput(State& st, ImRect r, editor::Document& doc, viewport::
     }
 }
 
+// The controller on port 1, from the keyboard while the game has the viewport.
+static uint16_t keyboardPad() {
+    struct Map {
+        ImGuiKey key;
+        uint16_t bit;
+    };
+    static const Map map[] = {
+        {ImGuiKey_UpArrow, padbit::up},      {ImGuiKey_DownArrow, padbit::down}, {ImGuiKey_LeftArrow, padbit::left},
+        {ImGuiKey_RightArrow, padbit::right}, {ImGuiKey_Enter, padbit::start},    {ImGuiKey_Backspace, padbit::select},
+        {ImGuiKey_Z, padbit::cross},          {ImGuiKey_X, padbit::circle},       {ImGuiKey_A, padbit::square},
+        {ImGuiKey_S, padbit::triangle},       {ImGuiKey_Q, padbit::l1},           {ImGuiKey_W, padbit::r1},
+        {ImGuiKey_1, padbit::l2},             {ImGuiKey_2, padbit::r2},
+    };
+    uint16_t pad = 0xffff;
+    if (ImGui::GetIO().WantTextInput) return pad;
+    for (const Map& m : map)
+        if (ImGui::IsKeyDown(m.key)) pad &= (uint16_t)~m.bit;
+    return pad;
+}
+
+// The game as pcsx-redux shows it, 4:3 and letterboxed.
+static void gamePanel(State& st, ImDrawList* dl, ImRect r) {
+    Fonts& f = fonts();
+    State::Play& p = st.play;
+    dl->AddRectFilled(r.Min, r.Max, IM_COL32_BLACK, radius::window);
+    float w = r.GetWidth(), h = r.GetHeight();
+    float gw = std::min(w, h * 4 / 3), gh = gw * 3 / 4;
+    ImVec2 c = r.GetCenter();
+    ImRect g(c - ImVec2(gw / 2, gh / 2), c + ImVec2(gw / 2, gh / 2));
+    if (unsigned tex = p.game.texture())
+        dl->AddImage((ImTextureID)(intptr_t)tex, g.Min, g.Max);
+    else
+        textCentered(dl, r, f.regular, type::body, color::textDim, "Waiting for pcsx-redux...");
+    p.game.setPads(keyboardPad(), 0xffff);
+    const char* info = "Arrows  ·  Z X A S  ·  Q W 1 2  ·  Enter Start  ·  Backspace Select";
+    ImVec2 is = measure(f.regular, type::caption, info);
+    ImRect chip(ImVec2(r.Min.x + space::md, r.Max.y - space::md - 24), ImVec2(r.Min.x + space::md + is.x + 20, r.Max.y - space::md));
+    dl->AddRectFilled(chip.Min, chip.Max, rgb(0x0e1014, 190), radius::pill);
+    textCentered(dl, chip, f.regular, type::caption, color::textDim, info);
+}
+
+// Scene / Game switch, top centre, while a game is running.
+static void viewSwitch(State& st, ImRect r) {
+    State::Play& p = st.play;
+    if (!p.game.attached()) return;
+    Fonts& f = fonts();
+    float sw = measure(f.medium, type::label, "Scene").x + measure(f.medium, type::label, "Game").x + space::md * 4 + 4;
+    ImVec2 pos(r.GetCenter().x - sw / 2, r.Min.y + space::md + 2);
+    p.showGame = segmented("sceneorgame", pos, {"Scene", "Game"}, p.showGame ? 1 : 0) == 1;
+}
+
 static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document& doc, viewport::Ps1View& view) {
     Fonts& f = fonts();
+    if (st.play.showGame && st.play.game.attached()) {
+        gamePanel(st, dl, r);
+        viewSwitch(st, r);
+        return;
+    }
     view.clean = st.viewMode == 1;
     unsigned tex = view.render((int)r.GetWidth(), (int)r.GetHeight(), 240);
     dl->AddImageRounded((ImTextureID)(intptr_t)tex, r.Min, r.Max, ImVec2(0, 1), ImVec2(1, 0), IM_COL32_WHITE, radius::window);
@@ -1363,6 +1430,7 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
     dl->ChannelsMerge();
 
     viewportInput(st, r, doc, view, flats);
+    viewSwitch(st, r);
     ImGui::PopClipRect();
 }
 
@@ -1989,6 +2057,11 @@ static void shortcuts(State& st, editor::Document& doc) {
     auto pressed = [](ImGuiKey k) { return ImGui::IsKeyPressed(k, false); };
     auto repeat = [](ImGuiKey k) { return ImGui::IsKeyPressed(k, true); };
     const bool ctrl = io.KeyCtrl, shift = io.KeyShift;
+    // While the game has the viewport its keys are the controller; only Play/Stop stays.
+    if (st.play.showGame && st.play.game.attached()) {
+        if (!ctrl && pressed(ImGuiKey_F5)) togglePlay(st, doc);
+        return;
+    }
     if (ctrl && !shift && repeat(ImGuiKey_Z)) doc.undo();
     if (ctrl && ((shift && repeat(ImGuiKey_Z)) || repeat(ImGuiKey_Y))) doc.redo();
     if (!ctrl && !shift && !io.KeyAlt) {

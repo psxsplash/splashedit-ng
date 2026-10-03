@@ -2,6 +2,7 @@
 // with the editor.
 #pragma once
 
+#include <cstdint>
 #include <deque>
 #include <optional>
 #include <string>
@@ -22,6 +23,8 @@ public:
     void poll();
     void stop();
     bool running() const { return m_proc != nullptr; }
+    // Process id while running, 0 otherwise.
+    int64_t pid() const;
     // Exit code of the last run once it has ended.
     const std::optional<int>& exitCode() const { return m_exit; }
     // The last lines it printed, oldest first.

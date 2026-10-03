@@ -114,7 +114,7 @@ splash::ExportResult exportForPlay(const splash::Scene& scene, const fs::path& p
 }
 
 std::vector<std::string> reduxCommand(const PlayTools& t, const fs::path& dir) {
-    std::vector<std::string> a = {utf8(t.redux), "-run", "-fastboot", "-stdout"};
+    std::vector<std::string> a = {utf8(t.redux), "-run", "-fastboot", "-no-ui", "-shmdisplay"};
     if (!t.bios.empty()) {
         a.push_back("-bios");
         a.push_back(utf8(t.bios));
