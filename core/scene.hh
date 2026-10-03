@@ -262,13 +262,16 @@ struct UICanvas {
 enum class TrackType : uint8_t {
     CameraPosition = 0, CameraRotation = 1, ObjectPosition = 2, ObjectRotation = 3, ObjectActive = 4,
     UICanvasVisible = 5, UIElementVisible = 6, UIProgress = 7, UIPosition = 8, UIColor = 9, CameraH = 10,
-    RumbleSmall = 11, RumbleLarge = 12, ObjectUVOffset = 13
+    RumbleSmall = 11, RumbleLarge = 12, ObjectUVOffset = 13, LightPosition = 14, LightColor = 15,
+    LightIntensity = 16, LightRadius = 17, LightEnabled = 18
 };
 enum class Interp : uint8_t { Linear = 0, Step = 1, EaseIn = 2, EaseOut = 3, EaseInOut = 4 };
 
 // A key. `value` is in the track's own units: world units for positions,
 // degrees for rotations, 0/1 for on/off tracks, 0..100 for progress, pixels
-// for UI position and UV offset, 0..1 colour, raw projection H, 0..255 rumble.
+// for UI position and UV offset, 0..1 colour, raw projection H, 0..255 rumble;
+// light tracks: world units for position and radius, 0..1 colour, the light's
+// intensity, 0/1 enabled.
 struct Keyframe {
     int frame = 0;  // 0..8191
     std::array<float, 3> value{0, 0, 0};
@@ -279,7 +282,8 @@ struct Keyframe {
 struct CutsceneTrack {
     TrackType type = TrackType::ObjectPosition;
     // Object tracks: object name. UI canvas tracks: canvas name. UI element
-    // tracks: "canvas/element". Camera and rumble tracks: empty.
+    // tracks: "canvas/element". Light tracks: the runtime light's object name.
+    // Camera and rumble tracks: empty.
     std::string target;
     std::vector<Keyframe> keyframes;
     ExtraKeys extra;

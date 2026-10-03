@@ -1,6 +1,7 @@
-# Export light/light.scene plus variations and read the point light table and
-# the dynamic-lighting object flags back the way psxsplash's splashpack.cpp
-# does, and check that runtime lights are left out of a runtime-lit mesh's bake.
+# Export light/light.scene plus variations and read the point light table, the
+# dynamic-lighting object flags and the light tracks back the way psxsplash's
+# splashpack.cpp does, and check that runtime lights are left out of a
+# runtime-lit mesh's bake.
 # usage: python3 lightcheck.py <splashpack-cli>
 import json, os, struct, subprocess, sys, tempfile
 
@@ -129,6 +130,67 @@ r, _ = export(lambda s: comp(s, 'Sun').update(runtime=True))
 check('runtime directional refused', r.returncode != 0 and 'point' in r.stderr, r.stderr)
 r, _ = export(lambda s: comp(s, 'Lit').update(dynamicLighting='sometimes'))
 check('unknown dynamicLighting refused', r.returncode != 0, r.stderr)
+
+# Light tracks (types 14-18): no target name, the track's fourth byte is the
+# light's index in the runtime table, keys in the light table's own units.
+def tracks(d, countOff, tableOff, animation):
+    n, = struct.unpack_from('<H', d, countOff)
+    table, = struct.unpack_from('<I', d, tableOff)
+    out = []
+    for i in range(n):
+        doff, = struct.unpack_from('<I', d, table + i * 12)
+        ntr, = struct.unpack_from('<B', d, doff + 2)
+        troff, = struct.unpack_from('<I', d, doff + 4)
+        for t in range(ntr):
+            typ, nk, tnl, li, tnoff, kfoff = struct.unpack_from('<BBBBII', d, troff + t * 12)
+            keys = [struct.unpack_from('<Hhhh', d, kfoff + k * 8) for k in range(nk)]
+            out.append(dict(type=typ, index=li, namelen=tnl, nameoff=tnoff, keys=keys))
+    return out
+
+
+def key(f, v):
+    return {'frame': f, 'value': v}
+
+
+def lightScene(s, target='Spare', intensity=1.5):
+    s['cutscenes'] = [{'name': 'Glow', 'durationFrames': 60, 'audioEvents': [], 'tracks': [
+        {'type': 'lightPosition', 'target': target, 'keyframes': [key(30, [1, 2, -3]), key(0, [0, 0.5, 0])]},
+        {'type': 'lightColor', 'target': target, 'keyframes': [key(0, [1, 0.2, 0])]},
+        {'type': 'lightIntensity', 'target': target, 'keyframes': [key(0, [intensity, 0, 0])]},
+        {'type': 'lightRadius', 'target': target, 'keyframes': [key(0, [4, 0, 0]), key(10, [-1, 0, 0])]},
+        {'type': 'lightEnabled', 'target': target, 'keyframes': [key(0, [1, 0, 0]), key(20, [0.2, 0, 0])]}]}]
+    s['animations'] = [{'name': 'Pulse', 'durationFrames': 30, 'tracks': [
+        {'type': 'lightIntensity', 'target': 'Red', 'keyframes': [key(0, [0, 0, 0]), key(15, [2, 0, 0])]}]}]
+
+
+r, d = export(lightScene)
+check('light tracks export', r.returncode == 0, r.stderr)
+cs = tracks(d, 84, 88, False)
+check('light track types 14-18', [t['type'] for t in cs] == [14, 15, 16, 17, 18], cs)
+check('light index byte = table index of Spare', all(t['index'] == 1 for t in cs), cs)
+check('light tracks carry no name', all(t['namelen'] == 0 and t['nameoff'] == 0 for t in cs), cs)
+check('position keys sorted, fp12 / gte, y negated',
+      [k[1:] for k in cs[0]['keys']] == [(0, round(-0.5 / 100 * 4096), 0),
+                                        (round(1 / 100 * 4096), round(-2 / 100 * 4096), round(-3 / 100 * 4096))] and
+      [k[0] & 0x1FFF for k in cs[0]['keys']] == [0, 30], cs[0])
+check('colour keys 0..255', cs[1]['keys'][0][1:] == (255, 51, 0), cs[1])
+check('intensity key 4.12', cs[2]['keys'][0][1:] == (6144, 0, 0), cs[2])
+check('radius key fp12 / gte, negative -> 0', [k[1] for k in cs[3]['keys']] == [round(4 / 100 * 4096), 0], cs[3])
+check('enabled keys 0/1', [k[1] for k in cs[4]['keys']] == [1, 0], cs[4])
+an = tracks(d, 104, 108, True)
+check('animation light track indexes Red', [(t['type'], t['index']) for t in an] == [(16, 0)], an)
+check('animation intensity keys', [k[1] for k in an[0]['keys']] == [0, 8192], an)
+
+r, _ = export(lambda s: lightScene(s, 'Nope'))
+check('unknown light target refused', r.returncode != 0 and "no runtime point light named 'Nope'" in r.stderr, r.stderr)
+r, _ = export(lambda s: lightScene(s, 'Sun'))
+check('baked light target refused', r.returncode != 0 and "'Sun'" in r.stderr, r.stderr)
+r, _ = export(lambda s: (lightScene(s), comp(s, 'Spare').update(runtime=False)))
+check('light switched to baked refused', r.returncode != 0 and "'Spare'" in r.stderr, r.stderr)
+r, d = export(lambda s: lightScene(s, intensity=9))
+check('intensity over 8 clamps with a warning',
+      r.returncode == 0 and tracks(d, 84, 88, False)[2]['keys'][0][1] == 32767 and 'clamped to 8' in r.stderr + r.stdout,
+      r.stderr)
 
 print('%d/%d checks passed' % (checks - fails, checks))
 sys.exit(1 if fails else 0)

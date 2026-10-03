@@ -559,7 +559,10 @@ const std::initializer_list<std::pair<const char*, TrackType>> kTrackTypes = {
     {"uiElementVisible", TrackType::UIElementVisible}, {"uiProgress", TrackType::UIProgress},
     {"uiPosition", TrackType::UIPosition},         {"uiColor", TrackType::UIColor},
     {"cameraH", TrackType::CameraH},               {"rumbleSmall", TrackType::RumbleSmall},
-    {"rumbleLarge", TrackType::RumbleLarge},       {"objectUVOffset", TrackType::ObjectUVOffset}};
+    {"rumbleLarge", TrackType::RumbleLarge},       {"objectUVOffset", TrackType::ObjectUVOffset},
+    {"lightPosition", TrackType::LightPosition},   {"lightColor", TrackType::LightColor},
+    {"lightIntensity", TrackType::LightIntensity}, {"lightRadius", TrackType::LightRadius},
+    {"lightEnabled", TrackType::LightEnabled}};
 const std::initializer_list<std::pair<const char*, Interp>> kInterps = {
     {"linear", Interp::Linear}, {"step", Interp::Step}, {"easeIn", Interp::EaseIn},
     {"easeOut", Interp::EaseOut}, {"easeInOut", Interp::EaseInOut}};

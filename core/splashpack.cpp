@@ -641,7 +641,8 @@ struct SkinTarget {
 void writeSequences(BinWriter& w, size_t tableOffsetPos, const std::vector<Sequence>& cutscenes, bool animation,
                     const std::vector<std::string>& objectNames, const std::vector<std::string>& clipNames,
                     const std::vector<SkinTarget>& skinTargets, const std::vector<UICanvas>& canvases,
-                    const VramSettings& vs, float gte, ExportResult& res) {
+                    const std::vector<std::string>& lightNames, const VramSettings& vs, float gte,
+                    ExportResult& res) {
     const std::string kind = animation ? "animation" : "cutscene";
     if (cutscenes.size() > size_t(kMaxCutscenes))
         res.errors.push_back(std::to_string(cutscenes.size()) + " " + kind + "s, psxsplash loads at most " +
@@ -681,6 +682,12 @@ void writeSequences(BinWriter& w, size_t tableOffsetPos, const std::vector<Seque
     auto hasCanvas = [&](const std::string& n) {
         return std::any_of(canvases.begin(), canvases.end(), [&](const UICanvas& c) { return c.name == n; });
     };
+    // Light track target -> index in the runtime light table, or -1.
+    auto lightIndex = [&](const std::string& name) {
+        auto it = std::find(lightNames.begin(), lightNames.end(), name);
+        return it == lightNames.end() ? -1 : int(it - lightNames.begin());
+    };
+    auto isLight = [](TrackType t) { return int(t) >= 14 && int(t) <= 18; };
     std::vector<std::string> seen;
     for (const Sequence& c : cutscenes) {
         std::string where = kind + " '" + c.name + "'";
@@ -714,6 +721,14 @@ void writeSequences(BinWriter& w, size_t tableOffsetPos, const std::vector<Seque
                 res.errors.push_back(where + ": no canvas named '" + t.target + "'");
             if (ty >= 6 && ty <= 9 && !findElement(t.target))
                 res.errors.push_back(where + ": no UI element '" + t.target + "' (write it as canvas/element)");
+            if (isLight(t.type)) {
+                if (lightIndex(t.target) < 0)
+                    res.errors.push_back(where + ": no runtime point light named '" + t.target +
+                                         "' (an active point light with runtime on, one of the first " +
+                                         std::to_string(kMaxSceneLights) + ")");
+                else if (std::count(lightNames.begin(), lightNames.end(), t.target) > 1)
+                    res.errors.push_back(where + ": two runtime lights are named '" + t.target + "'");
+            }
         }
         if (c.audioEvents)
             for (const CutsceneAudioEvent& a : *c.audioEvents)
@@ -768,14 +783,14 @@ void writeSequences(BinWriter& w, size_t tableOffsetPos, const std::vector<Seque
             w.u8(uint8_t(t.type));
             w.u8(uint8_t(t.keyframes.size()));
             w.u8(uint8_t(n.size()));
-            w.u8(0);
+            w.u8(isLight(t.type) ? uint8_t(lightIndex(t.target)) : 0);
             trackNamePos.push_back(w.pos());
             w.u32(0);
             keyPos.push_back(w.pos());
             w.u32(0);
             trackNames.push_back(n);
         }
-        bool clamped = false;
+        bool clamped = false, brightClamped = false;
         auto coord = [&](float v) {
             int f = roundToInt((v / gte) * 4096.f);
             if (f < -32768 || f > 32767) clamped = true;
@@ -838,13 +853,31 @@ void writeSequences(BinWriter& w, size_t tableOffsetPos, const std::vector<Seque
                 case TrackType::ObjectUVOffset:
                     o[0] = byteOf(v[0], 0, 255), o[1] = byteOf(v[1], 0, 255);
                     break;
+                case TrackType::LightPosition:
+                    o[0] = coord(v[0]), o[1] = coord(-v[1]), o[2] = coord(v[2]);
+                    break;
+                case TrackType::LightColor:
+                    for (int i = 0; i < 3; i++) o[i] = byteOf(v[size_t(i)] * 255.f, 0, 255);
+                    break;
+                case TrackType::LightIntensity:
+                    if (roundToInt(v[0] * 4096.f) > 32767) brightClamped = true;
+                    o[0] = byteOf(v[0] * 4096.f, 0, 32767);
+                    break;
+                case TrackType::LightRadius:
+                    o[0] = std::max<int16_t>(0, coord(v[0]));
+                    break;
+                case TrackType::LightEnabled:
+                    o[0] = v[0] > 0.5f ? 1 : 0;
+                    break;
                 }
                 for (int16_t x : o) w.i16(x);
             }
         }
         if (clamped)
-            res.warnings.push_back(where + ": a position key is farther than 8 PSX units (" +
+            res.warnings.push_back(where + ": a position or radius key is farther than 8 PSX units (" +
                                    std::to_string(int(8 * gte)) + " scene units) from the origin and was clamped");
+        if (brightClamped)
+            res.warnings.push_back(where + ": a light intensity key above 8 was clamped to 8 (tracks hold 4.12)");
         for (size_t ti = 0; ti < c.tracks.size(); ti++) {
             if (trackNames[ti].empty()) continue;
             w.patchU32(trackNamePos[ti], uint32_t(w.pos()));
@@ -1586,6 +1619,8 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     if (!scene.cutscenes.empty() || !scene.animations.empty()) {
         std::vector<std::string> objectNames, clipNames;
         for (ExpObject& e : exporters) objectNames.push_back(truncateUtf16(e.obj->name, 24));
+        std::vector<std::string> lightNames;
+        for (const RuntimeLight& rl : runtimeLights) lightNames.push_back(rl.flat->object->name);
         for (const FlatObject* fo : audioSources) clipNames.push_back(fo->object->audio->clipName);
         std::vector<SkinTarget> skinTargets;
         for (const SkinOut& so : skins) {
@@ -1600,10 +1635,10 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
             as.push_back({a.name, a.durationFrames, a.tracks, nullptr, a.skinEvents});
         if (!cs.empty())
             writeSequences(w, cutsceneTableOffsetPos, cs, false, objectNames, clipNames, skinTargets, canvases,
-                           options.vram, gte, res);
+                           lightNames, options.vram, gte, res);
         if (res.ok() && !as.empty())
             writeSequences(w, animationTableOffsetPos, as, true, objectNames, clipNames, skinTargets, canvases,
-                           options.vram, gte, res);
+                           lightNames, options.vram, gte, res);
         if (!res.ok()) return res;
     }
     if (!skins.empty()) {
