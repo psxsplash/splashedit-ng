@@ -81,6 +81,7 @@ struct Args {
     const char* scene = nullptr;    // relative to the project; default: first *.scene in it
     const char* select = nullptr;   // object name to select at startup
     std::vector<Action> actions;
+    int padButton = -1;  // SDL_GamepadButton held on a virtual gamepad for the whole run
 };
 
 // "ctrl+shift+z", "delete", "f2", "w", "enter", "escape", "up", "down".
@@ -205,6 +206,11 @@ Args parse(int argc, char** argv) {
             Action act(Action::Text);
             act.text = next();
             a.actions.push_back(act);
+        } else if (!std::strcmp(argv[i], "--pad")) {
+            // Holds one button of a virtual gamepad ("a", "start", "dpad_up", ...) for the whole run.
+            const char* spec = next();
+            a.padButton = SDL_GetGamepadButtonFromString(spec);
+            if (a.padButton == SDL_GAMEPAD_BUTTON_INVALID) std::fprintf(stderr, "unknown gamepad button '%s'\n", spec);
         } else if (!std::strcmp(argv[i], "--ctrl-held")) {
             // Holds Ctrl down for the whole run (Ctrl-snapping while dragging).
             Action act(Action::Key);
@@ -273,6 +279,8 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
         return 1;
     }
+    // A controller drives port 1 in the Game view; the editor works without one.
+    if (!SDL_InitSubSystem(SDL_INIT_GAMEPAD)) std::fprintf(stderr, "SDL gamepad: %s\n", SDL_GetError());
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
@@ -301,6 +309,17 @@ int main(int argc, char** argv) {
     theme::load(assetDir.c_str());
     brand::load(assetDir.c_str());
     ImGui_ImplSDL3_InitForOpenGL(window, ctx);
+    if (args.padButton >= 0) {
+        SDL_VirtualJoystickDesc desc;
+        SDL_INIT_INTERFACE(&desc);
+        desc.type = SDL_JOYSTICK_TYPE_GAMEPAD;
+        desc.naxes = SDL_GAMEPAD_AXIS_COUNT;
+        desc.nbuttons = SDL_GAMEPAD_BUTTON_COUNT;
+        desc.name = "splashedit virtual pad";
+        SDL_Joystick* j = SDL_OpenJoystick(SDL_AttachVirtualJoystick(&desc));
+        if (!j || !SDL_SetJoystickVirtualButton(j, args.padButton, true))
+            std::fprintf(stderr, "virtual gamepad: %s\n", SDL_GetError());
+    }
     ImGui_ImplOpenGL3_Init("#version 330 core");
 
     viewport::Ps1View view;
