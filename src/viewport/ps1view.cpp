@@ -128,6 +128,45 @@ void main() {
 }
 )";
 
+// Screen-space sky: a fullscreen triangle whose colour is a vertical gradient
+// driven by the camera's view ray, so it fills the whole background and tilts
+// with the camera (looking up shows the top colour, down the horizon colour).
+static const char* kSkyVert = R"(#version 330 core
+out vec2 vNdc;
+void main() {
+    vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2)) * 2.0 - 1.0;
+    vNdc = p;
+    gl_Position = vec4(p, 1.0, 1.0);
+}
+)";
+
+static const char* kSkyFrag = R"(#version 330 core
+in vec2 vNdc;
+uniform vec3 uRight, uUp, uForward;  // camera basis (GL space)
+uniform float uTanHalf, uAspect;     // tan(fovY/2) and width/height
+uniform vec3 uSkyLo, uSkyMid, uSkyHi;  // horizon-down, horizon, top
+uniform int uClean;
+out vec4 oColor;
+const float kDither[16] = float[16](-4, 0, -3, 1, 2, -2, 3, -1, -3, 1, -4, 0, 3, -1, 2, -2);
+void main() {
+    vec3 dir = normalize(uForward + uRight * (vNdc.x * uTanHalf * uAspect) + uUp * (vNdc.y * uTanHalf));
+    float t = clamp(dir.y * 0.5 + 0.5, 0.0, 1.0);  // 0 = straight down, 0.5 = horizon, 1 = straight up
+    vec3 c = t < 0.5 ? mix(uSkyLo, uSkyMid, t * 2.0) : mix(uSkyMid, uSkyHi, (t - 0.5) * 2.0);
+    if (uClean == 0) {
+        ivec2 p = ivec2(gl_FragCoord.xy) & 3;
+        vec3 v = floor(clamp(c * 255.0 + kDither[p.y * 4 + p.x], 0.0, 255.0));
+        c = floor(v / 8.0) * 8.0 / 255.0;
+    }
+    oColor = vec4(c, 1.0);
+}
+)";
+
+// Sky gradient colours (constants, as the world-space backdrop used before):
+// bottom/horizon-down, horizon band, and top of the sky.
+static const float kSkyLo[3] = {0.13f, 0.12f, 0.20f};
+static const float kSkyMid[3] = {0.20f, 0.15f, 0.24f};
+static const float kSkyHi[3] = {0.05f, 0.06f, 0.10f};
+
 static unsigned compile(unsigned type, const char* src) {
     unsigned s = glCreateShader(type);
     glShaderSource(s, 1, &src, nullptr);
@@ -191,14 +230,6 @@ static Vec3 shade(splash::Vec3 p, splash::Vec3 n, const std::vector<PointLight>&
     return {std::min(c.x, 1.0f) * 0.62f, std::min(c.y, 1.0f) * 0.62f, std::min(c.z, 1.0f) * 0.62f};
 }
 
-void Ps1View::appendSky(std::vector<Vertex>& out) {
-    // Vertical gradient far behind the scene (right-handed GL space: -Z is away).
-    Vertex lo0{-60, -4, -30, 0, 0, 0.13f, 0.12f, 0.20f, -1}, lo1{60, -4, -30, 0, 0, 0.13f, 0.12f, 0.20f, -1};
-    Vertex hi0{-60, 30, -30, 0, 0, 0.05f, 0.06f, 0.10f, -1}, hi1{60, 30, -30, 0, 0, 0.05f, 0.06f, 0.10f, -1};
-    Vertex mid0{-60, 6, -30, 0, 0, 0.20f, 0.15f, 0.24f, -1}, mid1{60, 6, -30, 0, 0, 0.20f, 0.15f, 0.24f, -1};
-    out.insert(out.end(), {lo0, lo1, mid1, lo0, mid1, mid0, mid0, mid1, hi1, mid0, hi1, hi0});
-}
-
 unsigned Ps1View::textureFor(const std::string& projectPath) {
     if (projectPath.empty()) return m_white;
     auto it = m_texCache.find(projectPath);
@@ -228,8 +259,7 @@ void Ps1View::rebuild() {
     m_batches.clear();
     m_pick.clear();
     if (!m_doc) {
-        appendSky(m_verts);
-        m_batches.push_back({m_white, 0, (int)m_verts.size()});
+        // No scene: the screen-space sky fills the background on its own.
         m_built = true;
         return;
     }
@@ -319,9 +349,7 @@ void Ps1View::rebuild() {
         }
     }
 
-    // Sky first (its own batch), then one batch per texture.
-    appendSky(m_verts);
-    m_batches.push_back({m_white, 0, (int)m_verts.size()});
+    // One batch per texture; the sky is drawn separately in screen space.
     for (auto& [tex, verts] : buckets) {
         if (verts.empty()) continue;
         int start = (int)m_verts.size();
@@ -333,7 +361,6 @@ void Ps1View::rebuild() {
     splash::Bounds bounds;
     bool any = false;
     for (const Batch& b : m_batches) {
-        if (b.tex == m_white && b.start == 0) continue;  // skip the sky
         for (int i = b.start; i < b.start + b.count; ++i) {
             Vec3 gp{m_verts[(size_t)i].px, m_verts[(size_t)i].py, m_verts[(size_t)i].pz};
             if (!any) {
@@ -372,6 +399,14 @@ bool Ps1View::init() {
     glLinkProgram(m_prog);
     int ok = 0;
     glGetProgramiv(m_prog, GL_LINK_STATUS, &ok);
+    if (!ok) return false;
+
+    unsigned svs = compile(GL_VERTEX_SHADER, kSkyVert), sfs = compile(GL_FRAGMENT_SHADER, kSkyFrag);
+    m_skyProg = glCreateProgram();
+    glAttachShader(m_skyProg, svs);
+    glAttachShader(m_skyProg, sfs);
+    glLinkProgram(m_skyProg);
+    glGetProgramiv(m_skyProg, GL_LINK_STATUS, &ok);
     if (!ok) return false;
 
     glGenVertexArrays(1, &m_vao);
@@ -437,10 +472,29 @@ unsigned Ps1View::render(int panelW, int panelH, int lines) {
     glViewport(0, 0, w, h);
     glClearColor(fog[0], fog[1], fog[2], 1);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-    glEnable(GL_DEPTH_TEST);
     glDisable(GL_BLEND);
     glDisable(GL_CULL_FACE);
     glDisable(GL_SCISSOR_TEST);
+
+    // Screen-space sky first, filling the whole background. Depth test off so it
+    // covers every pixel and writes no depth, letting the scene draw over it.
+    Vec3 sRight, sUp, sForward;
+    basis(&sRight, &sUp, &sForward);
+    glDisable(GL_DEPTH_TEST);
+    glUseProgram(m_skyProg);
+    glUniform3f(glGetUniformLocation(m_skyProg, "uRight"), sRight.x, sRight.y, sRight.z);
+    glUniform3f(glGetUniformLocation(m_skyProg, "uUp"), sUp.x, sUp.y, sUp.z);
+    glUniform3f(glGetUniformLocation(m_skyProg, "uForward"), sForward.x, sForward.y, sForward.z);
+    glUniform1f(glGetUniformLocation(m_skyProg, "uTanHalf"), std::tan(kFovY * 0.5f));
+    glUniform1f(glGetUniformLocation(m_skyProg, "uAspect"), (float)panelW / panelH);
+    glUniform3f(glGetUniformLocation(m_skyProg, "uSkyLo"), kSkyLo[0], kSkyLo[1], kSkyLo[2]);
+    glUniform3f(glGetUniformLocation(m_skyProg, "uSkyMid"), kSkyMid[0], kSkyMid[1], kSkyMid[2]);
+    glUniform3f(glGetUniformLocation(m_skyProg, "uSkyHi"), kSkyHi[0], kSkyHi[1], kSkyHi[2]);
+    glUniform1i(glGetUniformLocation(m_skyProg, "uClean"), clean ? 1 : 0);
+    glBindVertexArray(m_vao);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+
+    glEnable(GL_DEPTH_TEST);
     glUseProgram(m_prog);
     glUniformMatrix4fv(glGetUniformLocation(m_prog, "uViewProj"), 1, GL_FALSE, m_viewProj.m);
     glUniform2f(glGetUniformLocation(m_prog, "uRes"), (float)w, (float)h);
