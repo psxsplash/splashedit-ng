@@ -35,8 +35,21 @@ struct Header {
 constexpr uint32_t kMagic = 0x44535850;  // "PXSD"
 constexpr size_t kVramSize = 1024 * 512 * 2;
 
-uint32_t load(uint32_t& v, std::memory_order o) { return std::atomic_ref<uint32_t>(v).load(o); }
-void store(uint32_t& v, uint32_t x, std::memory_order o) { std::atomic_ref<uint32_t>(v).store(x, o); }
+// Apple's libc++ has no std::atomic_ref yet.
+#ifdef _MSC_VER
+uint32_t load(uint32_t& v, std::memory_order) {
+    uint32_t x = *(volatile uint32_t*)&v;
+    std::atomic_thread_fence(std::memory_order_acquire);
+    return x;
+}
+void store(uint32_t& v, uint32_t x, std::memory_order) {
+    std::atomic_thread_fence(std::memory_order_release);
+    *(volatile uint32_t*)&v = x;
+}
+#else
+uint32_t load(uint32_t& v, std::memory_order) { return __atomic_load_n(&v, __ATOMIC_ACQUIRE); }
+void store(uint32_t& v, uint32_t x, std::memory_order) { __atomic_store_n(&v, x, __ATOMIC_RELEASE); }
+#endif
 
 }  // namespace
 
