@@ -88,6 +88,18 @@ check('cutscene values and unknown keys survive', rc == 0 and out['cutscenes'][0
 rc, err = resave(dict(cs, cutscenes=[dict(cs['cutscenes'][0], durationFrames=0)]), '.scene')
 check('cutscene duration 0 refused', rc != 0, err)
 
+an = json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'anim', 'anim.scene')))
+an['animations'][0]['skinEvents'][0]['blend'] = 4
+an['animations'][0]['speed'] = 2
+rc, out = resave(an, '.scene')
+check('animations, skin events and unknown keys survive', rc == 0 and out['animations'][0]['speed'] == 2
+      and out['animations'][0]['skinEvents'] == [dict(an['animations'][0]['skinEvents'][0], loop=False)]
+      and out['cutscenes'][0]['skinEvents'] == an['cutscenes'][0]['skinEvents'], out)
+rc, out = resave(dict(an, animations=[dict(an['animations'][0], skinEvents=[])]), '.scene')
+check('an empty skinEvents list is not written', rc == 0 and 'skinEvents' not in out['animations'][0], out)
+rc, err = resave(dict(an, animations=[dict(an['animations'][0], skinEvents=[{'frame': -1}])]), '.scene')
+check('skin event frame -1 refused', rc != 0, err)
+
 mesh = {'format': 'splashedit-ng/mesh', 'version': 1, 'positions': [0, 0, 0, 1, 0, 0, 0, 1, 0],
         'colors': [1, 1, 1, 1] * 3, 'submeshes': [[0, 1, 2]]}
 rc, out = resave(mesh, '.mesh')

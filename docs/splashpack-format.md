@@ -241,11 +241,20 @@ frame keep their file order; `uiColor` takes 0..1; `uiPosition` keys get the sam
 correction as the element (sec. 2.18); a position key that clamps to int16 is a warning. A track
 target that is not an exported object, canvas or `canvas/element`, an unknown audio clip, and
 counts over the reader's caps fail the export: the reader would skip or drop them. The track
-names are written before the audio events (the reader follows offsets). No skin animation events
-yet.
+names are written before the audio events (the reader follows offsets). Skin events name an object
+and one of its clips; the exporter writes that object's index in the skin table (sec. 2.17, not the
+object index) and the clip's position in its skin component's `clips`, and fails the export on an
+object without a skin or an unknown clip (2.4.0 skipped the event with a warning). A cutscene name
+over 24 characters fails the export (2.4.0 cut it, and `Cutscene.Play` with the full name then
+found nothing).
 
 ### 2.16 Animations (header animationTableOffset; only if animationCount>0) - `PSXAnimationExporter.ExportAnimations`
 Same table entry (12 B) and track/keyframe/skin-event layouts as cutscenes. Differences: max 16 animations; camera position/rotation tracks are dropped (warning); no audio events; per-animation header is **16 B**: `{ u16 durationFrames; u8 trackCount; u8 0; u32 tracksOffset; u8 skinAnimEventCount; u8[3] 0; u32 skinAnimEventsOffset }`; the keyframe switch has **no CameraH case** (see sec. 7, M3). Order inside: header, tracks, keyframes, names, (align4) skin events, anim name.
+
+This exporter (`core/splashpack.cpp`, `writeSequences`, shared with cutscenes) writes the same
+layout with the cutscene key encodings and checks. Camera tracks, `cameraH` included, fail the
+export instead of being dropped: psxsplash's animation player has no camera case and would ignore
+them.
 
 ### 2.17 Skinned meshes (header skinTableOffset; only if skinnedMeshCount>0) - `PSXSkinnedMeshExporter.ExportSkinData`
 `AlignToFourBytes`; table of `min(n,16)` x 12 B `{u32 dataOffset, u8 nameLen, u8[3] 0, u32 nameOffset}`; per mesh (each `AlignToFourBytes`):

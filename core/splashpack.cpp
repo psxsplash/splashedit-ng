@@ -588,16 +588,57 @@ void writeUi(BinWriter& w, size_t tableOffsetPos, const std::vector<UICanvas>& c
     }
 }
 
-// ---- cutscenes (cutscene.hh, splashpack.cpp in psxsplash)
+// ---- cutscenes and animations (cutscene.hh, animation.hh, splashpack.cpp in psxsplash)
 
-constexpr int kMaxCutscenes = 16, kMaxTracks = 8, kMaxKeyframes = 64, kMaxAudioEvents = 64;
+constexpr int kMaxCutscenes = 16, kMaxTracks = 8, kMaxKeyframes = 64, kMaxAudioEvents = 64, kMaxSkinEvents = 16;
 
-void writeCutscenes(BinWriter& w, size_t tableOffsetPos, const std::vector<Cutscene>& cutscenes,
+// A cutscene or an animation. The two share the track, keyframe and skin event
+// layouts; an animation has no audio events and a shorter header.
+struct Sequence {
+    const std::string& name;
+    int durationFrames;
+    const std::vector<CutsceneTrack>& tracks;
+    const std::vector<CutsceneAudioEvent>* audioEvents;  // null for an animation
+    const std::vector<SkinAnimEvent>& skinEvents;
+};
+
+// A skinned mesh in skin table order, with its clip names in clip order.
+struct SkinTarget {
+    std::string object;
+    std::vector<std::string> clips;
+};
+
+void writeSequences(BinWriter& w, size_t tableOffsetPos, const std::vector<Sequence>& cutscenes, bool animation,
                     const std::vector<std::string>& objectNames, const std::vector<std::string>& clipNames,
-                    const std::vector<UICanvas>& canvases, const VramSettings& vs, float gte, ExportResult& res) {
+                    const std::vector<SkinTarget>& skinTargets, const std::vector<UICanvas>& canvases,
+                    const VramSettings& vs, float gte, ExportResult& res) {
+    const std::string kind = animation ? "animation" : "cutscene";
     if (cutscenes.size() > size_t(kMaxCutscenes))
-        res.errors.push_back(std::to_string(cutscenes.size()) + " cutscenes, psxsplash loads at most " +
+        res.errors.push_back(std::to_string(cutscenes.size()) + " " + kind + "s, psxsplash loads at most " +
                              std::to_string(kMaxCutscenes));
+    // Skin event target -> (skin table index, clip index), or an error.
+    auto resolveSkin = [&](const SkinAnimEvent& e, std::string& err) -> std::pair<int, int> {
+        int found = -1;
+        for (size_t i = 0; i < skinTargets.size(); i++)
+            if (skinTargets[i].object == e.object) {
+                if (found >= 0) {
+                    err = "two skinned objects are named '" + e.object + "'";
+                    return {-1, -1};
+                }
+                found = int(i);
+            }
+        if (found < 0) {
+            err = "no skinned object named '" + e.object + "'";
+            return {-1, -1};
+        }
+        const auto& clips = skinTargets[size_t(found)].clips;
+        auto it = std::find(clips.begin(), clips.end(), e.clip);
+        if (it == clips.end()) {
+            err = "'" + e.object + "' has no clip named '" + e.clip + "'";
+            return {-1, -1};
+        }
+        return {found, int(it - clips.begin())};
+    };
     auto findElement = [&](const std::string& path) -> const UIElement* {
         size_t slash = path.find('/');
         if (slash == std::string::npos) return nullptr;
@@ -611,19 +652,32 @@ void writeCutscenes(BinWriter& w, size_t tableOffsetPos, const std::vector<Cutsc
         return std::any_of(canvases.begin(), canvases.end(), [&](const UICanvas& c) { return c.name == n; });
     };
     std::vector<std::string> seen;
-    for (const Cutscene& c : cutscenes) {
-        std::string where = "cutscene '" + c.name + "'";
-        if (std::find(seen.begin(), seen.end(), c.name) != seen.end()) res.errors.push_back("two cutscenes are named '" + c.name + "'");
+    for (const Sequence& c : cutscenes) {
+        std::string where = kind + " '" + c.name + "'";
+        if (c.name.empty() || truncateUtf16(c.name, 24) != c.name)
+            res.errors.push_back(where + ": the name must be 1..24 characters (Lua plays it by name)");
+        if (std::find(seen.begin(), seen.end(), c.name) != seen.end()) res.errors.push_back("two " + kind + "s are named '" + c.name + "'");
         seen.push_back(c.name);
         if (c.tracks.size() > size_t(kMaxTracks))
             res.errors.push_back(where + ": " + std::to_string(c.tracks.size()) + " tracks, at most " + std::to_string(kMaxTracks));
-        if (c.audioEvents.size() > size_t(kMaxAudioEvents))
+        if (c.audioEvents && c.audioEvents->size() > size_t(kMaxAudioEvents))
             res.errors.push_back(where + ": more than " + std::to_string(kMaxAudioEvents) + " audio events");
+        if (c.skinEvents.size() > size_t(kMaxSkinEvents))
+            res.errors.push_back(where + ": more than " + std::to_string(kMaxSkinEvents) + " skin events");
+        for (const SkinAnimEvent& e : c.skinEvents) {
+            std::string err;
+            resolveSkin(e, err);
+            if (!err.empty()) res.errors.push_back(where + ": " + err);
+        }
         for (const CutsceneTrack& t : c.tracks) {
             if (t.keyframes.size() > size_t(kMaxKeyframes))
                 res.errors.push_back(where + ": a track has more than " + std::to_string(kMaxKeyframes) + " keyframes");
             int ty = int(t.type);
-            bool object = ty >= 2 && ty <= 4 || t.type == TrackType::ObjectUVOffset;
+            bool camera = t.type == TrackType::CameraPosition || t.type == TrackType::CameraRotation ||
+                          t.type == TrackType::CameraH;
+            if (animation && camera)
+                res.errors.push_back(where + ": camera tracks only play in cutscenes");
+            bool object = (ty >= 2 && ty <= 4) || t.type == TrackType::ObjectUVOffset;
             if (object && std::find(objectNames.begin(), objectNames.end(), truncateUtf16(t.target, 24)) == objectNames.end())
                 res.errors.push_back(where + ": no exported object named '" + t.target + "' (objects need a mesh)");
             if (t.type == TrackType::UICanvasVisible && !hasCanvas(t.target))
@@ -631,9 +685,10 @@ void writeCutscenes(BinWriter& w, size_t tableOffsetPos, const std::vector<Cutsc
             if (ty >= 6 && ty <= 9 && !findElement(t.target))
                 res.errors.push_back(where + ": no UI element '" + t.target + "' (write it as canvas/element)");
         }
-        for (const CutsceneAudioEvent& a : c.audioEvents)
-            if (std::find(clipNames.begin(), clipNames.end(), a.clip) == clipNames.end())
-                res.errors.push_back(where + ": no audio clip named '" + a.clip + "'");
+        if (c.audioEvents)
+            for (const CutsceneAudioEvent& a : *c.audioEvents)
+                if (std::find(clipNames.begin(), clipNames.end(), a.clip) == clipNames.end())
+                    res.errors.push_back(where + ": no audio clip named '" + a.clip + "'");
     }
     if (!res.ok()) return;
 
@@ -641,8 +696,8 @@ void writeCutscenes(BinWriter& w, size_t tableOffsetPos, const std::vector<Cutsc
     w.patchU32(tableOffsetPos, uint32_t(w.pos()));
     std::vector<size_t> dataPos, namePos;
     std::vector<std::string> names;
-    for (const Cutscene& c : cutscenes) {
-        names.push_back(truncateUtf16(c.name, 24));
+    for (const Sequence& c : cutscenes) {
+        names.push_back(c.name);
         dataPos.push_back(w.pos());
         w.u32(0);
         w.u8(uint8_t(names.back().size()));
@@ -652,20 +707,24 @@ void writeCutscenes(BinWriter& w, size_t tableOffsetPos, const std::vector<Cutsc
         w.u32(0);
     }
     for (size_t ci = 0; ci < cutscenes.size(); ci++) {
-        const Cutscene& c = cutscenes[ci];
-        std::string where = "cutscene '" + c.name + "'";
+        const Sequence& c = cutscenes[ci];
+        std::string where = kind + " '" + c.name + "'";
         w.align4();
         w.patchU32(dataPos[ci], uint32_t(w.pos()));
         w.u16(uint16_t(c.durationFrames));
         w.u8(uint8_t(c.tracks.size()));
-        w.u8(uint8_t(c.audioEvents.size()));
+        w.u8(uint8_t(c.audioEvents ? c.audioEvents->size() : 0));
         size_t tracksPos = w.pos();
         w.u32(0);
-        size_t audioPos = w.pos();
-        w.u32(0);
-        w.u8(0);  // skin anim events
+        size_t audioPos = 0;
+        if (!animation) {
+            audioPos = w.pos();
+            w.u32(0);
+        }
+        w.u8(uint8_t(c.skinEvents.size()));
         w.u8(0);
         w.u16(0);
+        size_t skinPos = w.pos();
         w.u32(0);
 
         w.align4();
@@ -762,8 +821,8 @@ void writeCutscenes(BinWriter& w, size_t tableOffsetPos, const std::vector<Cutsc
             w.bytes(trackNames[ti]);
             w.u8(0);
         }
-        if (!c.audioEvents.empty()) {
-            std::vector<CutsceneAudioEvent> ev = c.audioEvents;
+        if (c.audioEvents && !c.audioEvents->empty()) {
+            std::vector<CutsceneAudioEvent> ev = *c.audioEvents;
             std::stable_sort(ev.begin(), ev.end(), [](const auto& a, const auto& b) { return a.frame < b.frame; });
             w.align4();
             w.patchU32(audioPos, uint32_t(w.pos()));
@@ -772,6 +831,22 @@ void writeCutscenes(BinWriter& w, size_t tableOffsetPos, const std::vector<Cutsc
                 w.u8(uint8_t(std::find(clipNames.begin(), clipNames.end(), a.clip) - clipNames.begin()));
                 w.u8(uint8_t(a.volume));
                 w.u8(uint8_t(a.pan));
+                w.u8(0);
+                w.u16(0);
+            }
+        }
+        if (!c.skinEvents.empty()) {
+            std::vector<SkinAnimEvent> ev = c.skinEvents;
+            std::stable_sort(ev.begin(), ev.end(), [](const auto& a, const auto& b) { return a.frame < b.frame; });
+            w.align4();
+            w.patchU32(skinPos, uint32_t(w.pos()));
+            for (const SkinAnimEvent& e : ev) {
+                std::string err;
+                auto [skin, clip] = resolveSkin(e, err);
+                w.u16(uint16_t(e.frame));
+                w.u8(uint8_t(skin));
+                w.u8(uint8_t(clip));
+                w.u8(e.loop ? 1 : 0);
                 w.u8(0);
                 w.u16(0);
             }
@@ -1199,9 +1274,10 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     size_t uiTableOffsetPos = w.pos();
     w.u32(0);
     w.u32(0);  // pixel data offset
-    w.u16(0);  // animations
+    w.u16(uint16_t(scene.animations.size()));
     w.u16(0);  // room portal refs
-    w.u32(0);  // animation table offset
+    size_t animationTableOffsetPos = w.pos();
+    w.u32(0);
     w.u16(uint16_t(skins.size()));
     w.u16(0);  // agents
     size_t skinTableOffsetPos = w.pos();
@@ -1435,12 +1511,27 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
         }
     }
 
-    if (!scene.cutscenes.empty()) {
+    if (!scene.cutscenes.empty() || !scene.animations.empty()) {
         std::vector<std::string> objectNames, clipNames;
         for (ExpObject& e : exporters) objectNames.push_back(truncateUtf16(e.obj->name, 24));
         for (const FlatObject* fo : audioSources) clipNames.push_back(fo->object->audio->clipName);
-        writeCutscenes(w, cutsceneTableOffsetPos, scene.cutscenes, objectNames, clipNames, canvases, options.vram,
-                       gte, res);
+        std::vector<SkinTarget> skinTargets;
+        for (const SkinOut& so : skins) {
+            SkinTarget t{exporters[so.exporter].obj->name, {}};
+            for (const BakedClip& b : so.clips) t.clips.push_back(b.name);
+            skinTargets.push_back(std::move(t));
+        }
+        std::vector<Sequence> cs, as;
+        for (const Cutscene& c : scene.cutscenes)
+            cs.push_back({c.name, c.durationFrames, c.tracks, &c.audioEvents, c.skinEvents});
+        for (const Animation& a : scene.animations)
+            as.push_back({a.name, a.durationFrames, a.tracks, nullptr, a.skinEvents});
+        if (!cs.empty())
+            writeSequences(w, cutsceneTableOffsetPos, cs, false, objectNames, clipNames, skinTargets, canvases,
+                           options.vram, gte, res);
+        if (res.ok() && !as.empty())
+            writeSequences(w, animationTableOffsetPos, as, true, objectNames, clipNames, skinTargets, canvases,
+                           options.vram, gte, res);
         if (!res.ok()) return res;
     }
     if (!skins.empty()) {

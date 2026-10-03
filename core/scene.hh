@@ -287,11 +287,31 @@ struct CutsceneAudioEvent {
     ExtraKeys extra;
 };
 
+// Starts one clip of a skinned mesh, as SkinnedAnim.Play would.
+struct SkinAnimEvent {
+    int frame = 0;
+    std::string object;  // an object with a skin component
+    std::string clip;    // the name of one of its clips
+    bool loop = false;
+    ExtraKeys extra;
+};
+
 struct Cutscene {
     std::string name;
-    int durationFrames = 90;  // at 60 frames per second
+    int durationFrames = 90;  // at 30 frames per second
     std::vector<CutsceneTrack> tracks;
     std::vector<CutsceneAudioEvent> audioEvents;
+    std::vector<SkinAnimEvent> skinEvents;
+    ExtraKeys extra;
+};
+
+// Played by Animation.Play. Unlike a cutscene, several run at once and they
+// have no camera tracks and no audio.
+struct Animation {
+    std::string name;
+    int durationFrames = 90;  // at 30 frames per second
+    std::vector<CutsceneTrack> tracks;
+    std::vector<SkinAnimEvent> skinEvents;
     ExtraKeys extra;
 };
 
@@ -301,6 +321,7 @@ struct Scene {
     std::vector<UIFont> fonts;
     std::vector<UICanvas> canvases;
     std::vector<Cutscene> cutscenes;
+    std::vector<Animation> animations;
     ExtraKeys extra;
 };
 

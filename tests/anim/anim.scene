@@ -1,0 +1,31 @@
+{
+  "format": "splashedit-ng/scene",
+  "version": 1,
+  "settings": {"gteScaling": 100.0, "sceneType": "exterior",
+               "fog": {"enabled": false, "color": [0.0, 0.0, 0.0], "density": 5}, "networkId": "", "script": "play.lua"},
+  "objects": [
+    {"name": "Crate", "active": true,
+     "transform": {"position": [-1.5, 0.0, 5.0], "rotation": [0.0, 0.0, 0.0, 1.0], "scale": [1.0, 1.0, 1.0]},
+     "components": [{"type": "mesh", "mesh": "../../examples/courtyard/meshes/crate.mesh",
+                     "materials": [{"texture": "../../examples/courtyard/textures/crate.png", "color": [1.0, 1.0, 1.0, 1.0]}],
+                     "bitDepth": 8, "vertexColors": "flat", "flatColor": [128, 128, 128]}],
+     "children": []},
+    {"name": "Arm", "active": true,
+     "transform": {"position": [1.0, -1.0, 5.0], "rotation": [0.0, 0.0, 0.0, 1.0], "scale": [1.0, 1.0, 1.0]},
+     "components": [{"type": "mesh", "mesh": "../skin/arm.mesh", "materials": [{"texture": null, "color": [1.0, 1.0, 1.0, 1.0]}],
+                     "bitDepth": 8, "vertexColors": "flat", "flatColor": [200, 120, 60]},
+                    {"type": "skin", "clips": ["../skin/bend.anim", "../skin/raise.anim"], "fps": 15}],
+     "children": []}
+  ],
+  "cutscenes": [
+    {"name": "wave", "durationFrames": 60, "tracks": [],
+     "skinEvents": [{"frame": 0, "object": "Arm", "clip": "bend", "loop": true}]}
+  ],
+  "animations": [
+    {"name": "lift", "durationFrames": 60, "tracks": [
+      {"type": "objectPosition", "target": "Crate",
+       "keyframes": [{"frame": 0, "value": [-1.5, 0, 5]}, {"frame": 60, "value": [-1.5, 1.5, 5]}]}
+     ],
+     "skinEvents": [{"frame": 0, "object": "Arm", "clip": "raise"}]}
+  ]
+}
