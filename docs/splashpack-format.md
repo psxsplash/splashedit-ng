@@ -2,8 +2,8 @@
 
 Sources read (all via `git show origin/main:<path>`, never the working checkout):
 
-- Writer repo `/home/pixel/sources/splashedit`, origin/main = `64785e3` ("Merge pull request #52 from psxsplash/fix-stream-hang")
-- Reader repo `/home/pixel/sources/psxsplash`, origin/main = `c1df566` ("Merge pull request #55 from psxsplash/fix-heap-symbols")
+- Writer repo `splashedit`, origin/main = `64785e3` ("Merge pull request #52 from psxsplash/fix-stream-hang")
+- Reader repo `psxsplash`, origin/main = `c1df566` ("Merge pull request #55 from psxsplash/fix-heap-symbols")
 
 Conventions: little-endian everywhere (.NET `BinaryWriter` on x86, MIPS LE reader). All offsets are absolute byte offsets from file start.
 "W:" = writer file `Runtime/<file>.cs` (line numbers are origin/main line numbers, where I give them); "R:" = reader file under `src/`.
@@ -44,7 +44,7 @@ Field table (writer order = reader struct order; `writer.Write('S')` writes the 
 | 12 | 2 | u16 | colliderCount | exporters with `CollisionType==Dynamic` and a `MeshFilter.sharedMesh` |
 | 14 | 2 | u16 | interactableCount | |
 | 16 | 6 | i16[3] | playerStartPos | x, -y, z via `ConvertCoordinateToPSX` (4.12, **int16**, clamped) |
-| 22 | 6 | i16[3] | playerStartRot | euler.x/y/z (degrees) * Deg2Rad via `ConvertToFixed12` (4.12 int16) |
+| 22 | 6 | i16[3] | playerStartRot | 2.4.0: euler.x/y/z (degrees) * Deg2Rad via `ConvertToFixed12` (4.12 int16). The engine reads `psyqo::Angle` (units of pi), see M17; this exporter writes degrees / 180 |
 | 28 | 2 | u16 | playerHeight | `(ushort)ConvertCoordinateToPSX(playerHeight, gte)` |
 | 30 | 2 | i16/u16 | sceneLuaFileIndex | index in lua list, `-1`(=0xFFFF) if none |
 | 32 | 2 | u16 | bvhNodeCount | `Min(NodeCount, 65535)` |
@@ -152,6 +152,16 @@ Region 84 B (`GetBinarySize() => 8 + regions*84 + portals*20`):
 Portal 20 B: `i32 ax = fp12(a.x/gte), az = fp12(a.y/gte), bx, bz; u16 neighborRegion; i16 heightDelta = ConvertToFixed12(heightDelta/gte)`.
 `boundaryEdgeMask` exists in `NavRegionExport` but is **not** written. Reader: `NavRegion` 84 B, `NavPortal` 20 B, `NavDataHeader` 8 B (R:navregion.hh), `initializeFromData` returns the advanced cursor.
 Content is produced by a full DotRecast (Recast port) voxelisation pipeline on geometry of exporters with `CollisionType` Static (downward-facing world triangles `normal.y < 0` are dropped), parameters from `PSXNavigationSettings` or `PSXPlayer`; start region = region whose centroid (+plane Y) is closest to spawn.
+
+Port in `core/navregion.cpp` (C++ recastnavigation, built from the upstream commit the 2.4.0
+DotRecast build was synced to): geometry collection, the full Recast pipeline with the same
+parameter conversions, region extraction and winding, plane fit, portals, room assignment by
+portal connectivity, platform flags (`collider.platform`), start region, and the binary layout
+above. Not ported: room assignment from `PSXRoom` volumes (rooms are not in the scene format, so
+every scene uses the connectivity fallback) and `PSXNavWalkoffZone` (no component; the walkoff mask
+only gets platform bits). The multi-step float expressions in the builder's own code are evaluated
+in double, as Unity's Mono does; DotRecast's internals are not, so float-order differences inside
+Recast stay possible on sloped or rotated geometry. Checked against Unity on one flat region only.
 
 ### 2.9 Rooms/portals (only if roomCount>0, i.e. interior with >=1 PSXRoom) - `AlignToFourBytes` first
 Order: `(rooms+1)` x RoomData(36) | `portalCount` x PortalData(40) | `roomTriRefCount` x TriRef(4) | `roomCellCount` x RoomCell(28) | `roomPortalRefCount` x RoomPortalRef(4). Reader reads exactly in this order (cells and portal refs only if their counts >0).
@@ -430,6 +440,7 @@ says what has to change; WRITER items are fixed in this exporter as each feature
 | M13 | WRITER | line endpoints wrap past 255 px |
 | M14 | WRITER | a third font, or a skipped one, shifts or dangles font indices |
 | M15 | WRITER | single buffering throws in the packer |
+| M17 | WRITER | player start rotation is written in radians and read in units of pi, so a start yaw of 90 degrees faces about -77 degrees. Measured with tests/boot on c05 plus a player; fixed in this exporter |
 
 M1. **Agent per-state clip index space differs.** Writer indexes the scene's `PSXAnimationClip[]` table:
 `if (scene.animations[c] == clip) { clipIndices[s] = (byte)(c < 255 ? c : 0xFE); ...` (W:PSXSceneWriter.cs ~585-600).
@@ -455,9 +466,9 @@ M16. **ArrangeAtlasesInVRAM "unplaced" test**: `if (atlas.PositionX == 0 && atla
 ## 8. Commands run
 
 ```
-git -C /home/pixel/sources/splashedit fetch -q origin && git -C /home/pixel/sources/splashedit log -1 --oneline origin/main
-git -C /home/pixel/sources/psxsplash fetch -q origin; git -C ... log -1 --oneline origin/main
-git -C /home/pixel/sources/psxsplash grep -n -i 'splashpack' origin/main -- src
+git -C splashedit fetch -q origin && git -C splashedit log -1 --oneline origin/main
+git -C psxsplash fetch -q origin; git -C ... log -1 --oneline origin/main
+git -C psxsplash grep -n -i 'splashpack' origin/main -- src
 git show origin/main:Runtime/{PSXSceneWriter,Utils,PSXMesh,BVH,PSXObjectExporter,PSXSceneExporter,PSXTexture2D,ImageProcessing,TexturePacker,PSXNavRegionBuilder,PSXRoom,PSXCanvasData,PSXUIExporter,PSXUILayout,PSXUIElementType,PSXFontAsset,PSXCutsceneExporter,PSXTrackType,PSXInterpMode,PSXPointLightExporter,PSXLightingBaker,PSXAnimationExporter,PSXSkinnedMeshExporter,PSXSpriteExporter,PSXTilemapExporter,PSXWorldStreaming,PSXLoaderPackWriter(header+greps),PSXInteractable,PSXAgent,PSXTriggerBox,PSXPlayer,PSXAudioClip}.cs   (sed/grep slices)
 git show origin/main:src/{splashpack.hh,splashpack.cpp,gameobject.hh,mesh.hh,bvh.hh,interactable.hh,navregion.hh,navregion.cpp,cutscene.hh,uisystem.hh,uisystem.cpp,spritesystem.cpp,tilesystem.cpp,streamplanner.hh,worldstreamer.cpp,lua.h,scenemanager.cpp(slices),skinmesh.hh,lightmath.hh}
 grep -n -i 'guid|GetAssetPath|DateTime|Random|GetHashCode|Time\.|Environment\.' over the writer files

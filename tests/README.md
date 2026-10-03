@@ -24,7 +24,7 @@ the files can be compared byte for byte.
 | c02 rotations, non-uniform scale, mesh colours, inactive object | identical | identical | identical |
 | c03 textures 4/8/16 bpp | CLUT length field only | texels and CLUTs differ (new quantizer) | identical |
 | c04 textures needing a palette search | CLUT length field only | texels and CLUTs differ (new quantizer) | identical |
-| c05 colliders none/static/dynamic | nav region missing (not ported) | identical | identical |
+| c05 colliders none/static/dynamic, one nav region | identical | identical | identical |
 | c06 baked directional + point light, sphere BVH | identical | identical | identical |
 | c07 two submeshes, textured + tinted | identical | CLUT differs (new quantizer) | identical |
 

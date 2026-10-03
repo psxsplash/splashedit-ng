@@ -34,7 +34,7 @@ HEADER = [  # (name, fmt) in order, 144 bytes (v23)
 OFFSET_FIELDS = {"nameTableOffset", "audioTableOffset", "cutsceneTableOffset", "uiTableOffset",
                  "animationTableOffset", "skinTableOffset", "memcardTableOffset", "streamTableOffset",
                  "spriteTableOffset", "tilemapTableOffset"}
-UNSUPPORTED = ["triggerBoxCount", "navRegionCount", "roomCount", "interactableCount", "audioClipCount",
+UNSUPPORTED = ["triggerBoxCount", "roomCount", "interactableCount", "audioClipCount",
                "cutsceneCount", "animationCount", "skinnedMeshCount", "agentCount", "uiCanvasCount",
                "uiFontCount", "spriteSheetCount", "memcardTableOffset", "streamTableOffset",
                "tilemapTableOffset"]
@@ -87,6 +87,30 @@ class Pack:
             p += 4
         p = (p + 3) & ~3
         self.cursorAfterBvh = p
+        p += h["interactableCount"] * 28
+        waypoints = 0
+        for i in range(h["agentCount"]):
+            waypoints += self.d[p + i * 28 + 3]
+        p += h["agentCount"] * 28 + waypoints * 12
+        self.nav = None
+        if h["navRegionCount"]:
+            p = (p + 3) & ~3
+            nr, np_, start, _pad = struct.unpack_from("<4H", self.d, p)
+            p += 8
+            regions, portals = [], []
+            for _ in range(nr):
+                f = struct.unpack_from("<8i8i3iHBBBBBB", self.d, p)
+                p += 84
+                n = min(f[21], 8)
+                regions.append({"x": f[0:n], "z": f[8:8 + n], "unused": f[n:8] + f[8 + n:16], "plane": f[16:19],
+                                "portalStart": f[19], "portalCount": f[20], "vertCount": f[21], "surface": f[22],
+                                "room": f[23], "flags": f[24], "walkoff": f[25]})
+            for _ in range(np_):
+                f = struct.unpack_from("<4iHh", self.d, p)
+                p += 20
+                portals.append({"a": f[0:2], "b": f[2:4], "neighbor": f[4], "heightDelta": f[5]})
+            self.nav = {"regionCount": nr, "portalCount": np_, "startRegion": start, "regions": regions,
+                        "portals": portals}
         # name table
         p = h["nameTableOffset"]
         self.names = []
@@ -127,6 +151,36 @@ def tri_fields(t):
     f = struct.unpack_from("<9h3h12B6BHHHHH", t)
     return {"pos": f[0:9], "normal": f[9:12], "colors": f[12:24], "uv": f[24:30], "pad": f[30],
             "tpage": f[31], "clutX": f[32], "clutY": f[33], "flags": f[34]}
+
+
+def compare_nav(a, b, out):
+    """Regions and portals in file order (Recast's order). Reports every differing
+    field, then a summary with the largest vertex/portal coordinate delta."""
+    if not a.nav or not b.nav:
+        if a.nav or b.nav:
+            out("nav: present in only one file")
+        return
+    if a.nav["startRegion"] != b.nav["startRegion"]:
+        out(f"nav startRegion: {a.nav['startRegion']} != {b.nav['startRegion']}")
+    maxd = 0
+    ndiff = 0
+    for i, (ra, rb) in enumerate(zip(a.nav["regions"], b.nav["regions"])):
+        bad = [k for k in ra if ra[k] != rb[k]]
+        if bad:
+            ndiff += 1
+            out(f"nav region {i}: " + ", ".join(f"{k} {ra[k]} != {rb[k]}" for k in bad))
+        if ra["vertCount"] == rb["vertCount"]:
+            for k in ("x", "z"):
+                maxd = max([maxd] + [abs(u - v) for u, v in zip(ra[k], rb[k])])
+    for i, (pa, pb) in enumerate(zip(a.nav["portals"], b.nav["portals"])):
+        bad = [k for k in pa if pa[k] != pb[k]]
+        if bad:
+            ndiff += 1
+            out(f"nav portal {i}: " + ", ".join(f"{k} {pa[k]} != {pb[k]}" for k in bad))
+        for k in ("a", "b"):
+            maxd = max([maxd] + [abs(u - v) for u, v in zip(pa[k], pb[k])])
+    if ndiff:
+        out(f"nav: {ndiff} differing regions/portals, max matched XZ delta {maxd} (20.12 units)")
 
 
 def compare(a, b, verbose):
@@ -180,6 +234,8 @@ def compare(a, b, verbose):
                 else:
                     out(f"bvh leaf {i}: refs differ")
 
+    compare_nav(a, b, out)
+
     if [x["data"] for x in a.cluts] != [x["data"] for x in b.cluts] or \
             [(x["x"], x["y"], x["len"]) for x in a.cluts] != [(x["x"], x["y"], x["len"]) for x in b.cluts]:
         for i, (x, y) in enumerate(zip(a.cluts, b.cluts)):
@@ -218,8 +274,9 @@ def main():
         print(d)
     if limit and len(diffs) > limit:
         print(f"... {len(diffs) - limit} more (of {len(diffs)}); -v for all")
+    nav = f"{a.nav['regionCount']} nav regions, {a.nav['portalCount']} nav portals, " if a.nav else ""
     print(f"{'EQUAL' if not diffs else 'DIFFERENT'}: {len(a.names)} objects, {len(a.nodes)} bvh nodes, "
-          f"{len(a.atlases)} atlases, {len(a.cluts)} cluts; {len(diffs)} differences")
+          f"{nav}{len(a.atlases)} atlases, {len(a.cluts)} cluts; {len(diffs)} differences")
     return 0 if not diffs else 1
 
 

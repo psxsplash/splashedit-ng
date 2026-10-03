@@ -91,6 +91,36 @@ struct Mat34 {
     Vec3 position() const { return {m[0][3], m[1][3], m[2][3]}; }
 };
 
+// Quaternion.eulerAngles in degrees, each in [0, 360): the Z-X-Y (applied
+// order) decomposition of the rotation matrix, then Internal_MakePositive.
+// Not yet checked bit for bit against Unity's native decomposition.
+inline Vec3 eulerAngles(Quat q) {
+    float x = q.x * 2.f, y = q.y * 2.f, z = q.z * 2.f;
+    float xx = q.x * x, yy = q.y * y, zz = q.z * z;
+    float xy = q.x * y, xz = q.x * z, yz = q.y * z;
+    float wx = q.w * x, wy = q.w * y, wz = q.w * z;
+    float m00 = 1.f - (yy + zz), m01 = xy - wz, m02 = xz + wy;
+    float m10 = xy + wz, m11 = 1.f - (xx + zz), m12 = yz - wx;
+    float m22 = 1.f - (xx + yy);
+    constexpr float halfPi = 1.57079637f;
+    Vec3 r;
+    if (m12 < 0.999f) {
+        if (m12 > -0.999f) {
+            r = {std::asin(-m12), std::atan2(m02, m22), std::atan2(m10, m11)};
+        } else {
+            r = {halfPi, std::atan2(m01, m00), 0.f};
+        }
+    } else {
+        r = {-halfPi, std::atan2(-m01, m00), 0.f};
+    }
+    constexpr float rad2deg = 57.29578f;
+    r = r * rad2deg;
+    const float negativeFlip = -0.0001f * rad2deg;
+    const float positiveFlip = 360.0f + negativeFlip;
+    auto positive = [&](float v) { return v < negativeFlip ? v + 360.f : v > positiveFlip ? v - 360.f : v; };
+    return {positive(r.x), positive(r.y), positive(r.z)};
+}
+
 // UnityEngine.Bounds: stored as centre + extents, so min/max are derived and
 // Encapsulate rounds through that representation.
 struct Bounds {

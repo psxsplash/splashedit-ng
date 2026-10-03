@@ -19,6 +19,7 @@ enum class VertexColorMode : uint8_t { Baked, Flat, Mesh };
 enum class ColliderKind : uint8_t { None, Static, Dynamic };
 enum class LightKind : uint8_t { Directional, Point, Spot };
 enum class SceneType : uint8_t { Exterior = 0, Interior = 1 };
+enum class NavPartition : uint8_t { Watershed = 0, Monotone = 1, Layer = 2 };
 
 struct Material {
     std::string texture;  // project-relative path, empty = untextured
@@ -54,6 +55,42 @@ struct LightComponent {
     bool enabled = true;
 };
 
+// Nav mesh bake parameters, shared by PSXPlayer and PSXNavigationSettings
+// (SplashEdit 2.4 defaults).
+struct NavBakeSettings {
+    float maxStepHeight = 0.35f;
+    float walkableSlopeAngle = 46.0f;
+    float cellSize = 0.05f;
+    float cellHeight = 0.025f;
+    int minRegionArea = 8;
+    int mergeRegionArea = 20;
+    float maxSimplifyError = 1.3f;
+    float maxEdgeLength = 12.0f;
+    NavPartition partition = NavPartition::Watershed;
+    float detailSampleDist = 6.0f;
+    float detailMaxError = 0.025f;
+    float maxPlaneError = 0.15f;
+};
+
+// PSXPlayer
+struct PlayerComponent {
+    float playerHeight = 1.8f;
+    float playerRadius = 0.5f;
+    float moveSpeed = 3.0f;
+    float sprintSpeed = 8.0f;
+    NavBakeSettings nav;
+    float jumpHeight = 2.0f;
+    float gravity = 20.0f;
+};
+
+// PSXNavigationSettings: nav bake without a player.
+struct NavigationComponent {
+    float agentHeight = 1.8f;
+    float agentRadius = 0.5f;
+    NavBakeSettings nav;
+    std::string spawnAnchor;  // object name; empty = this object
+};
+
 struct Transform {
     Vec3 position;
     Quat rotation;
@@ -68,6 +105,8 @@ struct Object {
     std::optional<ColliderComponent> collider;
     std::optional<ScriptComponent> script;
     std::optional<LightComponent> light;
+    std::optional<PlayerComponent> player;
+    std::optional<NavigationComponent> navigation;
     std::vector<Object> children;
 };
 

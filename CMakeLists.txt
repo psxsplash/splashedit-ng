@@ -16,7 +16,15 @@ FetchContent_Declare(nlohmann_json
     GIT_REPOSITORY https://github.com/nlohmann/json.git
     GIT_TAG v3.12.0
     GIT_SHALLOW TRUE)
-FetchContent_MakeAvailable(stb nlohmann_json)
+# Recast only (not Detour, DebugUtils or the demo). SOURCE_SUBDIR names a
+# directory without a CMakeLists.txt so this just fetches; core/CMakeLists.txt
+# builds the sources. Pinned to the upstream commit (#796) that the DotRecast
+# build used by SplashEdit 2.4.0 was last synced to.
+FetchContent_Declare(recastnavigation
+    GIT_REPOSITORY https://github.com/recastnavigation/recastnavigation.git
+    GIT_TAG 9f4ce64458dfae86e1239c525ddc219c4e9e06f1
+    SOURCE_SUBDIR Recast/Source)
+FetchContent_MakeAvailable(stb nlohmann_json recastnavigation)
 
 option(SPLASHEDIT_BUILD_EDITOR "Build the editor (needs SDL3, FreeType, OpenGL)" ON)
 

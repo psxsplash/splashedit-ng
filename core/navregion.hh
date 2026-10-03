@@ -1,0 +1,76 @@
+// Nav regions: SplashEdit 2.4's PSXNavRegionBuilder. Recast voxelises the
+// static geometry, each polygon of the resulting poly mesh becomes a convex
+// region with a least-squares floor plane, and shared polygon edges become
+// portals.
+#pragma once
+
+#include <cstdint>
+#include <string>
+#include <vector>
+
+#include "binwriter.hh"
+#include "scene.hh"
+
+namespace splash {
+
+constexpr int kNavMaxVertsPerRegion = 8;
+
+// PSXNavRegionBuilder's fields, with its defaults.
+struct NavBuildParams {
+    float agentHeight = 1.8f;
+    float agentRadius = 0.3f;
+    float maxStepHeight = 0.35f;
+    float walkableSlopeAngle = 46.0f;
+    float cellSize = 0.05f;
+    float cellHeight = 0.025f;
+    int minRegionArea = 8;
+    int mergeRegionArea = 20;
+    float maxSimplifyError = 1.3f;
+    float maxEdgeLength = 12.0f;
+    NavPartition partition = NavPartition::Watershed;
+    float detailSampleDist = 6.0f;
+    float detailMaxError = 0.025f;
+    float maxPlaneError = 0.15f;
+};
+
+// One exported object, in exporter order.
+struct NavInputObject {
+    bool walkable;  // collider kind Static (2.4.0 skips None and Dynamic)
+    bool platform;
+    Mat34 localToWorld;
+    const std::vector<Vec3>* positions;
+    std::vector<int> triangles;  // all submeshes concatenated (Mesh.triangles)
+    Bounds localBounds;
+};
+
+struct NavRegion {
+    std::vector<Vec2> verts;  // XZ, counter-clockwise
+    float planeA = 0, planeB = 0, planeD = 0;  // Y = A*X + B*Z + D
+    int portalStart = 0, portalCount = 0;
+    uint8_t surfaceType = 0;  // 0 flat, 1 ramp, 2 stairs
+    uint8_t roomIndex = 0;
+    uint8_t flags = 0;  // bit 0 = platform
+    uint8_t walkoffEdgeMask = 0;
+    uint8_t boundaryEdgeMask = 0;  // not written
+    float maxPlaneDeviation = 0;
+};
+
+struct NavPortal {
+    Vec2 a, b;
+    int neighborRegion = 0;
+    float heightDelta = 0;
+};
+
+struct NavMesh {
+    std::vector<NavRegion> regions;
+    std::vector<NavPortal> portals;
+    int startRegion = 0;
+};
+
+NavMesh buildNavRegions(const std::vector<NavInputObject>& objects, const NavBuildParams& params, Vec3 spawn,
+                        std::vector<std::string>& errors);
+
+// PSXNavRegionBuilder.WriteToBinary
+void writeNavRegions(BinWriter& w, const NavMesh& nav, float gte);
+
+}  // namespace splash
