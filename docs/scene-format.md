@@ -66,6 +66,7 @@ Components so far (more are added feature by feature, matching the splashpack se
 | `navigation` | nav bake without a player: `agentHeight` 1.8, `agentRadius` 0.5, nav bake fields (below), `spawnAnchor` object name or null (null = this object) |
 | `trigger` | `size` [1, 1, 1] box size before the object's transform, `lua` script path or null. The written box is the world AABB of the transformed box; the script gets `onTriggerEnter(index)` and `onTriggerExit(index)` |
 | `interactable` | `radius` 2, `button` 14 (pad bit, 14 = Cross), `repeatable` true, `cooldownFrames` 30, `showPrompt` false, `promptCanvas` "" (15 bytes kept), `lineOfSight` false |
+| `audio` | `clip` WAV path or null, `clipName` "" (the name Lua plays it by), `sampleRate` 22050, `loop` false, `defaultVolume` 100, `trimLeadingSilence` false. Channels are averaged to mono, resampled to `sampleRate` and encoded to SPU-ADPCM |
 
 Nav bake fields, shared by `player` and `navigation` (defaults in brackets): `maxStepHeight` [0.35],
 `walkableSlopeAngle` degrees [46], `navCellSize` [0.05], `navCellHeight` [0.025], `navMinRegionArea`

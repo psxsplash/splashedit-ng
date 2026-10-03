@@ -185,6 +185,18 @@ json writeInteractable(const InteractableComponent& it) {
     return j;
 }
 
+json writeAudio(const AudioComponent& a) {
+    json j = {{"type", "audio"},
+              {"clip", a.clip.empty() ? json(nullptr) : json(a.clip)},
+              {"clipName", a.clipName},
+              {"sampleRate", a.sampleRate},
+              {"loop", a.loop},
+              {"defaultVolume", a.defaultVolume},
+              {"trimLeadingSilence", a.trimLeadingSilence}};
+    putExtras(j, a.extra);
+    return j;
+}
+
 Object readObject(const json& j) {
     Object o;
     o.name = j.at("name").get<std::string>();
@@ -281,6 +293,17 @@ Object readObject(const json& j) {
             it.lineOfSight = c.value("lineOfSight", it.lineOfSight);
             it.extra = extrasOf(c, writeInteractable(it));
             o.interactable = it;
+        } else if (type == "audio") {
+            AudioComponent a;
+            if (c.contains("clip") && !c["clip"].is_null()) a.clip = c["clip"].get<std::string>();
+            a.clipName = c.value("clipName", a.clipName);
+            a.sampleRate = c.value("sampleRate", a.sampleRate);
+            if (a.sampleRate < 1 || a.sampleRate > 65535) fail("object '" + o.name + "': audio sampleRate must be 1..65535");
+            a.loop = c.value("loop", a.loop);
+            a.defaultVolume = c.value("defaultVolume", a.defaultVolume);
+            a.trimLeadingSilence = c.value("trimLeadingSilence", a.trimLeadingSilence);
+            a.extra = extrasOf(c, writeAudio(a));
+            o.audio = a;
         } else {
             o.unknownComponents.push_back(c.dump());
         }
@@ -307,6 +330,7 @@ json writeObject(const Object& o) {
     if (o.navigation) comps.push_back(writeNavigation(*o.navigation));
     if (o.trigger) comps.push_back(writeTrigger(*o.trigger));
     if (o.interactable) comps.push_back(writeInteractable(*o.interactable));
+    if (o.audio) comps.push_back(writeAudio(*o.audio));
     for (const std::string& c : o.unknownComponents) comps.push_back(json::parse(c));
     j["components"] = comps;
     json kids = json::array();

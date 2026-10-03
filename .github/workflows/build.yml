@@ -32,5 +32,6 @@ jobs:
           py=python3; command -v python3 >/dev/null || py=python
           "$py" tests/roundtrip.py "$cli"
           "$py" tests/luacheck.py "$cli"
+          "$py" tests/audiocheck.py "$cli"
       - name: Editor tests
         run: ctest --test-dir build -C Release --output-on-failure
