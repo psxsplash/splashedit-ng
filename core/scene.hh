@@ -106,6 +106,26 @@ struct NavigationComponent {
     ExtraKeys extra;
 };
 
+// PSXTriggerBox: an axis-aligned box (in world space, after the object's
+// transform) whose Lua script gets enter/exit callbacks.
+struct TriggerComponent {
+    Vec3 size{1, 1, 1};
+    std::string lua;  // empty = none
+    ExtraKeys extra;
+};
+
+// PSXInteractable
+struct InteractableComponent {
+    float radius = 2.0f;
+    int button = 14;  // pad bit, 14 = Cross
+    bool repeatable = true;
+    uint16_t cooldownFrames = 30;
+    bool showPrompt = false;
+    std::string promptCanvas;  // at most 15 bytes are stored
+    bool lineOfSight = false;
+    ExtraKeys extra;
+};
+
 struct Transform {
     Vec3 position;
     Quat rotation;
@@ -122,6 +142,8 @@ struct Object {
     std::optional<LightComponent> light;
     std::optional<PlayerComponent> player;
     std::optional<NavigationComponent> navigation;
+    std::optional<TriggerComponent> trigger;
+    std::optional<InteractableComponent> interactable;
     std::vector<std::string> unknownComponents;  // components of an unknown type, as JSON text
     std::vector<Object> children;
     ExtraKeys extra;
