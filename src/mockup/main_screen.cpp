@@ -347,12 +347,13 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
     std::vector<splash::FlatObject> flats = splash::flatten(doc.scene());
     const splash::Object* sel = doc.selected();
     // Icons: a lightbulb for lights, a generic marker for objects with neither
-    // mesh nor light (cameras, spawns, audio, logic, grouping nodes).
+    // mesh nor light (cameras, spawns, audio). Grouping nodes and
+    // script-only objects get none.
     for (const splash::FlatObject& fo : flats) {
         viewport::Vec3 p = toGl(fo.localToWorld.position());
         if (fo.object->light)
             sceneIcon(dl, view, mn, sz, p, icon::lightbulb, kind::light);
-        else if (!fo.object->mesh)
+        else if (!fo.object->mesh && fo.object->children.empty() && !fo.object->script)
             sceneIcon(dl, view, mn, sz, p, icon::square, kind::folder);
     }
     // Selection outline and move gizmo follow the selected object.

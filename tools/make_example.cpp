@@ -21,9 +21,13 @@ using splash::Vec3;
 namespace {
 
 // Appends an axis-aligned box with outward faces to submesh 0. Each face is
-// split into a grid of roughly 1 m cells so baked vertex lighting has some
+// split into a grid of roughly kCell-metre cells so baked vertex lighting has some
 // resolution. `tile` > 0 repeats the texture every 1/tile metres along the
 // face; 0 maps the whole texture once onto every face.
+// Cell size for face subdivision, kept coarse so the example stays inside
+// PS1 triangle budgets.
+constexpr float kCell = 2.5f;
+
 void addBox(splash::Mesh& m, Vec3 mn, Vec3 mx, float tile = 0) {
     if (m.submeshes.empty()) m.submeshes.emplace_back();
     struct Face {
@@ -41,7 +45,7 @@ void addBox(splash::Mesh& m, Vec3 mn, Vec3 mx, float tile = 0) {
     for (const Face& f : faces) {
         Vec3 du = f.c[1] - f.c[0], dv = f.c[3] - f.c[0];
         float lu = splash::magnitude(du), lv = splash::magnitude(dv);
-        int su = std::max(1, static_cast<int>(std::lround(lu))), sv = std::max(1, static_cast<int>(std::lround(lv)));
+        int su = std::max(1, static_cast<int>(std::lround(lu / kCell))), sv = std::max(1, static_cast<int>(std::lround(lv / kCell)));
         float tu = tile > 0 ? lu * tile : 1, tv = tile > 0 ? lv * tile : 1;
         int base = static_cast<int>(m.positions.size());
         for (int j = 0; j <= sv; ++j)
