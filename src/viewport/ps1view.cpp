@@ -8,6 +8,7 @@
 #include <stb_image.h>
 
 #include "editor/document.hh"
+#include "editor/pick.hh"
 #include "gl.h"
 #include "scene.hh"
 #include "unitymath.hh"
@@ -225,6 +226,7 @@ unsigned Ps1View::textureFor(const std::string& projectPath) {
 void Ps1View::rebuild() {
     m_verts.clear();
     m_batches.clear();
+    m_pick.clear();
     if (!m_doc) {
         appendSky(m_verts);
         m_batches.push_back({m_white, 0, (int)m_verts.size()});
@@ -267,7 +269,9 @@ void Ps1View::rebuild() {
         m_meshCacheLoad = m_doc->loadId();
     }
     auto meshCacheKey = [](const std::string& p) { return p; };
-    for (const splash::FlatObject& fo : flats) {
+    m_pick.clear();
+    for (size_t fi = 0; fi < flats.size(); ++fi) {
+        const splash::FlatObject& fo = flats[fi];
         if (!fo.activeInHierarchy || !fo.object->mesh) continue;
         const splash::MeshComponent& mc = *fo.object->mesh;
         if (mc.mesh.empty() || mc.materials.empty()) continue;
@@ -300,6 +304,11 @@ void Ps1View::rebuild() {
             bool textured = !mat.texture.empty();
             std::vector<Vertex>& bucket = buckets[tex];
             const std::vector<int>& tri = mesh->submeshes[sub];
+            // The same triangles in Unity world space for picking, tagged with the object.
+            const size_t firstTri = m_pick.positions.size() / 3;
+            for (size_t k = 0; k + 2 < tri.size(); k += 3)
+                for (size_t j = 0; j < 3; ++j) m_pick.positions.push_back(wp[(size_t)tri[k + j]]);
+            m_pick.ranges.push_back({(int)fi, firstTri, m_pick.positions.size() / 3 - firstTri});
             for (int idx : tri) {
                 size_t i = (size_t)idx;
                 Vec3 col = shade(wp[i], wn[i], points, ambient, sunDir, sunColor);
@@ -508,6 +517,15 @@ void Ps1View::frame(Vec3 center, float radius) {
     float r = std::max(radius, 0.1f) / std::sin(kFovY * 0.5f) * 1.3f;
     m_target = center;
     m_eye = center + dir * std::max(r, 0.5f);
+}
+
+std::optional<int> Ps1View::pick(ImVec2 screen, ImVec2 mn, ImVec2 sz) const {
+    Vec3 o, d;
+    ray(screen, mn, sz, &o, &d);
+    // GL to Unity: negate Z.
+    std::optional<editor::PickHit> hit = editor::pickNearest({{o.x, o.y, -o.z}, {d.x, d.y, -d.z}}, m_pick);
+    if (!hit) return std::nullopt;
+    return hit->object;
 }
 
 bool Ps1View::sceneBounds(Vec3* lo, Vec3* hi) const {

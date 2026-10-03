@@ -2,10 +2,12 @@
 
 #include <imgui.h>
 
+#include "editor/pick.hh"
 #include "scene.hh"
 
 #include <cstdint>
 #include <map>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -51,6 +53,9 @@ class Ps1View {
     void dolly(float steps);
     // Puts the pivot at `center` and backs off until a sphere of `radius` fits.
     void frame(Vec3 center, float radius);
+    // Index (in splash::flatten order) of the object whose drawn triangles the
+    // ray through a screen point hits first, or nullopt.
+    std::optional<int> pick(ImVec2 screen, ImVec2 panelMin, ImVec2 panelSize) const;
     // Bounds of the scene's geometry, false when it has none.
     bool sceneBounds(Vec3* lo, Vec3* hi) const;
     // Unit right, up and forward vectors of the camera.
@@ -85,6 +90,7 @@ class Ps1View {
     std::vector<Vertex> m_verts;
     std::vector<Batch> m_batches;
     std::map<std::string, unsigned> m_texCache;
+    editor::PickMesh m_pick;  // drawn triangles in Unity world space, by object
     std::map<std::string, splash::Mesh> m_meshCache;  // by project path, for the current load
     unsigned m_meshCacheLoad = ~0u;
     unsigned m_framedLoad = ~0u;

@@ -275,12 +275,18 @@ static void selectionOutline(ImDrawList* dl, viewport::Ps1View& view, ImVec2 mn,
     for (auto& ed : e) dl->AddLine(s[ed[0]], s[ed[1]], rgb(0xb3a8ff, 230), 1.5f);
 }
 
-static void sceneIcon(ImDrawList* dl, viewport::Ps1View& view, ImVec2 mn, ImVec2 sz, viewport::Vec3 p, const char* ic, ImU32 col) {
+// A clickable marker for an object without geometry. Returns true when clicked.
+static bool sceneIcon(ImDrawList* dl, viewport::Ps1View& view, ImVec2 mn, ImVec2 sz, viewport::Vec3 p, const char* ic, ImU32 col) {
     ImVec2 c;
-    if (!view.project(p, mn, sz, &c)) return;
+    if (!view.project(p, mn, sz, &c)) return false;
+    if (!ImRect(mn, mn + sz).Contains(c)) return false;
+    Hit h = interact("marker", ImRect(c - ImVec2(13, 13), c + ImVec2(13, 13)));
     dl->AddCircleFilled(c, 13, rgb(0x0e1014, 200), 24);
-    dl->AddCircle(c, 13, col & 0x90ffffff, 24, 1.2f);
+    // The ring brightens on hover.
+    ImU32 ringA = (ImU32)(0x90 + (0xff - 0x90) * h.hover);
+    dl->AddCircle(c, 13, (col & 0x00ffffffu) | (ringA << IM_COL32_A_SHIFT), 24, 1.2f + 0.6f * h.hover);
     textCentered(dl, ImRect(c - ImVec2(13, 13), c + ImVec2(13, 13)), fonts().medium, type::icon - 1, col, ic);
+    return h.clicked;
 }
 
 static void axisWidget(ImDrawList* dl, ImVec2 c, const viewport::Ps1View& view) {
@@ -397,6 +403,13 @@ static void viewportInput(State& st, ImRect r, editor::Document& doc, viewport::
             }
             if (st.vpButton != 0 && st.vpDragged) ImGui::SetMouseCursor(st.vpButton == 2 ? ImGuiMouseCursor_ResizeAll : ImGuiMouseCursor_Arrow);
         } else {
+            // A left click that did not drag selects what is under the mouse, or clears the selection.
+            if (st.vpButton == 0 && !st.vpDragged && r.Contains(io.MousePos)) {
+                std::optional<int> hit = view.pick(io.MousePos, r.Min, r.GetSize());
+                std::vector<editor::ObjectPath> paths = doc.flatPaths();
+                if (hit && *hit >= 0 && (size_t)*hit < paths.size()) doc.select(paths[(size_t)*hit]);
+                else doc.select(std::nullopt);
+            }
             ImGui::ClearActiveID();
             st.vpButton = -1;
         }
@@ -423,29 +436,15 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
     ImGui::PushClipRect(r.Min, r.Max, true);
     std::vector<splash::FlatObject> flats = splash::flatten(doc.scene());
     const splash::Object* sel = doc.selected();
-    // Icons: a lightbulb for lights, a generic marker for objects with neither
-    // mesh nor light (cameras, spawns, audio). Grouping nodes and
-    // script-only objects get none.
-    for (const splash::FlatObject& fo : flats) {
-        viewport::Vec3 p = toGl(fo.localToWorld.position());
-        if (fo.object->light)
-            sceneIcon(dl, view, mn, sz, p, icon::lightbulb, kind::light);
-        else if (!fo.object->mesh && fo.object->children.empty() && !fo.object->script)
-            sceneIcon(dl, view, mn, sz, p, icon::square, kind::folder);
-    }
-    // Selection outline and move gizmo follow the selected object.
-    if (sel) {
-        for (const splash::FlatObject& fo : flats)
-            if (fo.object == sel) {
-                viewport::Vec3 lo, hi;
-                selectedBoxGl(doc, fo, &lo, &hi);
-                selectionOutline(dl, view, mn, sz, lo, hi);
-                moveGizmo(dl, view, mn, sz, toGl(fo.localToWorld.position()));
-                break;
-            }
-    }
+
+    // The mouse goes to the first item that claims it, so items are submitted
+    // toolbars first, then the gizmo, then scene markers, then the viewport
+    // itself; channels keep the drawing in the opposite order.
+    enum { kScene, kGizmo, kChrome };
+    dl->ChannelsSplit(3);
 
     // Floating toolbars.
+    dl->ChannelsSetCurrent(kChrome);
     ImVec2 p = r.Min + ImVec2(space::md, space::md);
     float w = 0;
     ImRect tools(p, p + ImVec2(4 * 30 + 4, 32));
@@ -463,7 +462,9 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
     ImRect snap(ImVec2(tools.Max.x + space::sm, p.y), ImVec2(tools.Max.x + space::sm + 34, p.y + 32));
     dl->AddRectFilled(snap.Min, snap.Max, rgb(0x0e1014, 210), radius::button + 2);
     dl->AddRect(snap.Min, snap.Max, rgb(0xffffff, 14), radius::button + 2);
-    iconButton("snap", ImRect(snap.Min + ImVec2(2, 2), snap.Max - ImVec2(2, 2)), icon::magnet, true, "Snap to grid: 0.25 m");
+    if (iconButton("snap", ImRect(snap.Min + ImVec2(2, 2), snap.Max - ImVec2(2, 2)), icon::magnet, st.snap,
+                   st.snap ? "Snap to grid: 0.25 m" : "Snap to grid: off (hold Ctrl to snap to 0.25 m)"))
+        st.snap = !st.snap;
 
     // Right side: view mode and camera.
     float segW = 0;
@@ -477,10 +478,7 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
     ImVec2 rp(r.Max.x - space::md - segW - space::sm - camW, p.y + 2);
     dropdown("camera", ImRect(rp, rp + ImVec2(camW, 28)), icon::camera, "Perspective");
     st.viewMode = segmented("viewmode", ImVec2(rp.x + camW + space::sm, p.y + 2), {"PS1", "Clean"}, st.viewMode, &w);
-
     axisWidget(dl, ImVec2(r.Max.x - 52, r.Min.y + 96), view);
-    viewportInput(st, r, doc, view, flats);
-    ImGui::PopClipRect();
 
     // Bottom-left chip describing what the edit view is showing.
     const char* info = st.viewMode == 0 ? "320 x 240  ·  15-bit dither  ·  affine" : "Clean view";
@@ -488,6 +486,42 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
     ImRect chip(ImVec2(r.Min.x + space::md, r.Max.y - space::md - 24), ImVec2(r.Min.x + space::md + is.x + 20, r.Max.y - space::md));
     dl->AddRectFilled(chip.Min, chip.Max, rgb(0x0e1014, 190), radius::pill);
     textCentered(dl, chip, f.regular, type::caption, color::textDim, info);
+
+    // Selection outline and move gizmo follow the selected object.
+    if (sel) {
+        for (const splash::FlatObject& fo : flats)
+            if (fo.object == sel) {
+                dl->ChannelsSetCurrent(kScene);
+                viewport::Vec3 lo, hi;
+                selectedBoxGl(doc, fo, &lo, &hi);
+                selectionOutline(dl, view, mn, sz, lo, hi);
+                dl->ChannelsSetCurrent(kGizmo);
+                if (st.tool == 1) moveGizmo(dl, view, mn, sz, toGl(fo.localToWorld.position()));
+                break;
+            }
+    }
+
+    // Markers: a lightbulb for lights, a generic marker for objects with
+    // neither mesh nor light (cameras, spawns, audio). Grouping nodes and
+    // script-only objects get none. Clicking one selects its object.
+    dl->ChannelsSetCurrent(kScene);
+    std::vector<editor::ObjectPath> paths = doc.flatPaths();
+    for (size_t i = 0; i < flats.size(); ++i) {
+        const splash::FlatObject& fo = flats[i];
+        viewport::Vec3 pos = toGl(fo.localToWorld.position());
+        const char* ic = nullptr;
+        ImU32 col = 0;
+        if (fo.object->light) ic = icon::lightbulb, col = kind::light;
+        else if (!fo.object->mesh && fo.object->children.empty() && !fo.object->script) ic = icon::square, col = kind::folder;
+        if (!ic) continue;
+        ImGui::PushID((int)i);
+        if (sceneIcon(dl, view, mn, sz, pos, ic, col) && i < paths.size()) doc.select(paths[i]);
+        ImGui::PopID();
+    }
+    dl->ChannelsMerge();
+
+    viewportInput(st, r, doc, view, flats);
+    ImGui::PopClipRect();
 }
 
 // Fixed two decimals, as position and scale read in a column ("0.50").
