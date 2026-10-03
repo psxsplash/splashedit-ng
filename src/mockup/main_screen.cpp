@@ -9,7 +9,9 @@
 #include <cstring>
 #include <filesystem>
 #include <functional>
+#include <future>
 #include <map>
+#include <mutex>
 #include <optional>
 #include <string>
 
@@ -17,6 +19,8 @@
 #include "editor/catalog.hh"
 #include "editor/document.hh"
 #include "editor/gizmo.hh"
+#include <SDL3/SDL_dialog.h>
+
 #include "ui/brand.h"
 #include "ui/icons.h"
 #include "ui/widgets.h"
@@ -76,6 +80,173 @@ static void windowControls(ImDrawList* dl, ImRect bar) {
     }
 }
 
+// ---- Play: export to a scratch directory, then boot it in pcsx-redux.
+
+static std::filesystem::path playDir() {
+    std::error_code ec;
+    std::filesystem::path tmp = std::filesystem::temp_directory_path(ec);
+    return (ec ? std::filesystem::path(".") : tmp) / "splashedit-play";
+}
+
+// F5 and the Play button: start, or stop what is running.
+static void togglePlay(State& st, const editor::Document& doc) {
+    State::Play& p = st.play;
+    if (p.emu.running()) {
+        p.emu.stop();
+        return;
+    }
+    if (p.build.valid()) return;
+    p.message.clear();
+    if (!editor::missingTools(editor::withDefaults(p.tools)).empty()) {
+        p.openSetup = true;
+        return;
+    }
+    p.build = std::async(std::launch::async, [scene = doc.scene(), root = doc.projectRoot()] {
+        return editor::exportForPlay(scene, root, playDir());
+    });
+}
+
+static void updatePlay(State& st) {
+    State::Play& p = st.play;
+    p.emu.poll();
+    if (!p.build.valid() || p.build.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return;
+    splash::ExportResult r = p.build.get();
+    if (!r.ok()) {
+        p.message = "Play: " + r.errors.front();
+        return;
+    }
+    std::string err;
+    if (!p.emu.start(editor::reduxCommand(editor::withDefaults(p.tools), playDir()), &err))
+        p.message = "Could not start pcsx-redux: " + err;
+}
+
+// A file dialog answers on its own thread; the setup popup picks it up next frame.
+static std::mutex g_pickMutex;
+static int g_pickWhich = -1;
+static std::string g_pickPath;
+
+static void SDLCALL onToolPicked(void* which, const char* const* files, int) {
+    if (!files || !files[0]) return;
+    std::lock_guard<std::mutex> lock(g_pickMutex);
+    g_pickWhich = static_cast<int>(reinterpret_cast<intptr_t>(which));
+    g_pickPath = files[0];
+}
+
+static std::string utf8(const std::filesystem::path& p) {
+    std::u8string u = p.u8string();
+    return std::string(u.begin(), u.end());
+}
+
+static float buttonWidth(const char* ic, const char* label) {
+    Fonts& f = fonts();
+    return space::md * 2 + measure(f.medium, type::icon, ic).x + space::sm - 2 + measure(f.medium, type::body, label).x;
+}
+
+static void pushPopupStyle() {
+    ImGui::PushStyleColor(ImGuiCol_PopupBg, color::raised);
+    ImGui::PushStyleColor(ImGuiCol_Border, color::borderStrong);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(space::lg, space::lg));
+    ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, radius::card);
+    ImGui::PushStyleVar(ImGuiStyleVar_PopupBorderSize, 1.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(space::sm, space::sm));
+}
+
+// Shown when Play is missing a program: where each one is, and a way to point at it.
+static void playSetup(State& st, const editor::Document& doc, ImVec2 size) {
+    State::Play& p = st.play;
+    {
+        std::lock_guard<std::mutex> lock(g_pickMutex);
+        if (g_pickWhich >= 0) {
+            std::filesystem::path picked(std::u8string(g_pickPath.begin(), g_pickPath.end()));
+            (g_pickWhich == 0 ? p.tools.redux : g_pickWhich == 1 ? p.tools.psxsplash : p.tools.bios) = picked;
+            if (!p.settingsFile.empty()) editor::savePlayTools(p.settingsFile, p.tools);
+            g_pickWhich = -1;
+        }
+    }
+    const char* id = "##playsetup";
+    if (p.openSetup) {
+        p.openSetup = false;
+        ImGui::OpenPopup(id);
+    }
+    const float w = 560;
+    ImGui::SetNextWindowPos(ImVec2(size.x * 0.5f, size.y * 0.42f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(w, 0));
+    pushPopupStyle();
+    const bool open = ImGui::BeginPopup(id, ImGuiWindowFlags_NoSavedSettings);
+    ImGui::PopStyleVar(4);
+    ImGui::PopStyleColor(2);
+    if (!open) return;
+    Fonts& f = fonts();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 o = ImGui::GetCursorScreenPos();
+    const float inner = w - space::lg * 2;
+    float y = o.y;
+    text(dl, ImVec2(o.x, y), f.semibold, type::title, color::text, "Set up Play");
+    y += 24;
+    text(dl, ImVec2(o.x, y), f.regular, type::label, color::textDim,
+         "Play exports the scene and boots it in pcsx-redux on your psxsplash build.");
+    y += 30;
+
+    const editor::PlayTools eff = editor::withDefaults(p.tools);
+    struct Row {
+        const char* label;
+        const std::filesystem::path* path;
+        bool optional;
+        const char* filter;
+    } rows[] = {{"pcsx-redux", &eff.redux, false, nullptr},
+                {"psxsplash build", &eff.psxsplash, false, "ps-exe"},
+                {"BIOS", &eff.bios, true, "bin"}};
+    static const SDL_DialogFileFilter exeFilter[] = {{"PlayStation executable", "ps-exe;exe"}};
+    static const SDL_DialogFileFilter biosFilter[] = {{"BIOS image", "bin;rom"}};
+    for (int i = 0; i < 3; ++i) {
+        const Row& r = rows[i];
+        ImGui::PushID(i);
+        const float rowH = 44;
+        dl->AddRectFilled(ImVec2(o.x, y), ImVec2(o.x + inner, y + rowH), color::field, radius::field);
+        text(dl, ImVec2(o.x + space::md, y + 6), f.medium, type::body, color::text, r.label);
+        std::error_code ec;
+        std::string sub;
+        ImU32 tone = color::textFaint;
+        if (r.path->empty()) {
+            sub = r.optional ? "Optional: pcsx-redux uses its own" : "Not set";
+            if (!r.optional) tone = color::warn;
+        } else if (!std::filesystem::is_regular_file(*r.path, ec)) {
+            sub = "Not found: " + utf8(*r.path);
+            tone = color::bad;
+        } else {
+            sub = utf8(*r.path);
+        }
+        ImGui::PushClipRect(ImVec2(o.x, y), ImVec2(o.x + inner - 100, y + rowH), true);
+        text(dl, ImVec2(o.x + space::md, y + 24), f.regular, type::caption, tone, sub.c_str());
+        ImGui::PopClipRect();
+        const float bw = buttonWidth(icon::folderOpen, "Locate");
+        if (button("locate", ImVec2(o.x + inner - bw - space::sm, y + (rowH - size::field - 6) * 0.5f), icon::folderOpen, "Locate",
+                   ButtonKind::Secondary)) {
+            const SDL_DialogFileFilter* flt = i == 1 ? exeFilter : i == 2 ? biosFilter : nullptr;
+            SDL_ShowOpenFileDialog(onToolPicked, reinterpret_cast<void*>(static_cast<intptr_t>(i)), nullptr, flt, flt ? 1 : 0,
+                                   nullptr, false);
+        }
+        ImGui::PopID();
+        y += rowH + space::sm;
+    }
+    y += space::sm;
+    const bool ready = editor::missingTools(eff).empty();
+    const float pw = buttonWidth(icon::play, "Play"), cw = buttonWidth(icon::x, "Cancel");
+    float bx = o.x + inner - pw;
+    if (ready) {
+        if (button("go", ImVec2(bx, y), icon::play, "Play", ButtonKind::Primary)) {
+            ImGui::CloseCurrentPopup();
+            togglePlay(st, doc);
+        }
+    }
+    if (button("cancel", ImVec2(bx - cw - space::sm, y), icon::x, "Cancel", ButtonKind::Ghost)) ImGui::CloseCurrentPopup();
+    y += size::field + 6;
+    // The buttons above registered items at absolute positions; size the popup from its top.
+    ImGui::SetCursorScreenPos(o);
+    ImGui::Dummy(ImVec2(inner, y - o.y));
+    ImGui::EndPopup();
+}
+
 static ImRect titleBar(State& st, ImDrawList* dl, ImVec2 size, editor::Document& doc) {
     Fonts& f = fonts();
     ImRect bar(ImVec2(0, 0), ImVec2(size.x, size::titleBar));
@@ -114,13 +285,18 @@ static ImRect titleBar(State& st, ImDrawList* dl, ImVec2 size, editor::Document&
     auto width = [&](const char* ic, const char* l) {
         return space::md * 2 + measure(f.medium, type::icon, ic).x + space::sm - 2 + measure(f.medium, type::body, l).x;
     };
-    wPlay = width(icon::play, "Play");
+    const bool playing = st.play.emu.running(), building = st.play.build.valid();
+    const char* playIcon = playing ? icon::square : icon::play;
+    const char* playLabel = playing ? "Stop" : building ? "Building" : "Play";
+    wPlay = width(playIcon, playLabel);
     wRun = width(icon::cpu, "Run on hardware");
     wExport = width(icon::package, "Export");
     float total = wPlay + wRun + wExport + space::sm * 2;
     float ax = std::floor(size.x * 0.5f + 90 - total * 0.5f);
     float ay = bar.Min.y + (bar.GetHeight() - (size::field + 6)) * 0.5f;
-    button("play", ImVec2(ax, ay), icon::play, "Play", ButtonKind::Primary, nullptr, "Build and run in the built-in emulator (F5)");
+    if (button("play", ImVec2(ax, ay), playIcon, playLabel, ButtonKind::Primary, nullptr,
+               st.play.emu.running() ? "Stop pcsx-redux (F5)" : "Build and run in pcsx-redux (F5)"))
+        togglePlay(st, doc);
     button("run", ImVec2(ax + wPlay + space::sm, ay), icon::cpu, "Run on hardware", ButtonKind::Secondary, nullptr,
            "Upload to a console over serial (Ctrl+F5)");
     button("export", ImVec2(ax + wPlay + wRun + space::sm * 2, ay), icon::package, "Export", ButtonKind::Ghost, nullptr,
@@ -1645,7 +1821,65 @@ static std::string mb(size_t bytes) {
     return b;
 }
 
-static void statusBar(ImDrawList* dl, ImVec2 size, const editor::Document& doc, const State& st) {
+// Status bar entry for Play: building, running (click for its output), how
+// it ended, or why it did not start.
+static void playStatus(ImDrawList* dl, ImRect bar, float x, State& st) {
+    State::Play& p = st.play;
+    Fonts& f = fonts();
+    std::string label;
+    ImU32 tone = color::textDim, dot = 0;
+    if (p.build.valid()) {
+        label = "Building for Play";
+    } else if (p.emu.running()) {
+        label = "pcsx-redux running";
+        dot = color::good;
+    } else if (!p.message.empty()) {
+        label = p.message;
+        tone = color::bad;
+    } else if (p.emu.exitCode()) {
+        int c = *p.emu.exitCode();
+        label = c ? "pcsx-redux exited with code " + std::to_string(c) : "pcsx-redux closed";
+        tone = c ? color::bad : color::textFaint;
+    } else {
+        return;
+    }
+    ImVec2 ls = measure(f.medium, type::caption, label.c_str());
+    float pad = dot ? 22 : 10;
+    ImRect r(ImVec2(x, bar.Min.y + 5), ImVec2(x + pad + ls.x + 10, bar.Max.y - 5));
+    const bool hasOutput = !p.emu.output().empty();
+    Hit h = interact("playstatus", r);
+    if (hasOutput) {
+        dl->AddRectFilled(r.Min, r.Max, lerpColor(color::raised, color::hover, h.hover), radius::pill);
+        if (h.clicked) ImGui::OpenPopup("##playoutput");
+    }
+    if (dot) dl->AddCircleFilled(ImVec2(r.Min.x + 12, r.GetCenter().y), 3.5f, dot, 12);
+    text(dl, ImVec2(r.Min.x + pad, bar.Min.y + (size::statusBar - ls.y) * 0.5f), f.medium, type::caption, tone, label.c_str());
+
+    ImGui::SetNextWindowPos(ImVec2(r.Min.x, r.Min.y - space::xs), ImGuiCond_Always, ImVec2(0, 1));
+    ImGui::SetNextWindowSize(ImVec2(640, 0));
+    pushPopupStyle();
+    const bool open = ImGui::BeginPopup("##playoutput", ImGuiWindowFlags_NoSavedSettings);
+    ImGui::PopStyleVar(4);
+    ImGui::PopStyleColor(2);
+    if (!open) return;
+    ImGui::PushFont(f.regular, type::caption);
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, color::field);
+    ImGui::PushStyleColor(ImGuiCol_Text, color::textDim);
+    ImGui::BeginChild("##lines", ImVec2(0, 320), ImGuiChildFlags_None, ImGuiWindowFlags_HorizontalScrollbar);
+    for (const std::string& line : p.emu.output()) ImGui::TextUnformatted(line.c_str());
+    if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 4) ImGui::SetScrollHereY(1.0f);
+    ImGui::EndChild();
+    ImGui::PopStyleColor(2);
+    ImGui::PopFont();
+    if (p.emu.running()) {
+        ImVec2 c = ImGui::GetCursorScreenPos();
+        if (button("stopplay", c, icon::square, "Stop", ButtonKind::Secondary)) p.emu.stop();
+        ImGui::Dummy(ImVec2(1, size::field + 6));
+    }
+    ImGui::EndPopup();
+}
+
+static void statusBar(ImDrawList* dl, ImVec2 size, const editor::Document& doc, State& st) {
     Fonts& f = fonts();
     ImRect bar(ImVec2(0, size.y - size::statusBar), size);
     dl->AddRectFilled(bar.Min, bar.Max, color::chrome);
@@ -1669,14 +1903,17 @@ static void statusBar(ImDrawList* dl, ImVec2 size, const editor::Document& doc, 
                    "Scene data and the renderer's buffers in psxsplash's heap, at the peak of loading. "
                    "Lua's own allocations are not counted.") +
              space::xl;
-        meter("m_tris", ImVec2(x, bar.Min.y), icon::box, "Triangles", -1, ts,
-              "Triangles in the exported meshes. How many are drawn depends on the camera.");
+        x += meter("m_tris", ImVec2(x, bar.Min.y), icon::box, "Triangles", -1, ts,
+                   "Triangles in the exported meshes. How many are drawn depends on the camera.") +
+             space::xl;
     } else {
         const char* msg = res ? "Export failed: see problems" : "Measuring...";
         ImVec2 ms = measure(f.regular, type::caption, msg);
         text(dl, ImVec2(x, bar.Min.y + (size::statusBar - ms.y) * 0.5f), f.regular, type::caption,
              res ? color::bad : color::textFaint, msg);
+        x += ms.x + space::xl;
     }
+    playStatus(dl, bar, x, st);
 
     // Right side: problems and save state.
     const char* saved = !st.saveError.empty() ? st.saveError.c_str() : doc.dirty() ? "Unsaved changes" : "All changes saved";
@@ -1759,6 +1996,7 @@ static void shortcuts(State& st, editor::Document& doc) {
         }
     }
     if (ctrl && !shift && pressed(ImGuiKey_A)) st.openAddObject = true;
+    if (!ctrl && pressed(ImGuiKey_F5)) togglePlay(st, doc);
     if (ctrl && pressed(ImGuiKey_S)) {
         auto err = doc.save();
         st.saveError = err ? "Save failed: " + *err : std::string();
@@ -1769,6 +2007,7 @@ static void shortcuts(State& st, editor::Document& doc) {
 ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view, ImVec2 size) {
     shortcuts(st, doc);
     st.live.update(doc, ImGui::GetTime());
+    updatePlay(st);
     ImGui::SetNextWindowPos(ImVec2(0, 0));
     ImGui::SetNextWindowSize(size);
     ImGui::Begin("##main", nullptr,
@@ -1787,6 +2026,7 @@ ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view,
     viewportPanel(st, dl, mid, doc, view);
     inspector(st, dl, right, doc);
     statusBar(dl, size, doc, st);
+    playSetup(st, doc, size);
     ImGui::End();
     return bar;
 }
