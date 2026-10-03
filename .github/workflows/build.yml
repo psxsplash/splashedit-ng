@@ -34,5 +34,6 @@ jobs:
           "$py" tests/luacheck.py "$cli"
           "$py" tests/audiocheck.py "$cli"
           "$py" tests/uicheck.py "$cli"
+          "$py" tests/cutscenecheck.py "$cli"
       - name: Editor tests
         run: ctest --test-dir build -C Release --output-on-failure

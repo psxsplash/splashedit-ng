@@ -143,6 +143,19 @@ Resampling is our own windowed sinc; psxavenc's goes through ffmpeg, so resample
 `splashpack-cli audio <in.wav> -o <out> --rate <hz> [--loop] [--trim] --pcm <src.wav>` writes the
 PCM it starts from, which is what was fed to psxavenc to make the expected files.
 
+## Cutscenes
+
+`cutscenecheck.py` exports `cutscene/cutscene.scene` with extra tracks and reads the cutscene table
+back the way psxsplash's loader does: per-type key encodings, key and audio event order, the
+`uiPosition` anchor correction, and that unknown targets and clips, too many tracks, repeated names
+and frames past 8191 fail the export.
+
+    python3 cutscenecheck.py <splashpack-cli>
+
+`cutscene/cutscene.scene` booted with `boot/boot.sh` (its script plays the cutscene in a loop) moves
+the crate right while the progress bar fills: at frames 300, 337 and 374 the crate's centre is at
+x 127, 141 and 156.5 and the bar is 48, 96 and 141 px long.
+
 ## UI
 
 `uicheck.py` exports `ui/ui.scene`, reads the UI table back the way `uisystem.cpp` does and resolves

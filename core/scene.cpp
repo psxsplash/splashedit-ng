@@ -528,6 +528,83 @@ UICanvas readCanvas(const json& j) {
     return c;
 }
 
+const std::initializer_list<std::pair<const char*, TrackType>> kTrackTypes = {
+    {"cameraPosition", TrackType::CameraPosition}, {"cameraRotation", TrackType::CameraRotation},
+    {"objectPosition", TrackType::ObjectPosition}, {"objectRotation", TrackType::ObjectRotation},
+    {"objectActive", TrackType::ObjectActive},     {"uiCanvasVisible", TrackType::UICanvasVisible},
+    {"uiElementVisible", TrackType::UIElementVisible}, {"uiProgress", TrackType::UIProgress},
+    {"uiPosition", TrackType::UIPosition},         {"uiColor", TrackType::UIColor},
+    {"cameraH", TrackType::CameraH},               {"rumbleSmall", TrackType::RumbleSmall},
+    {"rumbleLarge", TrackType::RumbleLarge},       {"objectUVOffset", TrackType::ObjectUVOffset}};
+const std::initializer_list<std::pair<const char*, Interp>> kInterps = {
+    {"linear", Interp::Linear}, {"step", Interp::Step}, {"easeIn", Interp::EaseIn},
+    {"easeOut", Interp::EaseOut}, {"easeInOut", Interp::EaseInOut}};
+
+json writeTrack(const CutsceneTrack& t) {
+    json keys = json::array();
+    for (const Keyframe& k : t.keyframes) {
+        json kj = {{"frame", k.frame}, {"value", json::array({k.value[0], k.value[1], k.value[2]})},
+                   {"interp", enumTo(k.interp, kInterps)}};
+        putExtras(kj, k.extra);
+        keys.push_back(kj);
+    }
+    json j = {{"type", enumTo(t.type, kTrackTypes)}, {"target", t.target}, {"keyframes", keys}};
+    putExtras(j, t.extra);
+    return j;
+}
+
+json writeCutscene(const Cutscene& c) {
+    json tracks = json::array(), audio = json::array();
+    for (const CutsceneTrack& t : c.tracks) tracks.push_back(writeTrack(t));
+    for (const CutsceneAudioEvent& a : c.audioEvents) {
+        json aj = {{"frame", a.frame}, {"clip", a.clip}, {"volume", a.volume}, {"pan", a.pan}};
+        putExtras(aj, a.extra);
+        audio.push_back(aj);
+    }
+    json j = {{"name", c.name}, {"durationFrames", c.durationFrames}, {"tracks", tracks}, {"audioEvents", audio}};
+    putExtras(j, c.extra);
+    return j;
+}
+
+Cutscene readCutscene(const json& j) {
+    Cutscene c;
+    c.name = j.value("name", "");
+    auto bad = [&](const std::string& what) { fail("cutscene '" + c.name + "': " + what); };
+    c.durationFrames = j.value("durationFrames", c.durationFrames);
+    if (c.durationFrames < 1 || c.durationFrames > 65535) bad("durationFrames must be 1..65535");
+    for (const json& tj : j.value("tracks", json::array())) {
+        CutsceneTrack t;
+        t.type = enumFrom(tj.at("type"), kTrackTypes);
+        t.target = tj.value("target", "");
+        for (const json& kj : tj.value("keyframes", json::array())) {
+            Keyframe k;
+            k.frame = kj.value("frame", 0);
+            if (k.frame < 0 || k.frame > 8191) bad("keyframe frame must be 0..8191");
+            if (kj.contains("value"))
+                for (size_t i = 0; i < 3; i++) k.value[i] = f(kj["value"].at(i));
+            if (kj.contains("interp")) k.interp = enumFrom(kj["interp"], kInterps);
+            k.extra = extrasOf(kj, json{{"frame", 0}, {"value", 0}, {"interp", 0}});
+            t.keyframes.push_back(k);
+        }
+        t.extra = extrasOf(tj, writeTrack(t));
+        c.tracks.push_back(std::move(t));
+    }
+    for (const json& aj : j.value("audioEvents", json::array())) {
+        CutsceneAudioEvent a;
+        a.frame = aj.value("frame", 0);
+        a.clip = aj.value("clip", "");
+        a.volume = aj.value("volume", a.volume);
+        a.pan = aj.value("pan", a.pan);
+        if (a.frame < 0 || a.frame > 65535) bad("audio event frame must be 0..65535");
+        if (a.volume < 0 || a.volume > 128) bad("audio event volume must be 0..128");
+        if (a.pan < 0 || a.pan > 127) bad("audio event pan must be 0..127");
+        a.extra = extrasOf(aj, json{{"frame", 0}, {"clip", 0}, {"volume", 0}, {"pan", 0}});
+        c.audioEvents.push_back(std::move(a));
+    }
+    c.extra = extrasOf(j, writeCutscene(c));
+    return c;
+}
+
 // The version only changes when an older build would read a file wrong.
 // Additions it can skip keep version 1, and their keys survive a save.
 void checkVersion(const json& j, const fs::path& file) {
@@ -571,8 +648,9 @@ Scene loadScene(const fs::path& file) {
     for (const json& oj : j.value("objects", json::array())) s.objects.push_back(readObject(oj));
     for (const json& fj : j.value("fonts", json::array())) s.fonts.push_back(readFont(fj));
     for (const json& cj : j.value("canvases", json::array())) s.canvases.push_back(readCanvas(cj));
+    for (const json& cj : j.value("cutscenes", json::array())) s.cutscenes.push_back(readCutscene(cj));
     s.extra = extrasOf(j, json{{"format", 0}, {"version", 0}, {"settings", 0}, {"objects", 0}, {"fonts", 0},
-                               {"canvases", 0}});
+                               {"canvases", 0}, {"cutscenes", 0}});
     return s;
 }
 
@@ -593,6 +671,11 @@ void saveScene(const Scene& s, const fs::path& file) {
         json cvs = json::array();
         for (const UICanvas& c : s.canvases) cvs.push_back(writeCanvas(c));
         j["canvases"] = cvs;
+    }
+    if (!s.cutscenes.empty()) {
+        json cs = json::array();
+        for (const Cutscene& c : s.cutscenes) cs.push_back(writeCutscene(c));
+        j["cutscenes"] = cs;
     }
     putExtras(j, s.extra);
     writeJson(j, file);

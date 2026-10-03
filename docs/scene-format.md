@@ -117,6 +117,36 @@ are kept) and `font` (a font name, `null` for the system font); `progress` has `
 `value` (0..100); `line` has `from` and `to` in screen pixels instead of `rect` and anchors;
 `image` has `texture`, `bitDepth` (4, 8, 16) and `cutout` [true].
 
+### Cutscenes: `cutscenes`
+
+An optional top-level array, played from Lua with `Cutscene.Play(name)`.
+
+```json
+"cutscenes": [
+  { "name": "intro", "durationFrames": 120,
+    "tracks": [
+      { "type": "objectPosition", "target": "Crate",
+        "keyframes": [ { "frame": 0, "value": [-1.5, 0, 4], "interp": "linear" },
+                       { "frame": 120, "value": [1.5, 0, 4], "interp": "easeOut" } ] },
+      { "type": "uiProgress", "target": "hud/bar", "keyframes": [ { "frame": 0, "value": [0, 0, 0] } ] }
+    ],
+    "audioEvents": [ { "frame": 30, "clip": "door", "volume": 100, "pan": 64 } ] }
+]
+```
+
+Track types and the units of `value`: `cameraPosition`, `objectPosition` (scene units; at most 8 PSX
+units, 8 x gteScaling, from the origin), `cameraRotation`, `objectRotation` (Euler degrees, as the
+object transform), `objectActive`, `uiCanvasVisible`, `uiElementVisible`, `rumbleSmall` (x above 0.5
+= on), `uiProgress` (0..100), `uiPosition` (x, y in pixels, the element's `rect` offset), `uiColor`
+(0..1), `cameraH` (projection distance, 1..1024), `rumbleLarge` (0..255), `objectUVOffset` (texels,
+0..255). Object tracks target an object with a mesh by name, `uiCanvasVisible` a canvas name, other
+UI tracks `canvas/element`; camera and rumble tracks have no target. `interp` is `linear`, `step`,
+`easeIn`, `easeOut` or `easeInOut`. Frames are 0..8191 and keys may be in any order. Audio events
+name an audio component's `clipName`; `volume` is 0..128 [100], `pan` 0..127 [64].
+
+At most 16 cutscenes, 8 tracks each, 64 keys per track and 64 audio events. A target or clip that
+does not exist fails the export.
+
 ## Mesh file (`*.mesh`)
 
 JSON, the imported form of a model: what the exporter consumes after any importer (glTF, OBJ, FBX)
