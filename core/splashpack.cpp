@@ -561,12 +561,12 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     w.i16(toPsxCoord(playerPos.x, gte));
     w.i16(toPsxCoord(-playerPos.y, gte));
     w.i16(toPsxCoord(playerPos.z, gte));
-    // Euler degrees as radians in 4.12 (2.4.0's encoding).
-    constexpr float deg2rad = 0.0174532924f;  // Mathf.Deg2Rad
+    // Euler angles in 4.12 units of pi: the engine casts these to psyqo::Angle.
+    // (2.4.0 writes radians, so any start yaw other than 0 faces the wrong way.)
     Vec3 euler = eulerAngles(playerRot);
-    w.i16(toFixed12(euler.x * deg2rad));
-    w.i16(toFixed12(euler.y * deg2rad));
-    w.i16(toFixed12(euler.z * deg2rad));
+    w.i16(toFixed12(euler.x / 180.f));
+    w.i16(toFixed12(euler.y / 180.f));
+    w.i16(toFixed12(euler.z / 180.f));
     w.u16(uint16_t(toPsxCoord(playerHeight, gte)));
     w.i16(scene.settings.script.empty() ? int16_t(-1) : luaIndex(scene.settings.script));
     w.u16(uint16_t(std::min<size_t>(bvh.nodes.size(), 65535)));

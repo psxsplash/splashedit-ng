@@ -44,7 +44,7 @@ Field table (writer order = reader struct order; `writer.Write('S')` writes the 
 | 12 | 2 | u16 | colliderCount | exporters with `CollisionType==Dynamic` and a `MeshFilter.sharedMesh` |
 | 14 | 2 | u16 | interactableCount | |
 | 16 | 6 | i16[3] | playerStartPos | x, -y, z via `ConvertCoordinateToPSX` (4.12, **int16**, clamped) |
-| 22 | 6 | i16[3] | playerStartRot | euler.x/y/z (degrees) * Deg2Rad via `ConvertToFixed12` (4.12 int16) |
+| 22 | 6 | i16[3] | playerStartRot | 2.4.0: euler.x/y/z (degrees) * Deg2Rad via `ConvertToFixed12` (4.12 int16). The engine reads `psyqo::Angle` (units of pi), see M17; this exporter writes degrees / 180 |
 | 28 | 2 | u16 | playerHeight | `(ushort)ConvertCoordinateToPSX(playerHeight, gte)` |
 | 30 | 2 | i16/u16 | sceneLuaFileIndex | index in lua list, `-1`(=0xFFFF) if none |
 | 32 | 2 | u16 | bvhNodeCount | `Min(NodeCount, 65535)` |
@@ -440,6 +440,7 @@ says what has to change; WRITER items are fixed in this exporter as each feature
 | M13 | WRITER | line endpoints wrap past 255 px |
 | M14 | WRITER | a third font, or a skipped one, shifts or dangles font indices |
 | M15 | WRITER | single buffering throws in the packer |
+| M17 | WRITER | player start rotation is written in radians and read in units of pi, so a start yaw of 90 degrees faces about -77 degrees. Measured with tests/boot on c05 plus a player; fixed in this exporter |
 
 M1. **Agent per-state clip index space differs.** Writer indexes the scene's `PSXAnimationClip[]` table:
 `if (scene.animations[c] == clip) { clipIndices[s] = (byte)(c < 255 ? c : 0xFE); ...` (W:PSXSceneWriter.cs ~585-600).
