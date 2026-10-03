@@ -1,5 +1,6 @@
 #include "scene.hh"
 
+#include <algorithm>
 #include <charconv>
 #include <fstream>
 #include <sstream>
@@ -391,6 +392,142 @@ json writeSettings(const SceneSettings& st) {
     return j;
 }
 
+const std::initializer_list<std::pair<const char*, UIElementType>> kUITypes = {
+    {"image", UIElementType::Image}, {"box", UIElementType::Box},  {"text", UIElementType::Text},
+    {"progress", UIElementType::Progress}, {"line", UIElementType::Line}};
+
+json rgb(const std::array<float, 3>& c) { return json::array({c[0], c[1], c[2]}); }
+void readRgb(const json& j, const char* key, std::array<float, 3>& c) {
+    if (j.contains(key))
+        for (int i = 0; i < 3; i++) c[size_t(i)] = f(j[key].at(size_t(i)));
+}
+template <size_t N>
+void readInts(const json& j, const char* key, std::array<int, N>& v) {
+    if (j.contains(key))
+        for (size_t i = 0; i < N; i++) v[i] = j[key].at(i).get<int>();
+}
+
+json writeFont(const UIFont& fo) {
+    json j = {{"name", fo.name}};
+    if (!fo.bitmap.empty()) {
+        j["bitmap"] = fo.bitmap;
+        j["glyphWidth"] = fo.glyphWidth;
+        j["glyphHeight"] = fo.glyphHeight;
+        if (!fo.advances.empty()) j["advances"] = fo.advances;
+    } else {
+        j["source"] = fo.source;
+        j["size"] = fo.size;
+    }
+    putExtras(j, fo.extra);
+    return j;
+}
+
+UIFont readFont(const json& j) {
+    UIFont fo;
+    fo.name = j.value("name", "");
+    fo.source = j.value("source", "");
+    fo.size = j.value("size", fo.size);
+    fo.bitmap = j.value("bitmap", "");
+    fo.glyphWidth = j.value("glyphWidth", fo.glyphWidth);
+    fo.glyphHeight = j.value("glyphHeight", fo.glyphHeight);
+    if (j.contains("advances")) fo.advances = j["advances"].get<std::vector<int>>();
+    if (fo.source.empty() == fo.bitmap.empty()) fail("font '" + fo.name + "': set exactly one of source and bitmap");
+    if (!fo.source.empty() && (fo.size < 4 || fo.size > 64)) fail("font '" + fo.name + "': size must be 4..64");
+    if (!fo.bitmap.empty() && (fo.glyphWidth < 1 || fo.glyphWidth > 64 || fo.glyphHeight < 1 || fo.glyphHeight > 64))
+        fail("font '" + fo.name + "': glyphWidth and glyphHeight must be 1..64");
+    if (!fo.advances.empty() && fo.advances.size() != 96) fail("font '" + fo.name + "': advances needs 96 entries");
+    fo.extra = extrasOf(j, writeFont(fo));
+    return fo;
+}
+
+json writeElement(const UIElement& e) {
+    if (!e.unknown.empty()) return json::parse(e.unknown);
+    json j = {{"type", enumTo(e.type, kUITypes)}, {"name", e.name}, {"visible", e.visible}};
+    if (e.type == UIElementType::Line) {
+        j["from"] = json::array({e.from[0], e.from[1]});
+        j["to"] = json::array({e.to[0], e.to[1]});
+    } else {
+        j["rect"] = json::array({e.rect[0], e.rect[1], e.rect[2], e.rect[3]});
+        j["anchorMin"] = json::array({e.anchorMin[0], e.anchorMin[1]});
+        j["anchorMax"] = json::array({e.anchorMax[0], e.anchorMax[1]});
+    }
+    j["color"] = rgb(e.color);
+    switch (e.type) {
+    case UIElementType::Text:
+        j["text"] = e.text;
+        j["font"] = e.font.empty() ? json(nullptr) : json(e.font);
+        break;
+    case UIElementType::Progress:
+        j["background"] = rgb(e.background);
+        j["value"] = e.value;
+        break;
+    case UIElementType::Image:
+        j["texture"] = e.texture.empty() ? json(nullptr) : json(e.texture);
+        j["bitDepth"] = int(e.bitDepth);
+        j["cutout"] = e.cutout;
+        break;
+    default:
+        break;
+    }
+    putExtras(j, e.extra);
+    return j;
+}
+
+UIElement readElement(const json& j, const std::string& canvas) {
+    UIElement e;
+    std::string type = j.at("type").get<std::string>();
+    if (std::none_of(kUITypes.begin(), kUITypes.end(), [&](const auto& t) { return type == t.first; })) {
+        e.name = j.value("name", "");
+        e.unknown = j.dump();
+        return e;
+    }
+    e.type = enumFrom(j.at("type"), kUITypes);
+    e.name = j.value("name", "");
+    e.visible = j.value("visible", true);
+    readInts(j, "rect", e.rect);
+    if (j.contains("anchorMin"))
+        for (size_t i = 0; i < 2; i++) e.anchorMin[i] = f(j["anchorMin"].at(i));
+    if (j.contains("anchorMax"))
+        for (size_t i = 0; i < 2; i++) e.anchorMax[i] = f(j["anchorMax"].at(i));
+    for (size_t i = 0; i < 2; i++)
+        if (e.anchorMin[i] < 0 || e.anchorMax[i] > 1 || e.anchorMin[i] > e.anchorMax[i])
+            fail("canvas '" + canvas + "', element '" + e.name + "': anchors must satisfy 0 <= min <= max <= 1");
+    readRgb(j, "color", e.color);
+    e.text = j.value("text", "");
+    if (j.contains("font") && !j["font"].is_null()) e.font = j["font"].get<std::string>();
+    readInts(j, "from", e.from);
+    readInts(j, "to", e.to);
+    readRgb(j, "background", e.background);
+    e.value = j.value("value", 0);
+    if (e.value < 0 || e.value > 100) fail("canvas '" + canvas + "', element '" + e.name + "': value must be 0..100");
+    if (j.contains("texture") && !j["texture"].is_null()) e.texture = j["texture"].get<std::string>();
+    int bd = j.value("bitDepth", int(e.bitDepth));
+    if (bd != 4 && bd != 8 && bd != 16) fail("canvas '" + canvas + "', element '" + e.name + "': bitDepth must be 4, 8 or 16");
+    e.bitDepth = BitDepth(bd);
+    e.cutout = j.value("cutout", e.cutout);
+    e.extra = extrasOf(j, writeElement(e));
+    return e;
+}
+
+json writeCanvas(const UICanvas& c) {
+    json els = json::array();
+    for (const UIElement& e : c.elements) els.push_back(writeElement(e));
+    json j = {{"name", c.name}, {"visible", c.visible}, {"sortOrder", c.sortOrder}, {"elements", els}};
+    putExtras(j, c.extra);
+    return j;
+}
+
+UICanvas readCanvas(const json& j) {
+    UICanvas c;
+    c.name = j.value("name", "");
+    c.visible = j.value("visible", true);
+    c.sortOrder = j.value("sortOrder", 0);
+    if (c.sortOrder < 0 || c.sortOrder > 255) fail("canvas '" + c.name + "': sortOrder must be 0..255");
+    for (const json& ej : j.value("elements", json::array())) c.elements.push_back(readElement(ej, c.name));
+    c.extra = extrasOf(j, writeCanvas(c));
+    return c;
+}
+
 // The version only changes when an older build would read a file wrong.
 // Additions it can skip keep version 1, and their keys survive a save.
 void checkVersion(const json& j, const fs::path& file) {
@@ -432,7 +569,10 @@ Scene loadScene(const fs::path& file) {
         s.settings.extra = extrasOf(st, writeSettings(s.settings));
     }
     for (const json& oj : j.value("objects", json::array())) s.objects.push_back(readObject(oj));
-    s.extra = extrasOf(j, json{{"format", 0}, {"version", 0}, {"settings", 0}, {"objects", 0}});
+    for (const json& fj : j.value("fonts", json::array())) s.fonts.push_back(readFont(fj));
+    for (const json& cj : j.value("canvases", json::array())) s.canvases.push_back(readCanvas(cj));
+    s.extra = extrasOf(j, json{{"format", 0}, {"version", 0}, {"settings", 0}, {"objects", 0}, {"fonts", 0},
+                               {"canvases", 0}});
     return s;
 }
 
@@ -444,6 +584,16 @@ void saveScene(const Scene& s, const fs::path& file) {
     json objs = json::array();
     for (const Object& o : s.objects) objs.push_back(writeObject(o));
     j["objects"] = objs;
+    if (!s.fonts.empty()) {
+        json fonts = json::array();
+        for (const UIFont& fo : s.fonts) fonts.push_back(writeFont(fo));
+        j["fonts"] = fonts;
+    }
+    if (!s.canvases.empty()) {
+        json cvs = json::array();
+        for (const UICanvas& c : s.canvases) cvs.push_back(writeCanvas(c));
+        j["canvases"] = cvs;
+    }
     putExtras(j, s.extra);
     writeJson(j, file);
 }

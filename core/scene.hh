@@ -188,9 +188,66 @@ struct VramSettings {
     std::vector<Area> prohibited;
 };
 
+// A custom font for UI text, rasterised at export. Either `source` (a TTF/OTF
+// rasterised at `size` pixels per em) or `bitmap` (a 256-wide PNG of glyph
+// cells from 0x20 in ASCII order, ink = alpha above 0.5) is set.
+struct UIFont {
+    std::string name;    // what text elements refer to it by
+    std::string source;  // project-relative TTF/OTF
+    int size = 16;       // pixels per em
+    std::string bitmap;  // project-relative PNG
+    int glyphWidth = 8, glyphHeight = 16;  // bitmap cells
+    // Bitmap fonts: per-character advance (0x20..0x7F). Empty = measured from
+    // each cell's ink.
+    std::vector<int> advances;
+    ExtraKeys extra;
+};
+
+enum class UIElementType : uint8_t { Image = 0, Box = 1, Text = 2, Progress = 3, Line = 4 };
+
+// One UI element. Layout is in screen pixels. Each axis is anchored to a
+// fraction of the screen: with anchorMin == anchorMax on an axis, rect x/y is
+// the offset of the top-left corner from that point and w/h the size; with
+// them apart, the element stretches between the two points and x/y and w/h
+// are the insets (left/top, and right minus left / bottom minus top).
+struct UIElement {
+    UIElementType type = UIElementType::Box;
+    std::string name;
+    bool visible = true;
+    std::array<int, 4> rect{0, 0, 16, 16};  // x, y, w, h
+    std::array<float, 2> anchorMin{0, 0}, anchorMax{0, 0};
+    std::array<float, 3> color{1, 1, 1};
+    // Text
+    std::string text;
+    std::string font;  // UIFont name, empty = system font
+    // Line, in screen pixels (anchors and rect do not apply)
+    std::array<int, 2> from{0, 0}, to{0, 0};
+    // Progress
+    std::array<float, 3> background{0.2f, 0.2f, 0.2f};
+    int value = 0;  // 0..100
+    // Image
+    std::string texture;  // project-relative image
+    BitDepth bitDepth = BitDepth::Bpp8;
+    bool cutout = true;
+    // An element of a type this build does not know, as JSON text: kept on
+    // save, skipped on export.
+    std::string unknown;
+    ExtraKeys extra;
+};
+
+struct UICanvas {
+    std::string name;
+    bool visible = true;
+    int sortOrder = 0;  // 0 = back, 255 = front
+    std::vector<UIElement> elements;
+    ExtraKeys extra;
+};
+
 struct Scene {
     SceneSettings settings;
     std::vector<Object> objects;
+    std::vector<UIFont> fonts;
+    std::vector<UICanvas> canvases;
     ExtraKeys extra;
 };
 

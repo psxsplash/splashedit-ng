@@ -12,6 +12,7 @@
 #include "audio.hh"
 #include "binwriter.hh"
 #include "bvh.hh"
+#include "font.hh"
 #include "luacompile.hh"
 #include "navregion.hh"
 #include "texture.hh"
@@ -323,6 +324,266 @@ uint32_t hashSceneId(const std::string& id) {
 
 }  // namespace
 
+namespace {
+
+// ---- UI (uisystem.cpp)
+
+constexpr int kUiMaxCanvases = 24, kUiMaxElements = 256, kUiMaxFonts = 3, kUiTextMax = 63;
+
+// Cut a UTF-8 string to at most `bytes` bytes without splitting a character.
+std::string truncateBytes(const std::string& s, size_t bytes) {
+    if (s.size() <= bytes) return s;
+    size_t cut = bytes;
+    while (cut > 0 && (uint8_t(s[cut]) & 0xC0) == 0x80) cut--;
+    return s.substr(0, cut);
+}
+
+template <typename ImageFor>
+void prepareUi(const Scene& scene, const std::vector<UICanvas>& canvases, const fs::path& root, const VramSettings& vs, ImageFor& imageFor,
+               std::deque<PsxTexture>& store, std::vector<std::vector<PsxTexture*>>& uiTextures,
+               std::vector<FontSheet>& sheets, std::vector<std::array<int, 2>>& fontVram,
+               std::map<std::string, int>& fontIndex, ExportResult& res) {
+    if (canvases.size() > size_t(kUiMaxCanvases))
+        res.errors.push_back(std::to_string(canvases.size()) + " UI canvases, psxsplash loads at most " +
+                             std::to_string(kUiMaxCanvases));
+    if (scene.fonts.size() > size_t(kUiMaxFonts))
+        res.errors.push_back(std::to_string(scene.fonts.size()) + " UI fonts, psxsplash loads at most " +
+                             std::to_string(kUiMaxFonts));
+    // Fonts go in the column at x = 960 that the VRAM packer keeps free, above
+    // the system font (960, 464, 48 rows). A sheet must not cross a texture
+    // page, so the column is two bins: rows 0-255 and 256-463.
+    struct Bin {
+        int y, end;
+    } bins[2] = {{0, 256}, {256, 464}};
+    auto clash = [&](int x, int y, int w, int h) {
+        auto hit = [&](int ax, int ay, int aw, int ah) { return ax < x + w && x < ax + aw && ay < y + h && y < ay + ah; };
+        for (const auto& a : vs.prohibited)
+            if (hit(a.x, a.y, a.w, a.h)) return true;
+        if (hit(0, 0, vs.resolutionX, vs.resolutionY)) return true;
+        return vs.verticalBuffering ? hit(0, 256, vs.resolutionX, vs.resolutionY)
+                                    : hit(vs.resolutionX, 0, vs.resolutionX, vs.resolutionY);
+    };
+    for (size_t i = 0; i < scene.fonts.size() && i < size_t(kUiMaxFonts); i++) {
+        const UIFont& f = scene.fonts[i];
+        if (fontIndex.count(f.name)) {
+            res.errors.push_back("two UI fonts are named '" + f.name + "'");
+            continue;
+        }
+        try {
+            sheets.push_back(buildFont(f, root));
+        } catch (const std::exception& ex) {
+            res.errors.push_back(ex.what());
+            continue;
+        }
+        FontSheet& sh = sheets.back();
+        res.warnings.insert(res.warnings.end(), sh.warnings.begin(), sh.warnings.end());
+        bool placed = false;
+        for (Bin& b : bins)
+            if (b.y + sh.height <= b.end && !clash(960, b.y, 64, sh.height)) {
+                fontVram.push_back({960, b.y});
+                b.y += sh.height;
+                placed = true;
+                break;
+            }
+        if (!placed) {
+            res.errors.push_back("font '" + f.name + "' (" + std::to_string(sh.height) +
+                                 " rows) does not fit in the font column of VRAM");
+            sheets.pop_back();
+            continue;
+        }
+        fontIndex[f.name] = int(sheets.size());
+    }
+
+    int total = 0;
+    for (size_t ci = 0; ci < canvases.size(); ci++) {
+        const UICanvas& cv = canvases[ci];
+        if (cv.elements.size() > 255)
+            res.errors.push_back("canvas '" + cv.name + "' has " + std::to_string(cv.elements.size()) +
+                                 " elements, the format stores at most 255");
+        total += int(cv.elements.size());
+        uiTextures[ci].assign(cv.elements.size(), nullptr);
+        for (size_t ei = 0; ei < cv.elements.size(); ei++) {
+            const UIElement& e = cv.elements[ei];
+            std::string where = "canvas '" + cv.name + "', element '" + e.name + "'";
+            if (e.type == UIElementType::Text) {
+                if (!e.font.empty() && !fontIndex.count(e.font))
+                    res.errors.push_back(where + ": no UI font named '" + e.font + "'");
+                if (e.text.size() > size_t(kUiTextMax))
+                    res.warnings.push_back(where + ": text cut to " + std::to_string(kUiTextMax) + " bytes");
+                for (unsigned char c : e.text)
+                    if (c < 0x20 || c > 0x7E) {
+                        res.warnings.push_back(where + ": psxsplash draws only ASCII 0x20-0x7E, other bytes as '?'");
+                        break;
+                    }
+            }
+            if (e.type == UIElementType::Image) {
+                if (e.texture.empty()) {
+                    res.warnings.push_back(where + ": image has no texture");
+                    continue;
+                }
+                try {
+                    store.push_back(convertTexture(imageFor(e.texture), e.bitDepth, e.cutout));
+                } catch (const std::exception& ex) {
+                    res.errors.push_back(ex.what());
+                    continue;
+                }
+                store.back().source = e.texture;
+                uiTextures[ci][ei] = &store.back();
+            }
+            if (e.type == UIElementType::Line)
+                for (int v : {e.from[0], e.from[1], e.to[0], e.to[1]})
+                    if (v < -32768 || v > 32767) res.errors.push_back(where + ": line endpoint out of range");
+        }
+    }
+    if (total > kUiMaxElements)
+        res.errors.push_back(std::to_string(total) + " UI elements, psxsplash loads at most " +
+                             std::to_string(kUiMaxElements));
+}
+
+uint8_t rgbByte(float c) { return uint8_t(clampv(roundToInt(c * 255.f), 0, 255)); }
+
+// Anchors are stored as bytes, a = byte / 256 of the screen, so 1.0 can only
+// be 255 and lands short of the edge. The rounding error of each anchor at
+// the project resolution goes into the stored offsets, so the element lands
+// on the pixel the scene file asks for.
+struct BakedAxis {
+    uint8_t amin, amax;
+    int16_t pos, size;
+};
+BakedAxis bakeAxis(float amin, float amax, int pos, int size, int res) {
+    BakedAxis b;
+    b.amin = uint8_t(clampv(roundToInt(amin * 255.f), 0, 255));
+    b.amax = uint8_t(clampv(roundToInt(amax * 255.f), 0, 255));
+    if (amin == amax) b.amax = b.amin;
+    int errMin = roundToInt(amin * float(res)) - ((b.amin * res) >> 8);
+    int errMax = roundToInt(amax * float(res)) - ((b.amax * res) >> 8);
+    b.pos = int16_t(clampv(pos + errMin, -32768, 32767));
+    b.size = int16_t(clampv(b.amin == b.amax ? size : size + errMax - errMin, -32768, 32767));
+    return b;
+}
+
+void writeUi(BinWriter& w, size_t tableOffsetPos, const std::vector<UICanvas>& canvases,
+             const std::vector<std::vector<PsxTexture*>>& uiTextures, const std::vector<FontSheet>& sheets,
+             const std::vector<std::array<int, 2>>& fontVram, const std::map<std::string, int>& fontIndex,
+             const VramSettings& vs) {
+    w.align4();
+    w.patchU32(tableOffsetPos, uint32_t(w.pos()));
+    // Font descriptors (112 bytes). The pixels are in the .vram file.
+    for (size_t i = 0; i < sheets.size(); i++) {
+        w.u8(uint8_t(sheets[i].glyphWidth));
+        w.u8(uint8_t(sheets[i].glyphHeight));
+        w.u16(uint16_t(fontVram[i][0]));
+        w.u16(uint16_t(fontVram[i][1]));
+        w.u16(uint16_t(sheets[i].height));
+        w.u32(0);
+        w.u32(uint32_t(sheets[i].texels.size() / 2));
+        w.bytes(sheets[i].advances.data(), 96);
+    }
+    // Canvas descriptors (12 bytes).
+    std::vector<size_t> dataPos, namePos;
+    std::vector<std::string> names;
+    for (const UICanvas& cv : canvases) {
+        names.push_back(truncateUtf16(cv.name, 24));
+        dataPos.push_back(w.pos());
+        w.u32(0);
+        w.u8(uint8_t(names.back().size()));
+        w.u8(uint8_t(cv.sortOrder));
+        w.u8(uint8_t(cv.elements.size()));
+        w.u8(cv.visible ? 1 : 0);
+        namePos.push_back(w.pos());
+        w.u32(0);
+    }
+    // Element records (48 bytes), then that canvas's strings.
+    for (size_t ci = 0; ci < canvases.size(); ci++) {
+        const UICanvas& cv = canvases[ci];
+        if (cv.elements.empty()) continue;
+        w.align4();
+        w.patchU32(dataPos[ci], uint32_t(w.pos()));
+        std::vector<std::pair<size_t, std::string>> strings;
+        for (size_t ei = 0; ei < cv.elements.size(); ei++) {
+            const UIElement& e = cv.elements[ei];
+            std::string name = truncateUtf16(e.name, 24);
+            w.u8(uint8_t(e.type));
+            w.u8(e.visible ? 1 : 0);
+            w.u8(uint8_t(name.size()));
+            w.u8(0);
+            strings.push_back({w.pos(), name});
+            w.u32(0);
+            BakedAxis bx{}, by{};
+            if (e.type == UIElementType::Line) {
+                // Lines draw at their endpoints; the layout fields are unused.
+                w.i16(int16_t(e.from[0]));
+                w.i16(int16_t(e.from[1]));
+                w.i16(int16_t(e.to[0]));
+                w.i16(int16_t(e.to[1]));
+                w.u32(0);
+            } else {
+                bx = bakeAxis(e.anchorMin[0], e.anchorMax[0], e.rect[0], e.rect[2], vs.resolutionX);
+                by = bakeAxis(e.anchorMin[1], e.anchorMax[1], e.rect[1], e.rect[3], vs.resolutionY);
+                w.i16(bx.pos);
+                w.i16(by.pos);
+                w.i16(bx.size);
+                w.i16(by.size);
+                w.u8(bx.amin);
+                w.u8(by.amin);
+                w.u8(bx.amax);
+                w.u8(by.amax);
+            }
+            for (float c : e.color) w.u8(rgbByte(c));
+            w.u8(0);
+            size_t typeStart = w.pos();
+            switch (e.type) {
+            case UIElementType::Image:
+                if (const PsxTexture* t = uiTextures[ci][ei]) {
+                    int expander = 16 / int(t->bitDepth);
+                    int u0 = t->packingX * expander, v0 = t->packingY;
+                    w.u8(t->texpageX);
+                    w.u8(t->texpageY);
+                    w.u16(t->clutPackingX);
+                    w.u16(t->clutPackingY);
+                    w.u8(uint8_t(u0));
+                    w.u8(uint8_t(v0));
+                    w.u8(uint8_t(u0 + t->width - 1));
+                    w.u8(uint8_t(v0 + t->height - 1));
+                    w.u8(t->bitDepth == BitDepth::Bpp4 ? 0 : t->bitDepth == BitDepth::Bpp8 ? 1 : 2);
+                }
+                break;
+            case UIElementType::Progress:
+                for (float c : e.background) w.u8(rgbByte(c));
+                w.u8(uint8_t(e.value));
+                break;
+            case UIElementType::Text:
+                w.u8(uint8_t(e.font.empty() ? 0 : fontIndex.at(e.font)));
+                break;
+            case UIElementType::Line:
+                w.i16(int16_t(e.from[0]));
+                w.i16(int16_t(e.from[1]));
+                w.i16(int16_t(e.to[0]));
+                w.i16(int16_t(e.to[1]));
+                break;
+            default:
+                break;
+            }
+            while (w.pos() < typeStart + 16) w.u8(0);
+            std::string text = e.type == UIElementType::Text ? truncateBytes(e.text, kUiTextMax) : "";
+            if (!text.empty()) strings.push_back({w.pos(), text});
+            w.u32(0);
+            w.u32(0);
+        }
+        for (auto& [at, str] : strings) {
+            w.patchU32(at, uint32_t(w.pos()));
+            w.bytes(str);
+            w.u8(0);
+        }
+    }
+    for (size_t ci = 0; ci < canvases.size(); ci++) {
+        w.patchU32(namePos[ci], uint32_t(w.pos()));
+        w.bytes(names[ci]);
+        w.u8(0);
+    }
+}
+}  // namespace
+
 ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs::path& out,
                               const ExportOptions& options) {
     ExportResult res;
@@ -398,9 +659,32 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     for (ExpObject& e : exporters) buildTris(e, gte, lights, res);
     if (!res.ok()) return res;
 
+    // UI: image textures (packed after the object textures, as 2.4.0 does),
+    // font sheets, and the checks the loader would otherwise fail silently.
+    // Elements of a type this build does not know are left out.
+    std::vector<UICanvas> canvases = scene.canvases;
+    for (UICanvas& cv : canvases)
+        for (auto it = cv.elements.begin(); it != cv.elements.end();)
+            if (it->unknown.empty()) {
+                ++it;
+            } else {
+                res.warnings.push_back("canvas '" + cv.name + "': element '" + it->name +
+                                       "' has a type this build does not export");
+                it = cv.elements.erase(it);
+            }
+    std::vector<std::vector<PsxTexture*>> uiTextures(canvases.size());
+    std::vector<FontSheet> fontSheets;
+    std::vector<std::array<int, 2>> fontVram;
+    std::map<std::string, int> fontIndex;  // name -> 1-based index (0 = system font)
+    prepareUi(scene, canvases, root, options.vram, imageFor, textureStore, uiTextures, fontSheets, fontVram, fontIndex, res);
+    if (!res.ok()) return res;
+
     // VRAM packing over every object's texture list in object order.
     std::vector<PsxTexture*> all;
     for (ExpObject& e : exporters) all.insert(all.end(), e.textures.begin(), e.textures.end());
+    for (auto& cv : uiTextures)
+        for (PsxTexture* t : cv)
+            if (t) all.push_back(t);
     VramLayout vram = packVram(all, options.vram, res.errors);
     if (!res.ok()) return res;
 
@@ -642,10 +926,11 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     w.u16(0);  // cutscenes
     w.u16(0);  // room cells
     w.u32(0);  // cutscene table offset
-    w.u16(0);  // ui canvases
-    w.u8(0);   // ui fonts
+    w.u16(uint16_t(canvases.size()));
+    w.u8(uint8_t(fontSheets.size()));
     w.u8(0);
-    w.u32(0);  // ui table offset
+    size_t uiTableOffsetPos = w.pos();
+    w.u32(0);
     w.u32(0);  // pixel data offset
     w.u16(0);  // animations
     w.u16(0);  // room portal refs
@@ -882,6 +1167,9 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
         }
     }
 
+    if (!canvases.empty() || !fontSheets.empty())
+        writeUi(w, uiTableOffsetPos, canvases, uiTextures, fontSheets, fontVram, fontIndex, options.vram);
+
     fs::path outPath = out;
     w.save(outPath);
 
@@ -891,7 +1179,7 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     v.u8('R');
     v.u16(uint16_t(vram.atlases.size()));
     v.u16(uint16_t(clutCount));
-    v.u8(0);  // fonts
+    v.u8(uint8_t(fontSheets.size()));
     v.u8(0);
     for (Atlas& a : vram.atlases) {
         v.u16(uint16_t(a.positionX));
@@ -911,6 +1199,17 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
             for (uint16_t c : t->palette) v.u16(c);
             v.align4();
         }
+    for (size_t i = 0; i < fontSheets.size(); i++) {
+        std::vector<uint8_t> px = fontSheets[i].packed4bpp();
+        v.u8(uint8_t(fontSheets[i].glyphWidth));
+        v.u8(uint8_t(fontSheets[i].glyphHeight));
+        v.u16(uint16_t(fontVram[i][0]));
+        v.u16(uint16_t(fontVram[i][1]));
+        v.u16(uint16_t(fontSheets[i].height));
+        v.u32(uint32_t(px.size()));
+        v.bytes(px.data(), px.size());
+        v.align4();
+    }
     v.save(fs::path(outPath).replace_extension(".vram"));
 
     // ---- .spu

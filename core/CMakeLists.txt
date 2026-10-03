@@ -66,6 +66,7 @@ endif()
 
 add_library(splashcore STATIC
     audio.cpp
+    font.cpp
     scene.cpp
     texture.cpp
     vrampacker.cpp

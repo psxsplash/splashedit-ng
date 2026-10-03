@@ -266,6 +266,20 @@ Order: font descriptors, canvas descriptors, then for each canvas with elements 
 Type data: Image `{u8 texpageX, texpageY; u16 clutX, clutY; u8 u0,v0,u1,v1; u8 bitDepthIndex (0=4bpp,1=8bpp,2=16bpp); u8 cellW, cellH, sheetCols, baseU, baseV}`; Progress `{bgR,bgG,bgB,value; 12 zero}`; Text `{fontIndex (0 system, 1+ custom); 15 zero}`; Line `{i16 x,y,w,h again; 8 zero}`; Box all zero. Reader reads the same bytes (R:uisystem.cpp).
 Strings: for each element in order: text (only Text type and only if non-empty) then name (always, even empty); each NUL-terminated UTF-8; `nameOffset`/`textOffset` backfilled. The element's layout is baked by `PSXUILayout.Bake` (sec. 3).
 
+This exporter (`core/splashpack.cpp`, `writeUi`) writes the same records with these differences:
+- Fonts are stacked in the x = 960 column in scene order, first fit in rows 0-255 then 256-463
+  (the system font is at 960,464), each inside one texture page, so 3 fonts fit where 2.4.0 placed
+  at most 2. Glyph cells can be any width, not only 4/8/16/32 (the reader only needs
+  `256 / glyphW` per row). Sheets come from `core/font.cpp`: TrueType glyphs are rendered at the
+  subpixel offset that leaves the fewest half-covered pixels, then thresholded at 96/255.
+- Anchors are still bytes read as `byte * res >> 8`, so 1.0 lands 2 px short at 320 wide. The
+  rounding error of each anchor at the project resolution is added to x/w (y/h), and the element
+  lands on the pixel the scene asks for: a bar anchored 0..1 at 320 wide resolves to 320 px, where
+  2.4.0's bake gives 318 (tests/uicheck.py, which fails with the correction removed).
+- Line endpoints are written as i16 in both the layout and the type data.
+- More than 24 canvases, 256 elements, 255 elements in one canvas or 3 fonts fails the export; the
+  loader would drop the rest.
+
 ### 2.19 Sprite sheets + sprite anims (header spriteTableOffset; only if >=1 sheet) - `AlignToFourBytes` first
 `spriteSheetCount` x 20 B `{u32 nameOffset; u8 texpageX, texpageY, u0, v0; u16 clutX, clutY; u8 cellW, cellH, cols, rows, bitDepthIndex, pad0; u16 pad1}` then `spriteAnimCount` x 12 B `{u32 nameOffset; u8 sheet, firstFrame, frameCount, frameDuration, loop, pad0; u16 pad1}`, then NUL-terminated names (<=24 chars) of all sheets then all anims. Reader: `SPLASHPACKSpriteSheet` 20 B / `SPLASHPACKSpriteAnim` 12 B (R:spritesystem.cpp), limits 16 sheets / 64 anims (asserts).
 
@@ -437,14 +451,14 @@ says what has to change; WRITER items are fixed in this exporter as each feature
 | M2 | WRITER (probable) | patrol waypoint Y has the opposite sign to every other position |
 | M3 | WRITER | a `CameraH` track on an animation (not reachable from the editor UI) writes 2-byte keyframes the reader steps as 8 |
 | M4 | none | extra CLUT words; this exporter pads to a multiple of 4 instead |
-| M5 | READER | the font CLUT is read from the bitmap origin, so the white CLUT replaces 8 texels of row 0: the space glyph, plus `!` when glyphs are 4 wide |
+| M5 | READER | the font CLUT is read from the bitmap origin, so the white CLUT replaces 8 texels of row 0: the space glyph, plus `!` when glyphs are 4 wide. Engine side is psxsplash#56; this exporter keeps row 0 of a TrueType sheet blank and warns when a bitmap font has ink there |
 | M6 | none | unused fields |
 | M7, M8, M10 | none | comments and names |
 | M9, M16 | WRITER (guard) | cannot happen with the current eligibility rules |
 | M11 | WRITER | counts over 65535 truncate while every record is written |
-| M12 | WRITER | non-ASCII names mangled; name caps count UTF-16 characters against a UTF-8 byte length |
-| M13 | WRITER | line endpoints wrap past 255 px |
-| M14 | WRITER | a third font, or a skipped one, shifts or dangles font indices |
+| M12 | WRITER | non-ASCII names mangled; name caps count UTF-16 characters against a UTF-8 byte length. This exporter writes every UI name and text as UTF-8 and cuts text at 63 bytes on a character boundary |
+| M13 | WRITER | line endpoints wrap past 255 px. Fixed in this exporter (endpoints are i16) |
+| M14 | WRITER | a third font, or a skipped one, shifts or dangles font indices. Fixed in this exporter: text names its font, an unknown name or a font that does not fit fails the export, and 3 fonts are supported |
 | M15 | WRITER | single buffering throws in the packer |
 | M17 | WRITER | player start rotation is written in radians and read in units of pi, so a start yaw of 90 degrees faces about -77 degrees. Measured with tests/boot on c05 plus a player; fixed in this exporter |
 
