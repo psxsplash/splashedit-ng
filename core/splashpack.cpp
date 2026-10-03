@@ -15,6 +15,7 @@
 #include "font.hh"
 #include "luacompile.hh"
 #include "navregion.hh"
+#include "skin.hh"
 #include "texture.hh"
 #include "vrampacker.hh"
 
@@ -52,6 +53,8 @@ struct ExpObject {
     std::vector<PsxTexture*> textures;  // per-material list as built, before packing
     std::vector<PsxTri> tris;
     std::vector<PsxTexture*> finalTextures;  // deduplicated, after packing
+    std::vector<int> vertexBone;             // skinned only: bone per mesh vertex
+    std::vector<uint8_t> triBones;           // skinned only: bone per Tri vertex, Tri order
 };
 
 // String.Substring(0, 24) counts UTF-16 code units; names are stored as UTF-8.
@@ -237,6 +240,8 @@ void buildTris(ExpObject& e, float gte, const std::vector<SceneLight>& lights, E
             Vec3 fn = normalized(cross(m.positions[size_t(b)] - p0, m.positions[size_t(c)] - p0));
             if (dot(fn, m.normals[size_t(a)]) < 0) std::swap(b, c);
             e.tris.push_back({{convert(a), convert(b), convert(c)}, texIndex});
+            if (!e.vertexBone.empty())
+                for (int v : {a, b, c}) e.triBones.push_back(uint8_t(e.vertexBone[size_t(v)]));
         }
     }
 }
@@ -809,8 +814,10 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
 
     std::vector<ExpObject> exporters;
     for (const FlatObject& fo : flat) {
+        if (fo.object->skin && !fo.object->mesh)
+            res.errors.push_back(fo.object->name + ": a skin component needs a mesh component");
         if (!fo.object->mesh) continue;
-        ExpObject e{&fo, fo.object, &*fo.object->mesh, nullptr, {}, {}, {}};
+        ExpObject e{&fo, fo.object, &*fo.object->mesh, nullptr, {}, {}, {}, {}, {}};
         try {
             e.mesh = meshFor(e.mc->mesh);
         } catch (const std::exception& ex) {
@@ -849,6 +856,71 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
         std::stable_sort(exporters.begin(), exporters.end(),
                          [&](const ExpObject& a, const ExpObject& b) { return rank(a) < rank(b); });
     }
+
+    // Skinned meshes: validate, pick a bone per vertex, bake every clip.
+    struct SkinOut {
+        size_t exporter;
+        std::vector<BakedClip> clips;
+        size_t boneCount;
+    };
+    std::vector<SkinOut> skins;
+    for (size_t i = 0; i < exporters.size(); i++) {
+        ExpObject& e = exporters[i];
+        if (!e.obj->skin) continue;
+        const SkinComponent& sc = *e.obj->skin;
+        std::string where = e.obj->name + ": ";
+        if (!e.mesh->skin) {
+            res.errors.push_back(where + "mesh " + e.mc->mesh + " has no skeleton");
+            continue;
+        }
+        const MeshSkin& sk = *e.mesh->skin;
+        if (sk.joints.size() > 64) {
+            res.errors.push_back(where + std::to_string(sk.joints.size()) + " joints, psxsplash draws at most 64");
+            continue;
+        }
+        if (sc.clips.empty()) {
+            // psxsplash skips a skinned object with no clips in both render passes.
+            res.errors.push_back(where + "a skinned mesh needs at least one clip, or it is never drawn");
+            continue;
+        }
+        if (sc.clips.size() > 16) {
+            res.errors.push_back(where + std::to_string(sc.clips.size()) + " clips, at most 16");
+            continue;
+        }
+        if (skins.size() == 16) {
+            res.errors.push_back(where + "more than 16 skinned meshes in the scene");
+            continue;
+        }
+        SkinOut so{i, {}, sk.joints.size()};
+        bool clamped = false;
+        std::vector<std::string> names;
+        for (const std::string& path : sc.clips) {
+            AnimClip clip;
+            try {
+                clip = loadAnim(root / path);
+            } catch (const std::exception& ex) {
+                res.errors.push_back(ex.what());
+                continue;
+            }
+            // The engine reads the name back for SkinnedAnim.Play; 2.4.0 cut it
+            // at 24 characters, which made longer names unplayable.
+            if (clip.name.empty() || truncateUtf16(clip.name, 24) != clip.name)
+                res.errors.push_back(where + path + ": clip name must be 1..24 characters");
+            if (std::find(names.begin(), names.end(), clip.name) != names.end())
+                res.errors.push_back(where + "two clips are named '" + clip.name + "'");
+            names.push_back(clip.name);
+            std::vector<std::string> errs;
+            BakedClip b = bakeClip(sk, clip, sc.fps, e.flat->lossyScale, gte, errs, clamped);
+            for (auto& m : errs) res.errors.push_back(where + m);
+            so.clips.push_back(std::move(b));
+        }
+        if (clamped)
+            res.warnings.push_back(where + "bone values outside the 4.12 range were clamped (bone moves more than " +
+                                   std::to_string(int(8 * gte)) + " units from its bind position?)");
+        e.vertexBone = dominantJoints(sk);
+        skins.push_back(std::move(so));
+    }
+    if (!res.ok()) return res;
 
     for (ExpObject& e : exporters) buildTris(e, gte, lights, res);
     if (!res.ok()) return res;
@@ -1130,9 +1202,10 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     w.u16(0);  // animations
     w.u16(0);  // room portal refs
     w.u32(0);  // animation table offset
-    w.u16(0);  // skinned meshes
+    w.u16(uint16_t(skins.size()));
     w.u16(0);  // agents
-    w.u32(0);  // skin table offset
+    size_t skinTableOffsetPos = w.pos();
+    w.u32(0);
     w.u32(0);  // memcard table offset
     w.u32(0);  // stream table offset
     w.u32(0);  // sprite table offset
@@ -1161,7 +1234,7 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
         writeRotation(w, e.flat->worldRotation);
         w.u16(uint16_t(e.tris.size()));
         w.i16(e.obj->script ? luaIndex(e.obj->script->lua) : int16_t(-1));
-        w.u32(e.obj->active ? 1 : 0);
+        w.u32((e.obj->active ? 1u : 0u) | (e.obj->skin ? 0x10u : 0u));
         {
             auto it = std::find_if(interactables.begin(), interactables.end(),
                                    [&](const FlatObject* fo) { return fo->object == e.obj; });
@@ -1369,6 +1442,46 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
         writeCutscenes(w, cutsceneTableOffsetPos, scene.cutscenes, objectNames, clipNames, canvases, options.vram,
                        gte, res);
         if (!res.ok()) return res;
+    }
+    if (!skins.empty()) {
+        // PSXSkinnedMeshExporter.ExportSkinData
+        w.align4();
+        w.patchU32(skinTableOffsetPos, uint32_t(w.pos()));
+        std::vector<size_t> dataPos, namePos;
+        for (size_t i = 0; i < skins.size(); i++) {
+            dataPos.push_back(w.pos());
+            w.u32(0);
+            w.u8(uint8_t(truncateUtf16(exporters[skins[i].exporter].obj->name, 24).size()));
+            w.u8(0);
+            w.u16(0);
+            namePos.push_back(w.pos());
+            w.u32(0);
+        }
+        for (size_t i = 0; i < skins.size(); i++) {
+            const SkinOut& so = skins[i];
+            const ExpObject& e = exporters[so.exporter];
+            w.align4();
+            w.patchU32(dataPos[i], uint32_t(w.pos()));
+            w.u16(uint16_t(so.exporter));
+            w.u8(uint8_t(so.boneCount));
+            w.u8(uint8_t(so.clips.size()));
+            for (uint8_t b : e.triBones) w.u8(b);
+            w.align4();
+            for (const BakedClip& c : so.clips) {
+                w.u8(uint8_t(c.name.size()));
+                w.bytes(c.name);
+                w.u8(0);
+                w.u8(c.loop ? 1 : 0);
+                w.u8(uint8_t(c.fps));
+                if (w.pos() & 1) w.u8(0);
+                w.u16(uint16_t(c.frameCount));
+                for (const BoneMatrix& m : c.frames)
+                    for (int16_t v : m) w.i16(v);
+            }
+            w.patchU32(namePos[i], uint32_t(w.pos()));
+            w.bytes(truncateUtf16(e.obj->name, 24));
+            w.u8(0);
+        }
     }
     if (!canvases.empty() || !fontSheets.empty())
         writeUi(w, uiTableOffsetPos, canvases, uiTextures, fontSheets, fontVram, fontIndex, options.vram);

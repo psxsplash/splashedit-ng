@@ -1,0 +1,33 @@
+{
+ "format": "splashedit-ng/anim",
+ "version": 1,
+ "name": "bend",
+ "length": 1.0,
+ "loop": true,
+ "channels": [
+  {
+   "joint": "elbow",
+   "property": "rotation",
+   "interpolation": "linear",
+   "times": [
+    0,
+    0.5,
+    1.0
+   ],
+   "values": [
+    0,
+    0,
+    0.0,
+    1.0,
+    0,
+    0,
+    0.7071068,
+    0.7071068,
+    0,
+    0,
+    0.0,
+    1.0
+   ]
+  }
+ ]
+}

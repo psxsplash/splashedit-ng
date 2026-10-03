@@ -35,6 +35,14 @@ struct Material {
     ExtraKeys extra;
 };
 
+// Skinned mesh: a named clip set played by SkinnedAnim.Play. Requires a mesh
+// component whose .mesh carries a skeleton.
+struct SkinComponent {
+    std::vector<std::string> clips;  // project-relative .anim paths, at most 16
+    int fps = 15;                    // bake rate, 1..30
+    ExtraKeys extra;
+};
+
 struct MeshComponent {
     std::string mesh;  // project-relative path to a .mesh
     std::vector<Material> materials;
@@ -156,6 +164,7 @@ struct Object {
     std::optional<TriggerComponent> trigger;
     std::optional<InteractableComponent> interactable;
     std::optional<AudioComponent> audio;
+    std::optional<SkinComponent> skin;
     std::vector<std::string> unknownComponents;  // components of an unknown type, as JSON text
     std::vector<Object> children;
     ExtraKeys extra;
@@ -311,17 +320,60 @@ std::vector<FlatObject> flatten(const Scene& scene);
 Scene loadScene(const std::filesystem::path& file);
 void saveScene(const Scene& scene, const std::filesystem::path& file);
 
+// Skeleton in mesh space. Joint transforms are local to the parent joint
+// (parent -1 = mesh space) and give the rest pose.
+struct Joint {
+    std::string name;
+    int parent = -1;
+    Vec3 position;
+    Quat rotation;
+    Vec3 scale{1, 1, 1};
+};
+
+struct MeshSkin {
+    std::vector<Joint> joints;
+    // Per joint, mesh space -> joint space at bind time, 3x4 row-major.
+    // Empty = the inverse of each joint's rest transform.
+    std::vector<std::array<float, 12>> inverseBind;
+    // Per vertex, up to four influences; unused slots have weight 0.
+    std::vector<std::array<int, 4>> vertexJoints;
+    std::vector<std::array<float, 4>> vertexWeights;
+};
+
 struct Mesh {
     std::vector<Vec3> positions;
     std::vector<Vec3> normals;
     std::vector<Vec2> uv;
     std::vector<std::array<float, 4>> colors;
     std::vector<std::vector<int>> submeshes;
+    std::optional<MeshSkin> skin;
     // Mesh.bounds as Unity computes it from the vertices.
     Bounds bounds() const;
 };
 
 Mesh loadMesh(const std::filesystem::path& file);
 void saveMesh(const Mesh& mesh, const std::filesystem::path& file);
+
+// Skeletal animation clip (*.anim): keyframed joint channels, by joint name.
+enum class AnimProperty { Position, Rotation, Scale };
+enum class AnimInterp { Linear, Step };
+
+struct AnimChannel {
+    std::string joint;
+    AnimProperty property = AnimProperty::Rotation;
+    AnimInterp interp = AnimInterp::Linear;
+    std::vector<float> times;   // seconds, ascending
+    std::vector<float> values;  // 3 per key (position, scale) or 4 (rotation x,y,z,w)
+};
+
+struct AnimClip {
+    std::string name;
+    float length = 0;  // seconds
+    bool loop = false;
+    std::vector<AnimChannel> channels;
+};
+
+AnimClip loadAnim(const std::filesystem::path& file);
+void saveAnim(const AnimClip& clip, const std::filesystem::path& file);
 
 }  // namespace splash
