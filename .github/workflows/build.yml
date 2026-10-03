@@ -31,3 +31,4 @@ jobs:
           [ -f build/cli/Release/splashpack-cli.exe ] && cli=build/cli/Release/splashpack-cli.exe
           py=python3; command -v python3 >/dev/null || py=python
           "$py" tests/roundtrip.py "$cli"
+          "$py" tests/luacheck.py "$cli"
