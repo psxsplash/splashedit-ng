@@ -5,6 +5,7 @@
 
 #include <initializer_list>
 #include <string>
+#include <vector>
 
 #include "ui/theme.h"
 
@@ -63,8 +64,10 @@ struct TreeRow {
 Hit treeRow(const char* id, ImRect r, const TreeRow& row);
 
 // Collapsible inspector section. Returns open state.
+// A removable section's ellipsis opens a menu; `removed` is set when its
+// Remove component item is picked.
 bool section(const char* id, ImRect r, const char* icon, ImU32 iconColor, const char* title, bool open, bool enabled = true,
-             bool removable = true);
+             bool removable = true, bool* removed = nullptr);
 
 // Inspector property row: draws the label (with a tooltip) and returns the value rect.
 ImRect property(const char* id, ImRect row, float labelWidth, const char* label, const char* tip);
@@ -96,6 +99,21 @@ TextEdit textEdit(const char* id, ImRect field, ImFont* font, float size, float 
 void dropdown(const char* id, ImRect r, const char* icon, const char* value);
 // A dropdown that opens a themed list under it. Returns the picked index, or -1.
 int dropdownMenu(const char* id, ImRect r, const char* icon, const char* value, std::initializer_list<const char*> items, int current);
+
+// Searchable list in a popup, opened with ImGui::OpenPopup(id) from the same
+// ID stack. The caller keeps the search text in `query` and passes `items`
+// filtered and ordered by it; the list follows the next frame. Up/Down move,
+// Enter picks, Escape closes. Opens at `pos`, kept on screen. Returns the
+// picked index into `items`, or -1.
+struct PickerItem {
+    const char* icon;
+    ImU32 iconColor;
+    const char* label;
+    const char* blurb;        // second line
+    const char* unavailable;  // why it cannot be picked, shown instead of the blurb; nullptr = available
+};
+int picker(const char* id, ImVec2 pos, float width, const char* placeholder, std::string* query, const std::vector<PickerItem>& items);
+
 void assetField(const char* id, ImRect r, const char* icon, ImU32 iconColor, const char* name, const char* meta);
 void toggle(const char* id, ImRect r, bool on);
 void colorField(const char* id, ImRect r, ImU32 col, const char* hex);

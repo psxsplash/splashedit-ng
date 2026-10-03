@@ -13,6 +13,7 @@
 #include <optional>
 #include <string>
 
+#include "editor/catalog.hh"
 #include "editor/document.hh"
 #include "editor/gizmo.hh"
 #include "ui/brand.h"
@@ -33,6 +34,10 @@ constexpr ImU32 audio = rgb(0x46c98a);
 constexpr ImU32 script = rgb(0x5ccfe0);
 constexpr ImU32 folder = rgb(0x8a91a1);
 constexpr ImU32 player = rgb(0xff8fb1);
+constexpr ImU32 collider = rgb(0x46c98a);
+constexpr ImU32 nav = rgb(0x9fd36b);
+constexpr ImU32 trigger = rgb(0xe08cff);
+constexpr ImU32 interact = rgb(0xffb86b);
 }  // namespace kind
 
 static void panel(ImDrawList* dl, ImRect r) {
@@ -138,10 +143,31 @@ struct ObjectLook {
     const char* icon;
     ImU32 color;
 };
+static ObjectLook lookOf(editor::ComponentKind k) {
+    using K = editor::ComponentKind;
+    switch (k) {
+        case K::Mesh: return {icon::box, kind::mesh};
+        case K::Collider: return {icon::square, kind::collider};
+        case K::Script: return {icon::script, kind::script};
+        case K::Light: return {icon::lightbulb, kind::light};
+        case K::Player: return {icon::user, kind::player};
+        case K::Navigation: return {icon::grid, kind::nav};
+        case K::Trigger: return {icon::maximize, kind::trigger};
+        case K::Interactable: return {icon::pointer, kind::interact};
+        case K::Audio: return {icon::volume, kind::audio};
+        case K::Skin: return {icon::play, kind::camera};
+    }
+    return {icon::box, color::textDim};
+}
 static ObjectLook lookOf(const splash::Object& o, bool expanded) {
-    if (o.light) return {icon::lightbulb, kind::light};
-    if (o.mesh) return {icon::box, kind::mesh};
+    using K = editor::ComponentKind;
+    if (o.light) return lookOf(K::Light);
+    if (o.mesh) return lookOf(K::Mesh);
     if (o.script && !o.collider) return {icon::script, kind::script};
+    if (o.player) return lookOf(K::Player);
+    if (o.trigger) return lookOf(K::Trigger);
+    if (o.interactable) return lookOf(K::Interactable);
+    if (o.audio) return lookOf(K::Audio);
     if (!o.children.empty() && !o.collider) return {expanded ? icon::folderOpen : icon::folder, kind::folder};
     return {icon::box, color::textDim};
 }
@@ -213,12 +239,49 @@ static void treeObjects(TreeCtx& c, const std::vector<splash::Object>& objs, edi
     }
 }
 
+// The Add object picker. A new object goes right after the selection, as its
+// sibling, or at the end of the scene when nothing is selected.
+static void addObjectPicker(State& st, editor::Document& doc, ImVec2 pos) {
+    const char* id = "##addobject";
+    if (st.openAddObject) {
+        st.openAddObject = false;
+        st.pickQuery.clear();
+        ImGui::OpenPopup(id);
+    }
+    if (!ImGui::IsPopupOpen(id)) return;
+    const std::vector<editor::ObjectPreset>& ps = editor::presets();
+    std::vector<std::pair<const char*, const char*>> keys;
+    for (const editor::ObjectPreset& p : ps) keys.push_back({p.label, p.keywords});
+    std::vector<int> order = editor::rank(st.pickQuery, keys);
+    std::vector<PickerItem> items;
+    for (int i : order) {
+        ObjectLook look = ps[i].parts.empty() ? ObjectLook{icon::box, color::textDim} : lookOf(ps[i].parts.front());
+        items.push_back({look.icon, look.color, ps[i].label, ps[i].blurb, nullptr});
+    }
+    int pick = picker(id, pos, 320, "Add object", &st.pickQuery, items);
+    if (pick < 0) return;
+    editor::ObjectPath at;
+    if (const std::optional<editor::ObjectPath>& sel = doc.selection(); sel && doc.object(*sel)) {
+        at = *sel;
+        at.back() += 1;
+    } else {
+        at = {static_cast<int>(doc.scene().objects.size())};
+    }
+    const editor::ObjectPath parentPath(at.begin(), at.end() - 1);
+    const splash::Object* parent = doc.object(parentPath);
+    const std::vector<splash::Object>& siblings = parent ? parent->children : doc.scene().objects;
+    splash::Object obj = editor::makeObject(ps[order[pick]], siblings);
+    if (!doc.expanded(parentPath)) doc.toggleExpanded(parentPath);
+    doc.insertObject(at, std::move(obj));
+}
+
 static void sceneTree(State& st, ImDrawList* dl, ImRect r, editor::Document& doc) {
     panel(dl, r);
     std::string count = std::to_string(doc.objectCount()) + (doc.objectCount() == 1 ? " object" : " objects");
     float y = panelHeader(dl, r, "Scene", count.c_str());
-    iconButton("addobj", ImRect(ImVec2(r.Max.x - 62, r.Min.y + 5), ImVec2(r.Max.x - 36, r.Min.y + 29)), icon::plus, false,
-               "Add object (Ctrl+A)");
+    ImRect addBtn(ImVec2(r.Max.x - 62, r.Min.y + 5), ImVec2(r.Max.x - 36, r.Min.y + 29));
+    if (iconButton("addobj", addBtn, icon::plus, false, "Add object (Ctrl+A)")) st.openAddObject = true;
+    addObjectPicker(st, doc, ImVec2(addBtn.Min.x, addBtn.Max.y + space::xs));
     iconButton("treemenu", ImRect(ImVec2(r.Max.x - 32, r.Min.y + 5), ImVec2(r.Max.x - 6, r.Min.y + 29)), icon::ellipsis);
     searchField("treesearch", ImRect(ImVec2(r.Min.x + space::sm, y), ImVec2(r.Max.x - space::sm, y + 28)), "Filter objects",
                 "Ctrl F");
@@ -1238,7 +1301,7 @@ static void emptyInspector(ImDrawList* dl, ImRect body) {
     }
 }
 
-static void inspector(ImDrawList* dl, ImRect r, editor::Document& doc) {
+static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc) {
     Fonts& f = fonts();
     panel(dl, r);
     float y = panelHeader(dl, r, "Inspector", nullptr);
@@ -1315,6 +1378,11 @@ static void inspector(ImDrawList* dl, ImRect r, editor::Document& doc) {
         if (fe.changed) doc.edit(path, fn, key + "." + std::to_string(fe.index));
         if (fe.done) doc.endMerge();
     };
+    // A component removed from its section menu goes once drawing is done,
+    // since the sections below still read it this frame.
+    std::optional<editor::ComponentKind> toRemove;
+    bool removedFlags[10] = {};
+    auto removeFlag = [&](editor::ComponentKind k) { return &removedFlags[static_cast<int>(k)]; };
     float pos[3] = {t.position.x, t.position.y, t.position.z};
     FieldEdit fe = vec3Field("pos", row("lpos", "Position", "Where the object sits, in metres, relative to its parent."),
                              fmtFixed(t.position.x).c_str(), fmtFixed(t.position.y).c_str(), fmtFixed(t.position.z).c_str(), nullptr, pos);
@@ -1347,7 +1415,8 @@ static void inspector(ImDrawList* dl, ImRect r, editor::Document& doc) {
             texMeta = std::to_string(ti->width) + " x " + std::to_string(ti->height) + "  \xc2\xb7  " + texMeta;
 
         top = y;
-        section("s_mesh", ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), icon::box, kind::mesh, "Mesh", true);
+        section("s_mesh", ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), icon::box, kind::mesh, "Mesh", true, true, true,
+                removeFlag(editor::ComponentKind::Mesh));
         y += 34 + space::xs;
         assetField("model", row("lmodel", "Model", "The 3D model to draw. Drop a .glb, .gltf, .obj or .fbx here."), icon::box,
                    meshSt == editor::AssetStatus::Ok ? kind::mesh : color::warn, modelName.c_str(),
@@ -1371,7 +1440,8 @@ static void inspector(ImDrawList* dl, ImRect r, editor::Document& doc) {
     // Collider.
     if (o->collider) {
         top = y;
-        section("s_col", ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), icon::square, rgb(0x46c98a), "Collider", true);
+        section("s_col", ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), icon::square, kind::collider, "Collider", true, true, true,
+                removeFlag(editor::ComponentKind::Collider));
         y += 34 + space::xs;
         // Menu order follows the tooltip: Static, Dynamic, None.
         const splash::ColliderKind kinds[3] = {splash::ColliderKind::Static, splash::ColliderKind::Dynamic, splash::ColliderKind::None};
@@ -1386,7 +1456,8 @@ static void inspector(ImDrawList* dl, ImRect r, editor::Document& doc) {
     if (o->light) {
         const splash::LightComponent& l = *o->light;
         top = y;
-        section("s_light", ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), icon::lightbulb, kind::light, "Light", true, l.enabled);
+        section("s_light", ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), icon::lightbulb, kind::light, "Light", true, l.enabled, true,
+                removeFlag(editor::ComponentKind::Light));
         y += 34 + space::xs;
         // Menu order follows the tooltip: Point, Spot, Directional.
         const splash::LightKind kinds[3] = {splash::LightKind::Point, splash::LightKind::Spot, splash::LightKind::Directional};
@@ -1418,7 +1489,8 @@ static void inspector(ImDrawList* dl, ImRect r, editor::Document& doc) {
     if (o->script) {
         const std::string& lua = o->script->lua;
         top = y;
-        section("s_script", ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), icon::script, kind::script, "Script", true);
+        section("s_script", ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), icon::script, kind::script, "Script", true, true, true,
+                removeFlag(editor::ComponentKind::Script));
         y += 34 + space::xs;
         bool found = doc.fileExists(lua);
         assetField("lua", row("llua", "File", "The Lua file that runs for this object."), icon::fileCode,
@@ -1426,6 +1498,88 @@ static void inspector(ImDrawList* dl, ImRect r, editor::Document& doc) {
         fileCard("fixlua", found ? editor::AssetStatus::Ok : editor::AssetStatus::Missing, lua, std::string());
         sectionEnd(top);
     }
+
+    // Components the inspector shows a few fields of.
+    auto compSection = [&](const char* id, editor::ComponentKind k) {
+        ObjectLook lk = lookOf(k);
+        section(id, ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), lk.icon, lk.color, editor::info(k).label, true, true, true, removeFlag(k));
+        y += 34 + space::xs;
+    };
+    auto number = [&](const char* id, const char* label, const char* tip, float v, const char* unit, const char* key, float lo, float hi,
+                      const std::function<void(splash::Object&, float)>& set) {
+        float nv = v;
+        std::string lid = std::string("l") + id;
+        commit(numberField(id, row(lid.c_str(), label, tip), fmtShort(v).c_str(), unit, 0, nullptr, &nv), key,
+               [&](splash::Object& ob) { set(ob, splash::clampv(nv, lo, hi)); });
+    };
+    if (o->player) {
+        const splash::PlayerComponent& p = *o->player;
+        top = y;
+        compSection("s_player", editor::ComponentKind::Player);
+        number("pheight", "Height", "Eye height of the player.", p.playerHeight, "m", "pheight", 0.1f, 100,
+               [](splash::Object& ob, float v) { ob.player->playerHeight = v; });
+        number("pradius", "Radius", "How wide the player is, for walls and the nav bake.", p.playerRadius, "m", "pradius", 0.01f, 100,
+               [](splash::Object& ob, float v) { ob.player->playerRadius = v; });
+        number("pspeed", "Move speed", "Walking speed.", p.moveSpeed, "m/s", "pspeed", 0, 1000,
+               [](splash::Object& ob, float v) { ob.player->moveSpeed = v; });
+        number("pjump", "Jump height", "How high a jump goes.", p.jumpHeight, "m", "pjump", 0, 1000,
+               [](splash::Object& ob, float v) { ob.player->jumpHeight = v; });
+        sectionEnd(top);
+    }
+    if (o->navigation) {
+        const splash::NavigationComponent& n = *o->navigation;
+        top = y;
+        compSection("s_nav", editor::ComponentKind::Navigation);
+        number("nheight", "Agent height", "Headroom an agent needs to walk somewhere.", n.agentHeight, "m", "nheight", 0.1f, 100,
+               [](splash::Object& ob, float v) { ob.navigation->agentHeight = v; });
+        number("nradius", "Agent radius", "How far walkable ground keeps from walls.", n.agentRadius, "m", "nradius", 0.01f, 100,
+               [](splash::Object& ob, float v) { ob.navigation->agentRadius = v; });
+        sectionEnd(top);
+    }
+    if (o->trigger) {
+        const splash::TriggerComponent& tr = *o->trigger;
+        top = y;
+        compSection("s_trigger", editor::ComponentKind::Trigger);
+        float sz[3] = {tr.size.x, tr.size.y, tr.size.z};
+        commit(vec3Field("tsize", row("ltsize", "Size", "The box, in metres, centred on the object."), fmtFixed(tr.size.x).c_str(),
+                         fmtFixed(tr.size.y).c_str(), fmtFixed(tr.size.z).c_str(), nullptr, sz),
+               "tsize", [&](splash::Object& ob) { ob.trigger->size = {std::max(0.0f, sz[0]), std::max(0.0f, sz[1]), std::max(0.0f, sz[2])}; });
+        bool found = !tr.lua.empty() && doc.fileExists(tr.lua);
+        assetField("tlua", row("ltlua", "Script", "The Lua file that gets the enter and exit calls."), icon::fileCode,
+                   tr.lua.empty() || found ? kind::script : color::warn, tr.lua.empty() ? "None" : fileName(tr.lua).c_str(), nullptr);
+        sectionEnd(top);
+    }
+    if (o->interactable) {
+        const splash::InteractableComponent& in = *o->interactable;
+        top = y;
+        compSection("s_interact", editor::ComponentKind::Interactable);
+        number("iradius", "Radius", "How close the player has to be.", in.radius, "m", "iradius", 0, 1000,
+               [](splash::Object& ob, float v) { ob.interactable->radius = v; });
+        sectionEnd(top);
+    }
+    if (o->audio) {
+        const splash::AudioComponent& a = *o->audio;
+        top = y;
+        compSection("s_audio", editor::ComponentKind::Audio);
+        bool found = doc.fileExists(a.clip);
+        assetField("clip", row("lclip", "Clip", "A WAV file, converted to SPU ADPCM at export."), icon::music,
+                   found ? kind::audio : color::warn, a.clip.empty() ? "None" : fileName(a.clip).c_str(), nullptr);
+        fileCard("fixclip", found ? editor::AssetStatus::Ok : editor::AssetStatus::Missing, a.clip, std::string());
+        sectionEnd(top);
+    }
+    if (o->skin) {
+        const splash::SkinComponent& sk = *o->skin;
+        top = y;
+        compSection("s_skin", editor::ComponentKind::Skin);
+        std::string clips = std::to_string(sk.clips.size()) + (sk.clips.size() == 1 ? " clip" : " clips");
+        assetField("clips", row("lclips", "Clips", "Animation clips, at most 16."), icon::play, kind::camera, clips.c_str(), nullptr);
+        number("sfps", "Bake rate", "Frames per second the clips are sampled at.", static_cast<float>(sk.fps), "fps", "sfps", 1, 30,
+               [](splash::Object& ob, float v) { ob.skin->fps = static_cast<int>(std::lround(v)); });
+        sectionEnd(top);
+    }
+
+    for (const editor::ComponentInfo& c : editor::components())
+        if (removedFlags[static_cast<int>(c.kind)]) toRemove = c.kind;
 
     // Add component.
     ImRect add(ImVec2(x0, y), ImVec2(x1, y + 34));
@@ -1437,7 +1591,45 @@ static void inspector(ImDrawList* dl, ImRect r, editor::Document& doc) {
     float lx = add.GetCenter().x - lwid * 0.5f;
     text(dl, ImVec2(lx, add.Min.y + 8), f.medium, type::icon, color::textDim, icon::plus);
     text(dl, ImVec2(lx + 22, add.Min.y + 8), f.medium, type::body, color::textDim, lbl);
+    if (h.clicked) st.openAddComponent = true;
     ImGui::PopClipRect();
+
+    // The Add component picker, under the button. Components already on the
+    // object are left out; ones it cannot take yet show why.
+    const char* pid = "##addcomponent";
+    if (st.openAddComponent) {
+        st.openAddComponent = false;
+        st.pickQuery.clear();
+        ImGui::OpenPopup(pid);
+    }
+    if (ImGui::IsPopupOpen(pid)) {
+        std::vector<editor::ComponentKind> kinds;
+        std::vector<std::pair<const char*, const char*>> keys;
+        for (const editor::ComponentInfo& c : editor::components()) {
+            if (editor::hasComponent(*o, c.kind)) continue;
+            kinds.push_back(c.kind);
+            keys.push_back({c.label, c.keywords});
+        }
+        std::vector<int> order = editor::rank(st.pickQuery, keys);
+        std::vector<std::string> why;
+        why.reserve(order.size());
+        std::vector<PickerItem> items;
+        for (int i : order) {
+            const editor::ComponentInfo& c = editor::info(kinds[i]);
+            ObjectLook lk = lookOf(c.kind);
+            why.push_back(editor::cannotAdd(*o, c.kind));
+            items.push_back({lk.icon, lk.color, c.label, c.blurb, why.back().empty() ? nullptr : why.back().c_str()});
+        }
+        int pick = picker(pid, ImVec2(add.Min.x, add.Max.y + space::xs), add.GetWidth(), "Add component", &st.pickQuery, items);
+        if (pick >= 0) {
+            editor::ComponentKind k = kinds[order[pick]];
+            doc.edit(path, [k](splash::Object& ob) { editor::addComponent(ob, k); });
+        }
+    }
+    if (toRemove) {
+        editor::ComponentKind k = *toRemove;
+        doc.edit(path, [k](splash::Object& ob) { editor::removeComponent(ob, k); });
+    }
 }
 
 static void statusBar(ImDrawList* dl, ImVec2 size, const editor::Document& doc, const State& st) {
@@ -1494,6 +1686,7 @@ static void shortcuts(State& st, editor::Document& doc) {
             st.renamePath = *sel;
         }
     }
+    if (ctrl && !shift && pressed(ImGuiKey_A)) st.openAddObject = true;
     if (ctrl && pressed(ImGuiKey_S)) {
         auto err = doc.save();
         st.saveError = err ? "Save failed: " + *err : std::string();
@@ -1519,7 +1712,7 @@ ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view,
     ImRect mid(ImVec2(left.Max.x + g, top), ImVec2(right.Min.x - g, bottom));
     sceneTree(st, dl, left, doc);
     viewportPanel(st, dl, mid, doc, view);
-    inspector(dl, right, doc);
+    inspector(st, dl, right, doc);
     statusBar(dl, size, doc, st);
     ImGui::End();
     return bar;

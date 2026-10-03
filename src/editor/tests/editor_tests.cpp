@@ -6,6 +6,7 @@
 #include <string>
 #include <system_error>
 
+#include "editor/catalog.hh"
 #include "editor/document.hh"
 #include "editor/gizmo.hh"
 #include "editor/pick.hh"
@@ -396,6 +397,72 @@ void testGizmoUndo() {
     CHECK(d.historySize() == 2);
 }
 
+// What the Add object / Add component pickers offer, and how search ranks it.
+void testCatalog() {
+    using editor::ComponentKind;
+    std::vector<std::pair<const char*, const char*>> items;
+    for (const editor::ObjectPreset& p : editor::presets()) items.push_back({p.label, p.keywords});
+    auto first = [&](const char* q) {
+        std::vector<int> r = editor::rank(q, items);
+        return r.empty() ? std::string() : std::string(editor::presets()[r[0]].label);
+    };
+    CHECK(editor::rank("", items).size() == items.size());
+    CHECK(editor::rank("   ", items).size() == items.size());
+    CHECK(first("") == "Empty");               // empty query keeps the list order
+    CHECK(first("lig") == "Point light");      // word prefix inside the label
+    CHECK(first("POINT") == "Point light");    // case-insensitive
+    CHECK(first("sfx") == "Audio clip");       // keyword
+    CHECK(first("tbx") == "Trigger box");      // letters in order
+    CHECK(first("Inter") == "Interactable");
+    CHECK(editor::rank("zzq", items).empty()); // nothing matches
+    // A label prefix outranks a keyword hit: "mesh" is the Mesh preset, not one tagged "model".
+    CHECK(first("mesh") == "Mesh");
+
+    // Components: dependencies, cascade on removal, no double add.
+    splash::Object o;
+    o.name = "Crate";
+    CHECK(editor::cannotAdd(o, ComponentKind::Collider) == "Needs a Mesh");
+    CHECK(!editor::addComponent(o, ComponentKind::Collider) && !o.collider);
+    CHECK(!editor::addComponent(o, ComponentKind::Skin) && !o.skin);
+    CHECK(editor::addComponent(o, ComponentKind::Mesh) && o.mesh);
+    CHECK(editor::cannotAdd(o, ComponentKind::Mesh) == "Already added");
+    CHECK(!editor::addComponent(o, ComponentKind::Mesh));
+    CHECK(editor::addComponent(o, ComponentKind::Collider));
+    CHECK(o.collider && o.collider->kind == splash::ColliderKind::Static);
+    CHECK(editor::addComponent(o, ComponentKind::Skin) && o.skin);
+    CHECK(editor::addComponent(o, ComponentKind::Audio) && o.audio && o.audio->clipName == "Crate");
+    CHECK(editor::removeComponent(o, ComponentKind::Mesh));
+    CHECK(!o.mesh && !o.collider && !o.skin && o.audio);
+    CHECK(!editor::removeComponent(o, ComponentKind::Mesh));
+    for (const editor::ComponentInfo& c : editor::components()) {
+        splash::Object m;
+        m.mesh.emplace();
+        if (c.kind != ComponentKind::Mesh) CHECK(editor::addComponent(m, c.kind) && editor::hasComponent(m, c.kind));
+        CHECK(editor::removeComponent(m, c.kind) && !editor::hasComponent(m, c.kind));
+    }
+
+    // New objects take a free Unity-style name among their siblings.
+    splash::Scene sc = sample();
+    sc.objects.push_back(named("Point light"));
+    const editor::ObjectPreset& light = editor::presets()[2];
+    CHECK(std::string(light.label) == "Point light");
+    splash::Object l2 = editor::makeObject(light, sc.objects);
+    CHECK(l2.name == "Point light (2)" && l2.light && !l2.mesh);
+    sc.objects.push_back(l2);
+    CHECK(editor::uniqueName("Point light", sc.objects) == "Point light (3)");
+    CHECK(editor::uniqueName("Empty", sc.objects) == "Empty");
+
+    // Through the document: one undo step each way.
+    editor::Document d;
+    d.reset(sample());
+    CHECK(d.edit({0}, [](splash::Object& ob) { editor::addComponent(ob, ComponentKind::Trigger); }));
+    CHECK(d.object({0})->trigger);
+    CHECK(d.undo() && !d.object({0})->trigger);
+    CHECK(d.insertObject({3}, editor::makeObject(editor::presets()[0], d.scene().objects)));
+    CHECK(d.object({3}) && d.object({3})->name == "Empty" && d.selection() == editor::ObjectPath{3});
+    CHECK(d.undo() && !d.object({3}));
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -410,6 +477,7 @@ int main(int argc, char** argv) {
     testGizmoMath();
     testScaleClamp();
     testGizmoUndo();
+    testCatalog();
     if (g_failures) {
         std::fprintf(stderr, "editor_tests: %d of %d checks failed\n", g_failures, g_checks);
         return 1;

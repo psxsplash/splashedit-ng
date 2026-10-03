@@ -231,10 +231,19 @@ Hit treeRow(const char* id, ImRect r, const TreeRow& row) {
 }
 
 bool section(const char* id, ImRect r, const char* ic, ImU32 iconColor, const char* title, bool open, bool enabled,
-             bool removable) {
+             bool removable, bool* removed) {
     Fonts& f = fonts();
-    Hit h = interact(id, r);
     ImDrawList* dl = ImGui::GetWindowDrawList();
+    // The ellipsis registers before the header so it wins the hover where they overlap.
+    ImRect dots(ImVec2(r.Max.x - space::sm - 20, r.Min.y + 5), ImVec2(r.Max.x - space::xs, r.Max.y - 5));
+    std::string menuId = std::string(id) + "#menu";
+    float dotsHover = 0;
+    if (removable && removed) {
+        Hit d = interact((std::string(id) + "#dots").c_str(), dots);
+        dotsHover = d.hover;
+        if (d.clicked) ImGui::OpenPopup(menuId.c_str());
+    }
+    Hit h = interact(id, r);
     dl->AddRectFilled(r.Min, r.Max, lerpColor(color::raised, color::hover, h.hover * 0.6f), radius::card,
                       open ? ImDrawFlags_RoundCornersTop : ImDrawFlags_RoundCornersAll);
     float x = r.Min.x + space::sm;
@@ -247,12 +256,43 @@ bool section(const char* id, ImRect r, const char* ic, ImU32 iconColor, const ch
          enabled ? color::text : color::textFaint, title);
     float right = r.Max.x - space::sm;
     if (removable) {
+        if (dotsHover > 0) dl->AddRectFilled(dots.Min, dots.Max, lerpColor(rgb(0x2a2f39, 0), color::active, dotsHover), radius::field);
         text(dl, ImVec2(right - 14, centerY(f.medium, type::icon, r.Min.y, r.Max.y)), f.medium, type::icon - 1,
-             lerpColor(color::textFaint, color::textDim, h.hover), icon::ellipsis);
+             lerpColor(color::textFaint, dotsHover > 0 ? color::text : color::textDim, std::max(h.hover, dotsHover)), icon::ellipsis);
         right -= 26;
     }
     if (removable)
         toggle((std::string(id) + "#on").c_str(), ImRect(ImVec2(right - 26, r.Min.y + 9), ImVec2(right, r.Max.y - 9)), enabled);
+    if (removable && removed) {
+        const float pad = space::xs, rowH = size::field + 4, w = 176;
+        ImVec2 size(w, pad * 2 + rowH);
+        ImGui::SetNextWindowPos(ImVec2(dots.Max.x - w, dots.Max.y + space::xs));
+        ImGui::SetNextWindowSize(size);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+        ImGui::PushStyleVar(ImGuiStyleVar_PopupBorderSize, 0.0f);
+        if (ImGui::BeginPopup(menuId.c_str(), ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
+                                                  ImGuiWindowFlags_NoSavedSettings)) {
+            ImDrawList* pl = ImGui::GetWindowDrawList();
+            ImRect box(ImGui::GetWindowPos(), ImGui::GetWindowPos() + size);
+            pl->AddRectFilled(box.Min + ImVec2(0, 2), box.Max + ImVec2(0, 6), rgb(0x000000, 80), radius::card);
+            pl->AddRectFilled(box.Min, box.Max, color::raised, radius::card);
+            pl->AddRect(box.Min, box.Max, color::borderStrong, radius::card);
+            ImRect ir(box.Min + ImVec2(pad, pad), box.Max - ImVec2(pad, pad));
+            Hit m = interact("remove", ir);
+            if (m.hover > 0) pl->AddRectFilled(ir.Min, ir.Max, lerpColor(rgb(0x2a2f39, 0), color::hover, m.hover), radius::field);
+            text(pl, ImVec2(ir.Min.x + space::sm, centerY(f.medium, type::icon, ir.Min.y, ir.Max.y)), f.medium, type::icon - 2, color::bad,
+                 icon::x);
+            text(pl, ImVec2(ir.Min.x + space::sm + 20, centerY(f.regular, type::body, ir.Min.y, ir.Max.y)), f.regular, type::body,
+                 m.hover > 0.5f ? color::text : color::textDim, "Remove component");
+            if (m.clicked) {
+                *removed = true;
+                ImGui::CloseCurrentPopup();
+            }
+            if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();
+        }
+        ImGui::PopStyleVar(2);
+    }
     return open;
 }
 
@@ -506,6 +546,151 @@ int dropdownMenu(const char* id, ImRect r, const char* ic, const char* value, st
     }
     ImGui::PopStyleVar(2);
     return picked == current ? -1 : picked;
+}
+
+// Keyboard highlight and scroll of the open picker; only one is open at a time.
+struct PickerState {
+    int hi = 0;     // highlighted row, index into the items
+    int first = 0;  // first visible row
+    char buf[64] = {};
+};
+static PickerState& pickerState() {
+    static PickerState s;
+    return s;
+}
+
+int picker(const char* id, ImVec2 pos, float width, const char* placeholder, std::string* query, const std::vector<PickerItem>& items) {
+    Fonts& f = fonts();
+    const float pad = space::xs, searchH = 36, rowH = 40;
+    const int rows = 10;  // at most; the box shrinks to the matches
+    const int shown = std::clamp(static_cast<int>(items.size()), 1, rows);
+    ImVec2 size(width, pad * 2 + searchH + space::xs + rowH * static_cast<float>(shown));
+    ImVec2 disp = ImGui::GetIO().DisplaySize;
+    pos.x = std::clamp(pos.x, space::sm, std::max(space::sm, disp.x - size.x - space::sm));
+    pos.y = std::clamp(pos.y, space::sm, std::max(space::sm, disp.y - size.y - space::sm));
+    ImGui::SetNextWindowPos(pos);
+    ImGui::SetNextWindowSize(size);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_PopupBorderSize, 0.0f);
+    int picked = -1;
+    if (!ImGui::BeginPopup(id, ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
+                                   ImGuiWindowFlags_NoSavedSettings)) {
+        ImGui::PopStyleVar(2);
+        return -1;
+    }
+    PickerState& s = pickerState();
+    const int n = static_cast<int>(items.size());
+    auto available = [&](int i) { return i >= 0 && i < n && !items[i].unavailable; };
+    auto firstAvailable = [&] {
+        for (int i = 0; i < n; ++i)
+            if (available(i)) return i;
+        return 0;
+    };
+    bool appearing = ImGui::IsWindowAppearing();
+    if (appearing) {
+        std::snprintf(s.buf, sizeof s.buf, "%s", query->c_str());
+        s.hi = firstAvailable();
+        s.first = 0;
+    }
+    if (s.hi >= n) s.hi = firstAvailable();
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImRect box(ImGui::GetWindowPos(), ImGui::GetWindowPos() + size);
+    dl->AddRectFilled(box.Min + ImVec2(0, 3), box.Max + ImVec2(0, 10), rgb(0x000000, 90), radius::window);
+    dl->AddRectFilled(box.Min, box.Max, color::raised, radius::window);
+    dl->AddRect(box.Min, box.Max, color::borderStrong, radius::window);
+
+    // Search well.
+    ImRect sr(box.Min + ImVec2(pad, pad), ImVec2(box.Max.x - pad, box.Min.y + pad + searchH));
+    dl->AddRectFilled(sr.Min, sr.Max, color::field, radius::field + 1);
+    dl->AddRect(sr.Min, sr.Max, color::accent, radius::field + 1);
+    float tx = sr.Min.x + space::sm + 22;
+    text(dl, ImVec2(sr.Min.x + space::sm, centerY(f.medium, type::icon, sr.Min.y, sr.Max.y)), f.medium, type::icon - 1, color::textDim,
+         icon::search);
+    if (!s.buf[0])
+        text(dl, ImVec2(tx, centerY(f.regular, type::body, sr.Min.y, sr.Max.y)), f.regular, type::body, color::textFaint, placeholder);
+    float padY = centerY(f.regular, type::body, sr.Min.y, sr.Max.y) - sr.Min.y;
+    ImGui::SetCursorScreenPos(ImVec2(tx, sr.Min.y));
+    ImGui::PushFont(f.regular, type::body);
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0, padY));
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0.0f);
+    ImGui::PushStyleColor(ImGuiCol_FrameBg, 0u);
+    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, 0u);
+    ImGui::PushStyleColor(ImGuiCol_FrameBgActive, 0u);
+    ImGui::PushStyleColor(ImGuiCol_Text, color::text);
+    ImGui::PushStyleColor(ImGuiCol_TextSelectedBg, rgb(0x8b7bff, 110));
+    ImGui::PushStyleColor(ImGuiCol_InputTextCursor, color::accentHover);
+    ImGui::PushStyleColor(ImGuiCol_NavCursor, 0u);
+    ImGui::SetNextItemWidth(std::max(8.0f, sr.Max.x - space::sm - tx));
+    if (appearing) ImGui::SetKeyboardFocusHere();
+    // CallbackHistory makes the field own Up/Down, so they move the highlight
+    // below instead of ImGui's keyboard nav taking focus out of the popup.
+    bool enter = ImGui::InputText("##search", s.buf, sizeof s.buf,
+                                  ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_CallbackHistory,
+                                  [](ImGuiInputTextCallbackData*) { return 0; });
+    ImGui::PopStyleColor(7);
+    ImGui::PopStyleVar(2);
+    ImGui::PopFont();
+    if (*query != s.buf) {
+        *query = s.buf;
+        s.hi = 0;  // the list is re-ranked next frame; its best match is first
+        s.first = 0;
+    }
+
+    // Keyboard: move over the available rows.
+    auto step = [&](int dir) {
+        for (int i = s.hi + dir; i >= 0 && i < n; i += dir)
+            if (available(i)) {
+                s.hi = i;
+                return;
+            }
+    };
+    if (ImGui::IsKeyPressed(ImGuiKey_DownArrow, true)) step(1);
+    if (ImGui::IsKeyPressed(ImGuiKey_UpArrow, true)) step(-1);
+    if (enter && available(s.hi)) picked = s.hi;
+    if (s.hi < s.first) s.first = s.hi;
+    if (s.hi >= s.first + rows) s.first = s.hi - rows + 1;
+    if (ImGui::IsWindowHovered() && ImGui::GetIO().MouseWheel != 0)
+        s.first -= static_cast<int>(ImGui::GetIO().MouseWheel);
+    s.first = std::clamp(s.first, 0, std::max(0, n - rows));
+
+    // Rows.
+    float y = sr.Max.y + space::xs;
+    if (n == 0)
+        textCentered(dl, ImRect(ImVec2(box.Min.x, y), ImVec2(box.Max.x, y + rowH)), f.regular, type::body, color::textFaint,
+                     "No matches");
+    const bool mouseMoved = ImGui::GetIO().MouseDelta.x != 0 || ImGui::GetIO().MouseDelta.y != 0;
+    for (int i = s.first; i < std::min(n, s.first + rows); ++i, y += rowH) {
+        const PickerItem& it = items[i];
+        ImRect ir(ImVec2(box.Min.x + pad, y), ImVec2(box.Max.x - pad, y + rowH));
+        ImGui::PushID(i);
+        Hit h = interact("row", ir);
+        ImGui::PopID();
+        bool ok = !it.unavailable;
+        if (h.hovered && ok && mouseMoved) s.hi = i;
+        if (i == s.hi && ok) {
+            dl->AddRectFilled(ir.Min, ir.Max, color::accentSoft, radius::field);
+            dl->AddRectFilled(ir.Min + ImVec2(0, 8), ImVec2(ir.Min.x + 2, ir.Max.y - 8), color::accent, 1);
+        }
+        ImRect ic(ImVec2(ir.Min.x + space::sm, ir.Min.y + 6), ImVec2(ir.Min.x + space::sm + 28, ir.Max.y - 6));
+        dl->AddRectFilled(ic.Min, ic.Max, ok ? (it.iconColor & 0x00ffffffu) | (34u << IM_COL32_A_SHIFT) : color::field, radius::field);
+        textCentered(dl, ic, f.medium, type::icon - 1, ok ? it.iconColor : color::textFaint, it.icon);
+        float lx = ic.Max.x + space::md;
+        dl->PushClipRect(ir.Min, ImVec2(ir.Max.x - space::sm, ir.Max.y), true);
+        text(dl, ImVec2(lx, ir.Min.y + 4), f.medium, type::body, ok ? color::text : color::textFaint, it.label);
+        text(dl, ImVec2(lx, ir.Min.y + 22), f.regular, type::caption, ok ? color::textDim : color::warn,
+             ok ? it.blurb : it.unavailable);
+        dl->PopClipRect();
+        if (h.clicked && ok) picked = i;
+    }
+    bool closing = picked >= 0 || ImGui::IsKeyPressed(ImGuiKey_Escape, false);
+    if (closing) ImGui::CloseCurrentPopup();
+    ImGui::EndPopup();
+    ImGui::PopStyleVar(2);
+    // Closing hands focus back to the window under it; keep ImGui's nav
+    // cursor hidden so it does not land on the first title-bar button.
+    if (closing) ImGui::SetNavCursorVisible(false);
+    return picked;
 }
 
 void assetField(const char* id, ImRect r, const char* ic, ImU32 iconColor, const char* name, const char* meta) {

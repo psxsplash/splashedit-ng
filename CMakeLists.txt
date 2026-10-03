@@ -61,6 +61,7 @@ endif()
 # The editor's document model (history, picking): no SDL or GL, so it builds
 # and tests headless, also with SPLASHEDIT_BUILD_EDITOR off.
 add_library(splasheditdoc STATIC
+    src/editor/catalog.cpp
     src/editor/document.cpp
     src/editor/pick.cpp
     src/editor/gizmo.cpp)

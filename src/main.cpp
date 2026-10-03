@@ -75,7 +75,7 @@ struct Args {
     std::vector<Action> actions;
 };
 
-// "ctrl+shift+z", "delete", "f2", "w", "enter", "escape".
+// "ctrl+shift+z", "delete", "f2", "w", "enter", "escape", "up", "down".
 bool parseKey(const char* spec, Action& a) {
     std::string s = spec;
     for (char& c : s) c = (char)std::tolower((unsigned char)c);
@@ -93,6 +93,8 @@ bool parseKey(const char* spec, Action& a) {
     else if (s == "enter") a.key = ImGuiKey_Enter;
     else if (s == "escape") a.key = ImGuiKey_Escape;
     else if (s == "backspace") a.key = ImGuiKey_Backspace;
+    else if (s == "up") a.key = ImGuiKey_UpArrow;
+    else if (s == "down") a.key = ImGuiKey_DownArrow;
     else return false;
     return true;
 }
