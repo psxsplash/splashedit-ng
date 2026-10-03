@@ -412,6 +412,25 @@ Minimum data a non-Unity front end must provide: per object: world matrix, name,
 
 ## 7. Writer-vs-reader mismatches and oddities
 
+Re-checked 2026-10-03 against splashedit 64785e3 and psxsplash c1df566. All still hold. "Fix side"
+says what has to change; WRITER items are fixed in this exporter as each feature is ported.
+
+| item | fix side | effect |
+|---|---|---|
+| M1 | BOTH | agent state clips index the scene animation table, the engine reads a per-object skin clip index; any agent with state clips plays the wrong clip or none |
+| M2 | WRITER (probable) | patrol waypoint Y has the opposite sign to every other position |
+| M3 | WRITER | a `CameraH` track on an animation (not reachable from the editor UI) writes 2-byte keyframes the reader steps as 8 |
+| M4 | none | extra CLUT words; this exporter pads to a multiple of 4 instead |
+| M5 | READER | the font CLUT is read from the bitmap origin, so the white CLUT replaces 8 texels of row 0: the space glyph, plus `!` when glyphs are 4 wide |
+| M6 | none | unused fields |
+| M7, M8, M10 | none | comments and names |
+| M9, M16 | WRITER (guard) | cannot happen with the current eligibility rules |
+| M11 | WRITER | counts over 65535 truncate while every record is written |
+| M12 | WRITER | non-ASCII names mangled; name caps count UTF-16 characters against a UTF-8 byte length |
+| M13 | WRITER | line endpoints wrap past 255 px |
+| M14 | WRITER | a third font, or a skipped one, shifts or dangles font indices |
+| M15 | WRITER | single buffering throws in the packer |
+
 M1. **Agent per-state clip index space differs.** Writer indexes the scene's `PSXAnimationClip[]` table:
 `if (scene.animations[c] == clip) { clipIndices[s] = (byte)(c < 255 ? c : 0xFE); ...` (W:PSXSceneWriter.cs ~585-600).
 Reader treats it as a skinned-mesh clip index: `R:splashpack.hh:71 uint8_t stateAnimClip[8]; ///< Skinned-mesh clip index per AgentState` and `R:scenemanager.cpp:1865-1869 uint8_t clipIndex = ...stateAnimClip[...]; ... if (clipIndex >= set.clipCount) return; state.currentClip = clipIndex;` where `set` is the object's `SkinAnimSet`.
@@ -419,7 +438,7 @@ M2. **Agent waypoint Y not negated**, unlike every other position: `writer.Write
 M3. **Animation keyframes for `CameraH` tracks are written with no payload.** `PSXAnimationExporter.ExportAnimations` filters only `CameraPosition`/`CameraRotation` (`if (track.TrackType == PSXTrackType.CameraPosition || track.TrackType == PSXTrackType.CameraRotation) ... continue;`) and its keyframe `switch` has no `CameraH` case, so only the 2-byte `frameAndInterp` is emitted per keyframe, while the reader indexes `CutsceneKeyframe` (8 B, `static_assert(sizeof(CutsceneKeyframe) == 8`) with the same stride for animation tracks. (Cutscene exporter does have the `CameraH` case.)
 M4. **Palette padding always adds 1-4 entries** (W:PSXTexture2D.cs:205-210, quoted in sec. 4.1); the reader just uploads `length` words (`R:scenemanager.cpp uploadVramData`, `renderer.VramUpload(..., clutPackingX * 16, clutPackingY, length, 1)`). A 256-colour palette becomes a 260-word CLUT; `AllocateCLUTs` allocates that many words. Not a size mismatch, but surprising.
 M5. **Font CLUT upload overwrites font bitmap words.** Writer puts font bitmap at `(VramX, VramY)` (W:PSXUIExporter.cs:135-136, `VramX = 960`); reader writes the white CLUT to the same coordinates: `R:scenemanager.cpp renderer.VramUpload(whiteCLUT, (int16_t)fontVramX, (int16_t)fontVramY, 2, 1);` replacing 2 words (8 texels) of bitmap row 0. Harmless only if those texels are blank.
-M6. **Fields written but not consumed by the reader**: header `pixelDataOffset` (always 0; no use found in R:splashpack.cpp), `uiPad5`, `pad1/2/3`; atlas metadata and CLUT metadata records (skipped by size only, 2.10); `boundaryEdgeMask` not written at all though computed; collider records are read into `setup.colliders` (consumption elsewhere not checked); `worldCollisionMeshCount/TriCount` written 0 (reader has a legacy skip path for non-zero).
+M6. **Fields written but not consumed by the reader**: header `pixelDataOffset` (always 0; no use found in R:splashpack.cpp), `uiPad5`, `pad1/2/3`; atlas metadata and CLUT metadata records (skipped by size only, 2.10); `boundaryEdgeMask` has no field of its own and is ORed into `walkoffEdgeMask`; collider records are read into `setup.colliders` (consumption elsewhere not checked); `worldCollisionMeshCount/TriCount` written 0 (reader has a legacy skip path for non-zero).
 M7. **Reader comments with stale sizes** (behaviour correct, layout is sequential): `R:splashpack.cpp "SPLASHPACKCutscene: 12 bytes at dataOffset"` vs actual 20 (2+1+1+4+4 then +1+3+4 for v19+); `"SPLASHPACKAnimation: 8 bytes"` vs actual 16. Writer comment `"Phase 2: Write element records (56 bytes each)"` vs 48 actual / reader 48. Writer class doc says "v16"/"v20".
 M8. **Header field naming**: writer's `reservedMemcard` (offset 124) is the reader's `streamTableOffset`; writer's sprite-block comment names the same words differently. Same bytes, no layout mismatch.
 M9. **Skin bone-index count depends on `polyCount` of the object record**: reader `polyCount = setup.objects[gameObjectIndex]->polyCount; skinPtr += polyCount * 3;`. The writer sets `polyCount = 0` for streamed objects; this is safe only because `FindEligible` excludes skinned proxies (`inp.Skinned.Contains(e)`), not because of any check at the write site.
