@@ -14,6 +14,7 @@
 #include "editor/gizmo.hh"
 #include "editor/live_export.hh"
 #include "editor/pick.hh"
+#include "editor/play.hh"
 #include "budget.hh"
 #include "splashpack.hh"
 
@@ -548,6 +549,81 @@ void testLiveExport() {
     CHECK(!live.busy());  // nothing changed since the last export
 }
 
+static void setEnv(const char* k, const char* v) {
+#ifdef _WIN32
+    _putenv_s(k, v);
+#else
+    if (*v) setenv(k, v, 1);
+    else unsetenv(k);
+#endif
+}
+
+void testPlay() {
+    namespace fs = std::filesystem;
+    const fs::path src = SPLASHEDIT_SOURCE_DIR;
+    const fs::path project = src / "examples" / "courtyard";
+    splash::Scene scene = splash::loadScene(project / "courtyard.scene");
+    const fs::path dir = g_outDir / "play";
+    fs::remove_all(dir);
+
+    // The export lands under the names psxsplash's PCdrv loader opens.
+    splash::ExportResult r = editor::exportForPlay(scene, project, dir);
+    CHECK(r.ok());
+    std::error_code ec;
+    CHECK(fs::file_size(dir / "scene_0.splashpack", ec) == r.stats.splashpackBytes && r.stats.splashpackBytes > 0);
+    CHECK(fs::file_size(dir / "scene_0.vram", ec) == r.stats.vramFileBytes && r.stats.vramFileBytes > 0);
+    CHECK(fs::exists(dir / "scene_0.spu"));
+
+    // A failed export leaves nothing behind to boot.
+    splash::Scene bad = scene;
+    splash::Object o = named("broken");
+    o.mesh = splash::MeshComponent{};
+    o.mesh->mesh = "no/such.mesh";  // and no materials: an export error
+    bad.objects.push_back(o);
+    splash::ExportResult b = editor::exportForPlay(bad, project, dir);
+    CHECK(!b.ok());
+    CHECK(!fs::exists(dir / "scene_0.splashpack") && !fs::exists(dir / "scene_0.vram") && !fs::exists(dir / "scene_0.spu"));
+
+    // Settings: round trip (non-ASCII path), missing file, unknown keys.
+    const fs::path cfg = g_outDir / "play" / "play.cfg";
+    editor::PlayTools t;
+    t.redux = fs::path(u8"/opt/rédux/pcsx-redux");
+    t.psxsplash = "/x/psxsplash.ps-exe";
+    CHECK(editor::savePlayTools(cfg, t));
+    { std::ofstream(cfg, std::ios::app) << "colour=blue\nnot a pair\n"; }
+    editor::PlayTools l = editor::loadPlayTools(cfg);
+    CHECK(l.redux == t.redux && l.psxsplash == t.psxsplash && l.bios.empty());
+    editor::PlayTools none = editor::loadPlayTools(dir / "absent.cfg");
+    CHECK(none.redux.empty() && none.psxsplash.empty());
+
+    // Environment fills only what the settings left empty.
+    setEnv("SPLASHEDIT_PSXSPLASH", "/env/psxsplash.ps-exe");
+    setEnv("SPLASHEDIT_REDUX", "/env/pcsx-redux");
+    editor::PlayTools e = editor::withDefaults(l);
+    CHECK(e.redux == t.redux && e.psxsplash == t.psxsplash);
+    editor::PlayTools e2 = editor::withDefaults({});
+    CHECK(e2.redux == fs::path("/env/pcsx-redux") && e2.psxsplash == fs::path("/env/psxsplash.ps-exe"));
+    setEnv("SPLASHEDIT_PSXSPLASH", "");
+    setEnv("SPLASHEDIT_REDUX", "");
+
+    // What is missing, and the command once nothing is.
+    CHECK(editor::missingTools({}).size() == 2);
+    editor::PlayTools real;
+    real.redux = dir / "play.cfg";  // any existing file stands in for the programs here
+    real.psxsplash = dir / "play.cfg";
+    CHECK(editor::missingTools(real).empty());
+    real.bios = dir / "absent.bin";
+    CHECK(editor::missingTools(real).size() == 1);
+    real.bios.clear();
+    std::vector<std::string> cmd = editor::reduxCommand(t, "/b");
+    std::vector<std::string> want = {(const char*)u8"/opt/rédux/pcsx-redux", "-run", "-fastboot", "-stdout",
+                                     "-loadexe", "/x/psxsplash.ps-exe", "-pcdrv", "-pcdrvbase", "/b"};
+    CHECK(cmd == want);
+    t.bios = "/x/openbios.bin";
+    cmd = editor::reduxCommand(t, "/b");
+    CHECK(cmd.size() == want.size() + 2 && cmd[4] == "-bios" && cmd[5] == "/x/openbios.bin");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -565,6 +641,7 @@ int main(int argc, char** argv) {
     testCatalog();
     testExportStats();
     testLiveExport();
+    testPlay();
     if (g_failures) {
         std::fprintf(stderr, "editor_tests: %d of %d checks failed\n", g_failures, g_checks);
         return 1;

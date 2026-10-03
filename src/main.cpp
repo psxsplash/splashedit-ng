@@ -282,6 +282,14 @@ int main(int argc, char** argv) {
     }
     mockup::State state;
     state.viewMode = args.viewMode;
+    // Play's tool paths persist per user; screenshot runs read only the environment.
+    if (!args.screenshot) {
+        if (char* pref = SDL_GetPrefPath("psxsplash", "splashedit")) {
+            state.play.settingsFile = std::filesystem::path(reinterpret_cast<const char8_t*>(pref)) / "play.cfg";
+            SDL_free(pref);
+            state.play.tools = editor::loadPlayTools(state.play.settingsFile);
+        }
+    }
     editor::Document doc;
     openDocument(doc, args);
     view.setDocument(doc);
@@ -349,6 +357,7 @@ int main(int argc, char** argv) {
         SDL_GL_SwapWindow(window);
     }
 
+    state.play.emu.stop();
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplSDL3_Shutdown();
     ImGui::DestroyContext();

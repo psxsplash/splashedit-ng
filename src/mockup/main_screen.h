@@ -3,11 +3,15 @@
 #include <imgui.h>
 #include <imgui_internal.h>
 
+#include <filesystem>
+#include <future>
 #include <string>
 #include <vector>
 
 #include "unitymath.hh"
 #include "editor/live_export.hh"
+#include "editor/play.hh"
+#include "emulator.h"
 
 namespace viewport {
 class Ps1View;
@@ -33,6 +37,16 @@ struct State {
 
     // Background dry-run export feeding the status bar's budget meters and problem count.
     editor::LiveExport live;
+
+    // Play (F5): export, then pcsx-redux.
+    struct Play {
+        std::filesystem::path settingsFile;  // where tools are saved; empty = not saved (screenshot mode)
+        editor::PlayTools tools;             // as set by the user; withDefaults() fills the rest
+        std::future<splash::ExportResult> build;
+        Emulator emu;
+        std::string message;  // why the last Play did not start, for the status bar
+        bool openSetup = false, openOutput = false;
+    } play;
 
     // F2 rename in the tree: the object's path, and whether the editor still has to open.
     bool renaming = false;

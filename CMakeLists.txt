@@ -65,7 +65,8 @@ add_library(splasheditdoc STATIC
     src/editor/document.cpp
     src/editor/pick.cpp
     src/editor/gizmo.cpp
-    src/editor/live_export.cpp)
+    src/editor/live_export.cpp
+    src/editor/play.cpp)
 target_include_directories(splasheditdoc PUBLIC src)
 find_package(Threads REQUIRED)
 target_link_libraries(splasheditdoc PUBLIC splashcore Threads::Threads)
@@ -134,6 +135,7 @@ target_link_libraries(imgui PUBLIC SDL3::SDL3 Freetype::Freetype OpenGL::GL)
 
 add_executable(splashedit
     src/main.cpp
+    src/emulator.cpp
     src/gl.cpp
     src/ui/brand.cpp
     src/ui/theme.cpp

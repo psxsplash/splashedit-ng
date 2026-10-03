@@ -1,0 +1,126 @@
+#include "editor/play.hh"
+
+#include <cstdlib>
+#include <exception>
+#include <fstream>
+#include <system_error>
+
+namespace fs = std::filesystem;
+
+namespace editor {
+
+// Paths travel as UTF-8 std::string (settings file, UI, process arguments).
+static std::string utf8(const fs::path& p) {
+    std::u8string u = p.u8string();
+    return std::string(u.begin(), u.end());
+}
+static fs::path fromUtf8(const std::string& s) { return fs::path(std::u8string(s.begin(), s.end())); }
+
+PlayTools loadPlayTools(const fs::path& file) {
+    PlayTools t;
+    std::ifstream in(file);
+    std::string line;
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        size_t eq = line.find('=');
+        if (eq == std::string::npos) continue;
+        std::string key = line.substr(0, eq), value = line.substr(eq + 1);
+        fs::path p = fromUtf8(value);
+        if (key == "redux") t.redux = p;
+        else if (key == "psxsplash") t.psxsplash = p;
+        else if (key == "bios") t.bios = p;
+    }
+    return t;
+}
+
+bool savePlayTools(const fs::path& file, const PlayTools& t) {
+    std::error_code ec;
+    if (file.has_parent_path()) fs::create_directories(file.parent_path(), ec);
+    std::ofstream out(file, std::ios::binary);
+    out << "redux=" << utf8(t.redux) << "\n"
+        << "psxsplash=" << utf8(t.psxsplash) << "\n"
+        << "bios=" << utf8(t.bios) << "\n";
+    return bool(out);
+}
+
+static void fromEnv(fs::path& p, const char* name) {
+    if (!p.empty()) return;
+    if (const char* v = std::getenv(name); v && *v) p = fromUtf8(v);
+}
+
+static fs::path onPath(const char* name) {
+    const char* path = std::getenv("PATH");
+    if (!path) return {};
+#ifdef _WIN32
+    const char sep = ';';
+    const std::string exe = std::string(name) + ".exe";
+#else
+    const char sep = ':';
+    const std::string exe = name;
+#endif
+    std::string all = path;
+    for (size_t start = 0; start <= all.size();) {
+        size_t end = all.find(sep, start);
+        if (end == std::string::npos) end = all.size();
+        if (end > start) {
+            fs::path p = fromUtf8(all.substr(start, end - start)) / exe;
+            std::error_code ec;
+            if (fs::is_regular_file(p, ec)) return p;
+        }
+        start = end + 1;
+    }
+    return {};
+}
+
+PlayTools withDefaults(PlayTools t) {
+    fromEnv(t.redux, "SPLASHEDIT_REDUX");
+    fromEnv(t.psxsplash, "SPLASHEDIT_PSXSPLASH");
+    fromEnv(t.bios, "SPLASHEDIT_BIOS");
+    if (t.redux.empty()) t.redux = onPath("pcsx-redux");
+    return t;
+}
+
+std::vector<std::string> missingTools(const PlayTools& t) {
+    std::vector<std::string> out;
+    std::error_code ec;
+    auto need = [&](const fs::path& p, const char* what) {
+        if (p.empty()) out.push_back(std::string(what) + " is not set.");
+        else if (!fs::is_regular_file(p, ec)) out.push_back(std::string(what) + " not found: " + utf8(p));
+    };
+    need(t.redux, "pcsx-redux");
+    need(t.psxsplash, "The psxsplash build (.ps-exe)");
+    if (!t.bios.empty() && !fs::is_regular_file(t.bios, ec)) out.push_back("BIOS not found: " + utf8(t.bios));
+    return out;
+}
+
+splash::ExportResult exportForPlay(const splash::Scene& scene, const fs::path& projectRoot, const fs::path& dir) {
+    splash::ExportResult r;
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+    if (ec) {
+        r.errors.push_back("Cannot create " + utf8(dir) + ": " + ec.message());
+        return r;
+    }
+    // Stale files from an earlier play must not be booted if this export fails.
+    for (const char* ext : {".splashpack", ".vram", ".spu"}) fs::remove(dir / (std::string("scene_0") + ext), ec);
+    splash::ExportOptions opt;
+    opt.luaBytecode = true;
+    try {
+        r = splash::exportSplashpack(scene, projectRoot, dir / "scene_0.splashpack", opt);
+    } catch (const std::exception& e) {
+        r.errors.push_back(e.what());
+    }
+    return r;
+}
+
+std::vector<std::string> reduxCommand(const PlayTools& t, const fs::path& dir) {
+    std::vector<std::string> a = {utf8(t.redux), "-run", "-fastboot", "-stdout"};
+    if (!t.bios.empty()) {
+        a.push_back("-bios");
+        a.push_back(utf8(t.bios));
+    }
+    a.insert(a.end(), {"-loadexe", utf8(t.psxsplash), "-pcdrv", "-pcdrvbase", utf8(dir)});
+    return a;
+}
+
+}  // namespace editor
