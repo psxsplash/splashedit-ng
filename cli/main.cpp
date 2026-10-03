@@ -1,5 +1,7 @@
 // splashpack-cli: export a scene file to a splashpack without the editor.
+#include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <exception>
 #include <filesystem>
@@ -10,6 +12,7 @@
 #include <string>
 
 #include "luacompile.hh"
+#include "audio.hh"
 #include "splashpack.hh"
 #include "texture.hh"
 
@@ -41,6 +44,10 @@ static int usage() {
                  "  --order-from (parity tests) orders objects like the name table of ref\n"
                  "usage: splashpack-cli texstats <image> [--bpp 4|8|16] [--cutout] [--out <decoded.png>]\n"
                  "  converts one image the way export does and prints its error against the source\n"
+                 "usage: splashpack-cli audio <in.wav> -o <out.adpcm> [--rate <hz>] [--loop] [--trim]\n"
+                 "    [--pcm <src.wav>] [--decoded <out.wav>]\n"
+                 "  encodes one clip the way export does and prints its SNR against the source;\n"
+                 "  --pcm writes the 16-bit mono WAV the encoder starts from, before resampling\n"
                  "usage: splashpack-cli resave <in.scene|in.mesh> <out>\n"
                  "  loads and saves a scene or mesh file\n"
                  "usage: splashpack-cli luac <in.lua> -o <out.luac>\n"
@@ -86,6 +93,70 @@ static int texstats(int argc, char** argv) {
     }
 }
 
+static void writeWav16(const std::string& path, const std::vector<int16_t>& pcm, int rate) {
+    std::ofstream f(path, std::ios::binary);
+    auto u32 = [&](uint32_t v) { f.write(reinterpret_cast<const char*>(&v), 4); };
+    auto u16 = [&](uint16_t v) { f.write(reinterpret_cast<const char*>(&v), 2); };
+    uint32_t bytes = uint32_t(pcm.size() * 2);
+    f.write("RIFF", 4);
+    u32(36 + bytes);
+    f.write("WAVEfmt ", 8);
+    u32(16);
+    u16(1);
+    u16(1);
+    u32(uint32_t(rate));
+    u32(uint32_t(rate) * 2);
+    u16(2);
+    u16(16);
+    f.write("data", 4);
+    u32(bytes);
+    f.write(reinterpret_cast<const char*>(pcm.data()), std::streamsize(bytes));
+}
+
+static int audio(int argc, char** argv) {
+    std::string in, out, pcmOut, decodedOut;
+    int rate = 22050;
+    bool loop = false, trim = false;
+    for (int i = 2; i < argc; i++) {
+        std::string a = argv[i];
+        if (a == "-o" && i + 1 < argc) out = argv[++i];
+        else if (a == "--rate" && i + 1 < argc) rate = std::atoi(argv[++i]);
+        else if (a == "--pcm" && i + 1 < argc) pcmOut = argv[++i];
+        else if (a == "--decoded" && i + 1 < argc) decodedOut = argv[++i];
+        else if (a == "--loop") loop = true;
+        else if (a == "--trim") trim = true;
+        else if (in.empty()) in = a;
+        else return usage();
+    }
+    if (in.empty() || out.empty() || rate <= 0) return usage();
+    try {
+        splash::MonoAudio src = splash::loadWavMono(in);
+        if (trim) splash::trimLeadingSilence(src);
+        if (!pcmOut.empty()) writeWav16(pcmOut, splash::toPcm16(src.samples), src.rate);
+        splash::MonoAudio res = splash::resample(src, rate);
+        std::vector<int16_t> pcm = splash::toPcm16(res.samples);
+        std::vector<uint8_t> adpcm = splash::encodeSpuAdpcm(pcm, loop);
+        std::ofstream(out, std::ios::binary).write(reinterpret_cast<const char*>(adpcm.data()),
+                                                   std::streamsize(adpcm.size()));
+        // SNR of the decoded ADPCM against the PCM it was encoded from
+        // (skipping the leading silent block).
+        std::vector<int16_t> dec = splash::decodeSpuAdpcm(adpcm);
+        double sig = 0, err = 0;
+        for (size_t i = 0; i < pcm.size() && i + 28 < dec.size(); i++) {
+            double d = double(dec[i + 28]) - double(pcm[i]);
+            sig += double(pcm[i]) * pcm[i];
+            err += d * d;
+        }
+        if (!decodedOut.empty()) writeWav16(decodedOut, dec, rate);
+        std::printf("%s rate=%d->%d samples=%zu bytes=%zu snr=%.2f\n", in.c_str(), src.rate, rate, pcm.size(),
+                    adpcm.size(), err > 0 ? 10 * std::log10(sig / err) : 999.0);
+        return 0;
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "error: %s\n", e.what());
+        return 1;
+    }
+}
+
 static int resave(int argc, char** argv) {
     if (argc != 4) return usage();
     try {
@@ -121,6 +192,7 @@ static int luac(int argc, char** argv) {
 int main(int argc, char** argv) {
     if (argc >= 2 && std::strcmp(argv[1], "texstats") == 0) return texstats(argc, argv);
     if (argc >= 2 && std::strcmp(argv[1], "resave") == 0) return resave(argc, argv);
+    if (argc >= 2 && std::strcmp(argv[1], "audio") == 0) return audio(argc, argv);
     if (argc >= 2 && std::strcmp(argv[1], "luac") == 0) return luac(argc, argv);
     if (argc < 2 || std::strcmp(argv[1], "export") != 0) return usage();
     std::string scenePath, outPath, project, orderFrom;

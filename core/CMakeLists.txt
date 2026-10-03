@@ -55,7 +55,15 @@ else()
     target_compile_options(psxlua PRIVATE -include ${PSXLUA_HOST_H} -w -fsigned-char -fwrapv)
 endif()
 
+# libpsxav (the encoder psxavenc uses), plain C.
+add_library(psxav STATIC ${psxavenc_SOURCE_DIR}/libpsxav/adpcm.c ${psxavenc_SOURCE_DIR}/libpsxav/cdrom.c)
+target_include_directories(psxav PUBLIC ${psxavenc_SOURCE_DIR}/libpsxav)
+if(NOT MSVC)
+    target_compile_options(psxav PRIVATE -w)
+endif()
+
 add_library(splashcore STATIC
+    audio.cpp
     scene.cpp
     texture.cpp
     vrampacker.cpp
@@ -65,8 +73,8 @@ add_library(splashcore STATIC
     luacompile.cpp
     stb_impl.cpp)
 target_include_directories(splashcore PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_include_directories(splashcore SYSTEM PRIVATE ${stb_SOURCE_DIR})
-target_link_libraries(splashcore PUBLIC nlohmann_json::nlohmann_json PRIVATE recast psxlua)
+target_include_directories(splashcore SYSTEM PRIVATE ${stb_SOURCE_DIR} ${dr_libs_SOURCE_DIR})
+target_link_libraries(splashcore PUBLIC nlohmann_json::nlohmann_json PRIVATE recast psxlua psxav)
 # The writer reproduces SplashEdit 2.4's float results bit for bit: no FMA
 # contraction, no fast-math.
 if(MSVC)

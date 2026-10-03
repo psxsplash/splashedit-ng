@@ -114,6 +114,17 @@ struct TriggerComponent {
     ExtraKeys extra;
 };
 
+// PSXAudioClip: a WAV converted to SPU-ADPCM at export.
+struct AudioComponent {
+    std::string clip;      // project-relative WAV path, empty = no data
+    std::string clipName;  // name Lua plays it by
+    int sampleRate = 22050;
+    bool loop = false;
+    int defaultVolume = 100;
+    bool trimLeadingSilence = false;
+    ExtraKeys extra;
+};
+
 // PSXInteractable
 struct InteractableComponent {
     float radius = 2.0f;
@@ -144,6 +155,7 @@ struct Object {
     std::optional<NavigationComponent> navigation;
     std::optional<TriggerComponent> trigger;
     std::optional<InteractableComponent> interactable;
+    std::optional<AudioComponent> audio;
     std::vector<std::string> unknownComponents;  // components of an unknown type, as JSON text
     std::vector<Object> children;
     ExtraKeys extra;

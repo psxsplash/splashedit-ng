@@ -31,7 +31,16 @@ FetchContent_Declare(psxlua
     GIT_REPOSITORY https://github.com/grumpycoders/psxlua.git
     GIT_TAG abed030e686b4e34987851bd0a028c93b1f73967
     SOURCE_SUBDIR src)
-FetchContent_MakeAvailable(stb nlohmann_json recastnavigation psxlua)
+# libpsxav's SPU-ADPCM encoder (the one psxavenc uses), and dr_wav to read WAV.
+FetchContent_Declare(psxavenc
+    GIT_REPOSITORY https://codeberg.org/WonderfulToolchain/psxavenc.git
+    GIT_TAG f6757f823b707114c22997b7841a8a2898e800b6
+    SOURCE_SUBDIR none)
+FetchContent_Declare(dr_libs
+    GIT_REPOSITORY https://github.com/mackron/dr_libs.git
+    GIT_TAG dfe8377631000664666519fdb83da193fd8037f4
+    SOURCE_SUBDIR none)
+FetchContent_MakeAvailable(stb nlohmann_json recastnavigation psxlua psxavenc dr_libs)
 
 option(SPLASHEDIT_BUILD_EDITOR "Build the editor (needs SDL3, FreeType, OpenGL)" ON)
 

@@ -130,3 +130,15 @@ base. It writes `__done__` containing `OK` when it has finished.
 
 Two psxlua quirks the host build reproduces: `a ^ b` gives a to the power b + 1, and a decimal
 numeral with a leading zero (`010`, `0.5`) is a "malformed number".
+
+## Audio
+
+`audiocheck.py` encodes the WAVs in `audio/` at their own rate and compares the ADPCM with
+`audio/expected/`, which psxavenc (`-t spu -f <rate>`, plus `-L` for the looped files) wrote from the
+same 16-bit mono PCM. The encoder is libpsxav's, as in psxavenc, so these match byte for byte.
+Resampling is our own windowed sinc; psxavenc's goes through ffmpeg, so resampled clips differ.
+
+    python3 audiocheck.py <splashpack-cli>
+
+`splashpack-cli audio <in.wav> -o <out> --rate <hz> [--loop] [--trim] --pcm <src.wav>` writes the
+PCM it starts from, which is what was fed to psxavenc to make the expected files.

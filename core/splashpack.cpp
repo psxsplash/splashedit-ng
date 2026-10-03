@@ -9,6 +9,7 @@
 #include <memory>
 #include <sstream>
 
+#include "audio.hh"
 #include "binwriter.hh"
 #include "bvh.hh"
 #include "luacompile.hh"
@@ -439,11 +440,28 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     };
     // Trigger boxes and interactables: active objects only (FindObjectsByType
     // skips inactive ones), in canonical order.
-    std::vector<const FlatObject*> triggers, interactables;
+    std::vector<const FlatObject*> triggers, interactables, audioSources;
     for (const FlatObject& fo : flat) {
         if (!fo.activeInHierarchy || !fo.object->active) continue;
         if (fo.object->trigger) triggers.push_back(&fo);
         if (fo.object->interactable) interactables.push_back(&fo);
+        if (fo.object->audio) audioSources.push_back(&fo);
+    }
+    // Audio clips: SPU-ADPCM as `psxavenc -t spu -f <rate> [-L]` writes it.
+    std::vector<std::vector<uint8_t>> audioData;
+    for (const FlatObject* fo : audioSources) {
+        const AudioComponent& a = *fo->object->audio;
+        std::vector<uint8_t> data;
+        if (!a.clip.empty()) {
+            try {
+                MonoAudio src = loadWavMono(root / a.clip);
+                if (a.trimLeadingSilence) trimLeadingSilence(src);
+                data = encodeSpuAdpcm(toPcm16(resample(src, a.sampleRate).samples), a.loop);
+            } catch (const std::exception& ex) {
+                res.errors.push_back(ex.what());
+            }
+        }
+        audioData.push_back(std::move(data));
     }
     for (ExpObject& e : exporters)
         if (e.obj->script) addLua(e.obj->script->lua);
@@ -609,9 +627,10 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     }
     size_t nameTableOffsetPos = w.pos();
     w.u32(0);
-    w.u16(0);  // audio clips
+    w.u16(uint16_t(audioSources.size()));
     w.u16(0);
-    w.u32(0);  // audio table offset
+    size_t audioTableOffsetPos = w.pos();
+    w.u32(0);
     const FogSettings& fog = scene.settings.fog;
     w.u8(fog.enabled ? 1 : 0);
     for (float c : fog.color) w.u8(uint8_t(clampv(roundToInt(c * 255.f), 0, 255)));
@@ -832,6 +851,37 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
         w.u8(0);
     }
 
+    // ---- audio clip table (16 bytes each, then the names). The ADPCM goes in
+    // the .spu file, so dataOffset stays 0. Names are UTF-8 (2.4.0: ASCII).
+    if (!audioSources.empty()) {
+        w.align4();
+        w.patchU32(audioTableOffsetPos, uint32_t(w.pos()));
+        std::vector<std::string> names;
+        std::vector<size_t> nameOffsetPos;
+        for (size_t i = 0; i < audioSources.size(); i++) {
+            const AudioComponent& a = *audioSources[i]->object->audio;
+            std::string n = a.clipName;
+            if (n.size() > 255) {
+                size_t cut = 255;
+                while (cut > 0 && (uint8_t(n[cut]) & 0xC0) == 0x80) cut--;
+                n.resize(cut);
+            }
+            w.u32(0);
+            w.u32(uint32_t(audioData[i].size()));
+            w.u16(uint16_t(a.sampleRate));
+            w.u8(a.loop ? 1 : 0);
+            w.u8(uint8_t(n.size()));
+            nameOffsetPos.push_back(w.pos());
+            w.u32(0);
+            names.push_back(std::move(n));
+        }
+        for (size_t i = 0; i < names.size(); i++) {
+            w.patchU32(nameOffsetPos[i], uint32_t(w.pos()));
+            w.bytes(names[i]);
+            w.u8(0);
+        }
+    }
+
     fs::path outPath = out;
     w.save(outPath);
 
@@ -867,7 +917,16 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     BinWriter s;
     s.u8('S');
     s.u8('A');
-    s.u16(0);
+    s.u16(uint16_t(audioSources.size()));
+    for (size_t i = 0; i < audioSources.size(); i++) {
+        const AudioComponent& a = *audioSources[i]->object->audio;
+        s.u32(uint32_t(audioData[i].size()));
+        s.u16(uint16_t(a.sampleRate));
+        s.u8(a.loop ? 1 : 0);
+        s.u8(0);
+        for (uint8_t b : audioData[i]) s.u8(b);
+        s.align4();
+    }
     s.save(fs::path(outPath).replace_extension(".spu"));
     return res;
 }
