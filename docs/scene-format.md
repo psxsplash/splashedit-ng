@@ -5,8 +5,13 @@ Everything is plain text except images and audio, so scenes diff and merge in gi
 
 ## Scene file (`*.scene`)
 
-JSON, UTF-8, two-space indent, keys in the order given here. Unknown keys are kept on load and
-written back (in their original position) so newer files survive older editors.
+JSON, UTF-8, two-space indent, keys in the order given here. Unknown keys, and components of an
+unknown type, are kept on load and written back after the known ones, so a file from a newer build
+survives a save in an older one.
+
+`version` changes only when an older build would read a file wrong. Files with no version, or a
+version higher than the build's, fail to load. Additions an older build can skip keep the
+version as it is.
 
 ```json
 {
@@ -56,7 +61,7 @@ Components so far (more are added feature by feature, matching the splashpack se
 | `mesh` | `mesh` (path to a `.mesh`), `materials` (one per submesh: `texture` path or null, `color` RGBA 0..1), `bitDepth` 4/8/16, `vertexColors` `baked`/`flat`/`mesh`, `flatColor` RGB 0..255, `smoothNormals`, `uvOffsetMaterial` |
 | `collider` | `kind`: `none`, `static`, `dynamic`; `platform` bool |
 | `script` | `lua`: path to a `.lua` file |
-| `light` | `kind` `directional`/`point`/`spot`, `color` RGB 0..1, `intensity`, `range`, `spotAngle`, `innerSpotAngle` |
+| `light` | `kind` `directional`/`point`/`spot`, `color` RGB 0..1, `intensity`, `range`, `spotAngle`, `innerSpotAngle`, `enabled` true |
 | `player` | `playerHeight` 1.8 (eye height above the feet), `playerRadius` 0.5, `moveSpeed` 3, `sprintSpeed` 8 (units/s), nav bake fields (below), `jumpHeight` 2, `gravity` 20 |
 | `navigation` | nav bake without a player: `agentHeight` 1.8, `agentRadius` 0.5, nav bake fields (below), `spawnAnchor` object name or null (null = this object) |
 
@@ -93,7 +98,8 @@ has run. Arrays are flat.
 }
 ```
 
-`normals`, `uv` and `colors` may be absent. Bounds are computed from `positions`.
+`normals`, `uv` and `colors` may be absent; when present they have one entry per position. Each array's
+length must be a multiple of its tuple size. Bounds are computed from `positions`.
 
 ## Images
 

@@ -1,0 +1,73 @@
+# Load/save checks for scene and mesh files through `splashpack-cli resave`.
+# usage: python3 roundtrip.py <splashpack-cli>
+import json, os, subprocess, sys, tempfile
+
+cli = sys.argv[1]
+tmp = tempfile.mkdtemp()
+fails = 0
+
+
+def resave(doc, ext):
+    src, dst = os.path.join(tmp, 'in' + ext), os.path.join(tmp, 'out' + ext)
+    json.dump(doc, open(src, 'w'))
+    r = subprocess.run([cli, 'resave', src, dst], capture_output=True, text=True)
+    return r.returncode, (json.load(open(dst)) if r.returncode == 0 else r.stderr.strip())
+
+
+def check(name, ok, detail=''):
+    global fails
+    print(('ok   ' if ok else 'FAIL ') + name + (': ' + str(detail) if detail and not ok else ''))
+    fails += not ok
+
+
+scene = {
+    'format': 'splashedit-ng/scene', 'version': 1, 'futureRoot': [1, 2],
+    'settings': {'gteScaling': 50, 'futureSetting': 'x', 'fog': {'enabled': True, 'futureFog': 3}},
+    'objects': [{
+        'name': 'A', 'futureObject': {'k': True},
+        'components': [
+            {'type': 'mesh', 'mesh': 'a.mesh', 'futureMesh': 1,
+             'materials': [{'texture': None, 'futureMaterial': 2}]},
+            {'type': 'light', 'kind': 'spot', 'enabled': False, 'futureLight': 4},
+            {'type': 'futureComponent', 'value': 7},
+        ],
+        'children': [{'name': 'B', 'components': [{'type': 'player', 'moveSpeed': 5, 'futurePlayer': 6}]}],
+    }],
+}
+rc, out = resave(scene, '.scene')
+check('scene loads', rc == 0, out)
+if rc == 0:
+    o = out['objects'][0]
+    comps = {c['type']: c for c in o['components']}
+    check('known values kept', out['settings']['gteScaling'] == 50 and comps['light']['enabled'] is False
+          and o['children'][0]['components'][0]['moveSpeed'] == 5)
+    check('unknown root key', out.get('futureRoot') == [1, 2])
+    check('unknown settings key', out['settings'].get('futureSetting') == 'x')
+    check('unknown fog key', out['settings']['fog'].get('futureFog') == 3)
+    check('unknown object key', o.get('futureObject') == {'k': True})
+    check('unknown mesh key', comps['mesh'].get('futureMesh') == 1)
+    check('unknown material key', comps['mesh']['materials'][0].get('futureMaterial') == 2)
+    check('unknown light key', comps['light'].get('futureLight') == 4)
+    check('unknown component', comps.get('futureComponent') == {'type': 'futureComponent', 'value': 7})
+    check('unknown key on a child', o['children'][0]['components'][0].get('futurePlayer') == 6)
+    rc2, out2 = resave(out, '.scene')
+    check('second save is identical', rc2 == 0 and out2 == out)
+
+for v in (2, 0, None):
+    doc = dict(scene, version=v) if v is not None else {k: x for k, x in scene.items() if k != 'version'}
+    rc, err = resave(doc, '.scene')
+    check(f'scene version {v} refused', rc != 0, err)
+
+mesh = {'format': 'splashedit-ng/mesh', 'version': 1, 'positions': [0, 0, 0, 1, 0, 0, 0, 1, 0],
+        'colors': [1, 1, 1, 1] * 3, 'submeshes': [[0, 1, 2]]}
+rc, out = resave(mesh, '.mesh')
+check('mesh loads', rc == 0 and out['colors'] == mesh['colors'], out)
+for name, key, val in [('colour count', 'colors', [1, 1, 1, 1] * 2), ('colour stride', 'colors', [1] * 13),
+                       ('position stride', 'positions', [0] * 10), ('uv stride', 'uv', [0] * 7)]:
+    rc, err = resave(dict(mesh, **{key: val}), '.mesh')
+    check(f'mesh {name} refused', rc != 0, err)
+rc, err = resave(dict(mesh, version=2), '.mesh')
+check('mesh version 2 refused', rc != 0, err)
+
+print('FAILED' if fails else 'all passed')
+sys.exit(1 if fails else 0)
