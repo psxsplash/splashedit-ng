@@ -81,7 +81,6 @@ class Ps1View {
     };
 
     void rebuild();
-    void appendSky(std::vector<Vertex>& out);
     unsigned textureFor(const std::string& projectPath);  // cached; white/fallback on empty/error
 
     const editor::Document* m_doc = nullptr;
@@ -98,7 +97,7 @@ class Ps1View {
     bool m_haveSceneBounds = false;
     splash::Bounds m_sceneBounds;  // GL space, geometry only
 
-    unsigned m_prog = 0, m_vao = 0, m_vbo = 0, m_fbo = 0, m_color = 0, m_depth = 0;
+    unsigned m_prog = 0, m_skyProg = 0, m_vao = 0, m_vbo = 0, m_fbo = 0, m_color = 0, m_depth = 0;
     unsigned m_white = 0, m_fallback = 0;
     size_t m_vboCap = 0;
     int m_fboW = 0, m_fboH = 0;
