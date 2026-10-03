@@ -13,6 +13,7 @@
 
 #include "luacompile.hh"
 #include "audio.hh"
+#include "font.hh"
 #include "splashpack.hh"
 #include "texture.hh"
 
@@ -51,7 +52,10 @@ static int usage() {
                  "usage: splashpack-cli resave <in.scene|in.mesh> <out>\n"
                  "  loads and saves a scene or mesh file\n"
                  "usage: splashpack-cli luac <in.lua> -o <out.luac>\n"
-                 "  compiles one Lua file to PS1 bytecode, as --lua-bytecode does\n");
+                 "  compiles one Lua file to PS1 bytecode, as --lua-bytecode does\n"
+                 "usage: splashpack-cli font <font.ttf> --size <px> -o <sheet.png>\n"
+                 "       splashpack-cli font <bitmap.png> --cell <w>x<h> -o <sheet.png>\n"
+                 "  builds one UI font sheet the way export does and prints its cell size and height\n");
     return 2;
 }
 
@@ -189,7 +193,47 @@ static int luac(int argc, char** argv) {
     }
 }
 
+static int font(int argc, char** argv) {
+    splash::UIFont f;
+    f.name = "font";
+    std::string in, out;
+    for (int i = 2; i < argc; i++) {
+        std::string a = argv[i];
+        if (a == "-o" && i + 1 < argc) out = argv[++i];
+        else if (a == "--size" && i + 1 < argc) f.size = std::atoi(argv[++i]);
+        else if (a == "--cell" && i + 1 < argc) {
+            if (std::sscanf(argv[++i], "%dx%d", &f.glyphWidth, &f.glyphHeight) != 2) return usage();
+        } else if (in.empty()) in = a;
+        else return usage();
+    }
+    if (in.empty() || out.empty()) return usage();
+    (fs::path(in).extension() == ".png" ? f.bitmap : f.source) = fs::absolute(in).string();
+    try {
+        splash::FontSheet s = splash::buildFont(f, "/");
+        for (const std::string& w : s.warnings) std::fprintf(stderr, "warning: %s\n", w.c_str());
+        splash::Image img;
+        img.width = 256;
+        img.height = s.height;
+        img.pixels.resize(s.texels.size());
+        for (int y = 0; y < s.height; y++)
+            for (int x = 0; x < 256; x++) {
+                float v = s.texels[size_t(y) * 256 + x];
+                img.pixels[size_t(s.height - 1 - y) * 256 + x] = {v, v, v, 1};
+            }
+        splash::savePng(img, out);
+        int ink = 0;
+        for (uint8_t t : s.texels) ink += t;
+        std::printf("%s cell=%dx%d height=%d vram_bytes=%zu ink=%d\n", in.c_str(), s.glyphWidth, s.glyphHeight,
+                    s.height, s.texels.size() / 2, ink);
+        return 0;
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "error: %s\n", e.what());
+        return 1;
+    }
+}
+
 int main(int argc, char** argv) {
+    if (argc >= 2 && std::strcmp(argv[1], "font") == 0) return font(argc, argv);
     if (argc >= 2 && std::strcmp(argv[1], "texstats") == 0) return texstats(argc, argv);
     if (argc >= 2 && std::strcmp(argv[1], "resave") == 0) return resave(argc, argv);
     if (argc >= 2 && std::strcmp(argv[1], "audio") == 0) return audio(argc, argv);

@@ -1,0 +1,23 @@
+{
+  "format": "splashedit-ng/scene",
+  "version": 1,
+  "settings": {"gteScaling": 100.0, "sceneType": "exterior",
+               "fog": {"enabled": false, "color": [0.0, 0.0, 0.0], "density": 5}, "networkId": "", "script": null},
+  "objects": [],
+  "fonts": [
+    {"name": "title", "source": "../../assets/fonts/Inter-SemiBold.ttf", "size": 16},
+    {"name": "body", "source": "../../assets/fonts/Inter-Regular.ttf", "size": 12}
+  ],
+  "canvases": [
+    {"name": "hud", "visible": true, "sortOrder": 0, "elements": [
+      {"type": "box", "name": "bar", "rect": [0, -20, 0, 20], "anchorMin": [0, 1], "anchorMax": [1, 1], "color": [0.1, 0.3, 0.8]},
+      {"type": "box", "name": "corner", "rect": [-8, 0, 8, 8], "anchorMin": [1, 0], "anchorMax": [1, 0], "color": [1, 0, 0]},
+      {"type": "text", "name": "title", "rect": [8, 8, 300, 20], "color": [1, 1, 1], "text": "SplashEdit NG: UI", "font": "title"},
+      {"type": "text", "name": "body", "rect": [8, 32, 300, 16], "color": [1, 0.9, 0.4], "text": "Inter 12px, 3 fonts, any cell width", "font": "body"},
+      {"type": "text", "name": "sys", "rect": [8, 52, 300, 16], "color": [0.6, 1, 0.6], "text": "system font"},
+      {"type": "progress", "name": "hp", "rect": [8, 80, 120, 10], "color": [0.2, 0.9, 0.2], "background": [0.3, 0.1, 0.1], "value": 60},
+      {"type": "line", "name": "diag", "from": [8, 100], "to": [311, 200], "color": [1, 1, 0]},
+      {"type": "image", "name": "crate", "rect": [-72, 80, 64, 64], "anchorMin": [1, 0], "anchorMax": [1, 0], "color": [0.5, 0.5, 0.5], "texture": "../../examples/courtyard/textures/crate.png", "bitDepth": 8}
+    ]}
+  ]
+}

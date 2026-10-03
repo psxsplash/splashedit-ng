@@ -33,5 +33,6 @@ jobs:
           "$py" tests/roundtrip.py "$cli"
           "$py" tests/luacheck.py "$cli"
           "$py" tests/audiocheck.py "$cli"
+          "$py" tests/uicheck.py "$cli"
       - name: Editor tests
         run: ctest --test-dir build -C Release --output-on-failure

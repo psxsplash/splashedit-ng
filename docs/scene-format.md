@@ -84,6 +84,39 @@ any active mesh within 100 units, raised by `playerHeight` (no hit: the position
 agent size of the player (or 1.8/0.5); if a `navigation` component exists, all its values win over
 the player's.
 
+### UI: `fonts` and `canvases`
+
+Two optional top-level arrays after `objects`.
+
+```json
+"fonts": [
+  { "name": "title", "source": "fonts/Inter-SemiBold.ttf", "size": 16 },
+  { "name": "pixel", "bitmap": "fonts/pixel.png", "glyphWidth": 8, "glyphHeight": 12 }
+],
+"canvases": [
+  { "name": "hud", "visible": true, "sortOrder": 0, "elements": [
+    { "type": "box", "name": "bar", "visible": true, "rect": [0, -20, 0, 20],
+      "anchorMin": [0, 1], "anchorMax": [1, 1], "color": [0.1, 0.3, 0.8] },
+    { "type": "text", "name": "score", "visible": true, "rect": [8, 8, 120, 16],
+      "anchorMin": [0, 0], "anchorMax": [0, 0], "color": [1, 1, 1], "text": "Score 0", "font": "title" }
+  ] }
+]
+```
+
+A font is either `source`, a TTF/OTF rasterised at `size` pixels per em (4..64), or `bitmap`, a PNG
+256 pixels wide of `glyphWidth` x `glyphHeight` cells from 0x20 in ASCII order (ink = alpha above
+0.5). A bitmap font may give `advances`, 96 widths for 0x20..0x7F; without them each character
+advances by its ink width plus one. At most 3 fonts; names must be unique.
+
+Elements are drawn in array order. `type` is `box`, `text`, `progress`, `line` or `image`. Colours
+are 0..1. Layout is in screen pixels: on each axis with `anchorMin` equal to `anchorMax`, `rect`
+x (or y) is the offset of the top-left corner from that fraction of the screen and w (or h) the
+size; with them apart the element stretches, x/y are the left/top insets and the right/bottom edge
+is the `anchorMax` point plus x + w (or y + h). Per type: `text` has `text` (ASCII; at most 63 bytes
+are kept) and `font` (a font name, `null` for the system font); `progress` has `background` and
+`value` (0..100); `line` has `from` and `to` in screen pixels instead of `rect` and anchors;
+`image` has `texture`, `bitDepth` (4, 8, 16) and `cutout` [true].
+
 ## Mesh file (`*.mesh`)
 
 JSON, the imported form of a model: what the exporter consumes after any importer (glTF, OBJ, FBX)

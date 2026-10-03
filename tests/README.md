@@ -142,3 +142,20 @@ Resampling is our own windowed sinc; psxavenc's goes through ffmpeg, so resample
 
 `splashpack-cli audio <in.wav> -o <out> --rate <hz> [--loop] [--trim] --pcm <src.wav>` writes the
 PCM it starts from, which is what was fed to psxavenc to make the expected files.
+
+## UI
+
+`uicheck.py` exports `ui/ui.scene`, reads the UI table back the way `uisystem.cpp` does and resolves
+each element with the engine's `resolveLayout` at 320x240: a bar anchored 0..1 must cover x 0-319
+and a box anchored to the right edge must end at x 319. It also checks font indices, line endpoints
+past 255, the font sheets in the .vram file (in the x = 960 column, one page each, clear of the
+system font, row 0 blank) and that an unknown font, 4 fonts, a repeated font name or 25 canvases
+fail the export.
+
+    python3 uicheck.py <splashpack-cli>
+
+`splashpack-cli font <font.ttf> --size <px> -o sheet.png` (or `<bitmap.png> --cell <w>x<h>`) writes
+the glyph sheet export builds and prints its cell size and VRAM cost.
+
+`ui/ui.scene` booted with `boot/boot.sh` at frame 300 shows both Inter fonts, the system font, the
+progress bar, the image, a line ending at x 311 and the full-width bar, at the positions above.

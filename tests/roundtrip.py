@@ -58,6 +58,27 @@ for v in (2, 0, None):
     rc, err = resave(doc, '.scene')
     check(f'scene version {v} refused', rc != 0, err)
 
+ui = {'format': 'splashedit-ng/scene', 'version': 1, 'objects': [],
+      'fonts': [{'name': 'f', 'source': 'a.ttf', 'size': 12, 'kerning': True}],
+      'canvases': [{'name': 'hud', 'layer': 3, 'elements': [
+          {'type': 'text', 'name': 't', 'rect': [1, 2, 3, 4], 'text': 'hi', 'font': 'f', 'shadow': [1, 1]},
+          {'type': 'line', 'name': 'l', 'from': [0, 300], 'to': [400, -5]},
+          {'type': 'sprite', 'name': 'future'}]}]}
+rc, out = resave(dict(ui, canvases=ui['canvases'][:1] and [dict(ui['canvases'][0], elements=ui['canvases'][0]['elements'][:2])]), '.scene')
+els = out['canvases'][0]['elements'] if rc == 0 else []
+check('ui values and unknown keys survive', rc == 0 and out['fonts'][0]['kerning'] is True
+      and out['canvases'][0]['layer'] == 3 and els[0]['shadow'] == [1, 1] and els[0]['font'] == 'f'
+      and els[1]['from'] == [0, 300] and els[1]['to'] == [400, -5], out)
+rc, out = resave(ui, '.scene')
+check('unknown ui element type kept', rc == 0 and out['canvases'][0]['elements'][2] == ui['canvases'][0]['elements'][2], out)
+for name, edit in [('font with source and bitmap', lambda d: d['fonts'][0].update(bitmap='b.png')),
+                   ('anchor above 1', lambda d: d['canvases'][0]['elements'][0].update(anchorMax=[1.5, 0]))]:
+    d = json.loads(json.dumps(ui))
+    d['canvases'][0]['elements'].pop()
+    edit(d)
+    rc, err = resave(d, '.scene')
+    check(name + ' refused', rc != 0, err)
+
 mesh = {'format': 'splashedit-ng/mesh', 'version': 1, 'positions': [0, 0, 0, 1, 0, 0, 0, 1, 0],
         'colors': [1, 1, 1, 1] * 3, 'submeshes': [[0, 1, 2]]}
 rc, out = resave(mesh, '.mesh')
