@@ -421,7 +421,7 @@ unsigned Ps1View::render(int panelW, int panelH, int lines) {
         glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, m_depth);
     }
 
-    m_viewProj = Mat4::perspective(0.95f, (float)panelW / panelH, 0.1f, 200.0f) * Mat4::lookAt(m_eye, m_target, {0, 1, 0});
+    m_viewProj = Mat4::perspective(kFovY, (float)panelW / panelH, 0.1f, 200.0f) * Mat4::lookAt(m_eye, m_target, {0, 1, 0});
 
     const float fog[3] = {0.10f, 0.11f, 0.17f};
     glBindFramebuffer(GL_FRAMEBUFFER, m_fbo);
@@ -448,6 +448,74 @@ unsigned Ps1View::render(int panelW, int panelH, int lines) {
     glDisable(GL_DEPTH_TEST);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     return m_color;
+}
+
+void Ps1View::basis(Vec3* right, Vec3* up, Vec3* forward) const {
+    Vec3 f = normalize(m_target - m_eye);
+    Vec3 s = normalize(cross(f, {0, 1, 0}));
+    if (right) *right = s;
+    if (up) *up = cross(s, f);
+    if (forward) *forward = f;
+}
+
+float Ps1View::distance() const {
+    Vec3 d = m_eye - m_target;
+    return std::sqrt(dot(d, d));
+}
+
+void Ps1View::ray(ImVec2 screen, ImVec2 mn, ImVec2 sz, Vec3* origin, Vec3* dir) const {
+    Vec3 s, u, f;
+    basis(&s, &u, &f);
+    float nx = (screen.x - mn.x) / sz.x * 2 - 1;
+    float ny = 1 - (screen.y - mn.y) / sz.y * 2;
+    float th = std::tan(kFovY * 0.5f);
+    *origin = m_eye;
+    *dir = normalize(f + s * (nx * th * sz.x / sz.y) + u * (ny * th));
+}
+
+void Ps1View::orbit(float dx, float dy) {
+    Vec3 off = m_eye - m_target;
+    float r = std::sqrt(dot(off, off));
+    if (r <= 0) return;
+    float yaw = std::atan2(off.x, off.z);
+    float pitch = std::asin(std::clamp(off.y / r, -1.0f, 1.0f));
+    const float k = 0.008f;  // radians per pixel
+    yaw -= dx * k;
+    pitch = std::clamp(pitch + dy * k, -1.55f, 1.55f);
+    m_eye = m_target + Vec3{std::cos(pitch) * std::sin(yaw), std::sin(pitch), std::cos(pitch) * std::cos(yaw)} * r;
+}
+
+void Ps1View::pan(float dx, float dy, float panelH) {
+    Vec3 s, u;
+    basis(&s, &u, nullptr);
+    float perPx = 2 * distance() * std::tan(kFovY * 0.5f) / std::max(panelH, 1.0f);
+    Vec3 move = s * (-dx * perPx) + u * (dy * perPx);
+    m_eye = m_eye + move;
+    m_target = m_target + move;
+}
+
+void Ps1View::dolly(float steps) {
+    Vec3 off = m_eye - m_target;
+    float r = std::sqrt(dot(off, off));
+    if (r <= 0) return;
+    float nr = std::clamp(r * std::pow(0.85f, steps), 0.25f, 400.0f);
+    m_eye = m_target + off * (nr / r);
+}
+
+void Ps1View::frame(Vec3 center, float radius) {
+    Vec3 dir = normalize(m_eye - m_target);
+    if (dot(dir, dir) == 0) dir = {0, 0, 1};
+    float r = std::max(radius, 0.1f) / std::sin(kFovY * 0.5f) * 1.3f;
+    m_target = center;
+    m_eye = center + dir * std::max(r, 0.5f);
+}
+
+bool Ps1View::sceneBounds(Vec3* lo, Vec3* hi) const {
+    if (!m_haveSceneBounds) return false;
+    splash::Vec3 a = m_sceneBounds.min(), b = m_sceneBounds.max();
+    *lo = {a.x, a.y, a.z};
+    *hi = {b.x, b.y, b.z};
+    return true;
 }
 
 bool Ps1View::project(Vec3 p, ImVec2 mn, ImVec2 sz, ImVec2* out) const {

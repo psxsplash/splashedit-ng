@@ -39,6 +39,24 @@ class Ps1View {
     unsigned render(int panelW, int panelH, int lines);
     // Projects a world point into a screen rect matching the panel. Returns false behind the camera.
     bool project(Vec3 p, ImVec2 panelMin, ImVec2 panelSize, ImVec2* out) const;
+    // The ray from the eye through a screen point of the panel (GL space, unit direction).
+    void ray(ImVec2 screen, ImVec2 panelMin, ImVec2 panelSize, Vec3* origin, Vec3* dir) const;
+
+    // Camera, in GL space. The pivot is the target the eye looks at.
+    // Orbits around the pivot by a mouse delta in pixels (the scene follows the mouse).
+    void orbit(float dxPx, float dyPx);
+    // Slides eye and pivot so the scene follows the mouse. `panelH` sets the pixel scale.
+    void pan(float dxPx, float dyPx, float panelH);
+    // Moves the eye towards (positive steps) or away from the pivot.
+    void dolly(float steps);
+    // Puts the pivot at `center` and backs off until a sphere of `radius` fits.
+    void frame(Vec3 center, float radius);
+    // Bounds of the scene's geometry, false when it has none.
+    bool sceneBounds(Vec3* lo, Vec3* hi) const;
+    // Unit right, up and forward vectors of the camera.
+    void basis(Vec3* right, Vec3* up, Vec3* forward) const;
+    float distance() const;
+    static constexpr float kFovY = 0.95f;
 
     bool clean = false;  // false = PS1 look, true = clean view
 

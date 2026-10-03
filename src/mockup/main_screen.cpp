@@ -1,6 +1,8 @@
 #include "mockup/main_screen.h"
 
+#include <algorithm>
 #include <array>
+#include <iterator>
 #include <cfloat>
 #include <cmath>
 #include <cstdio>
@@ -281,15 +283,27 @@ static void sceneIcon(ImDrawList* dl, viewport::Ps1View& view, ImVec2 mn, ImVec2
     textCentered(dl, ImRect(c - ImVec2(13, 13), c + ImVec2(13, 13)), fonts().medium, type::icon - 1, col, ic);
 }
 
-static void axisWidget(ImDrawList* dl, ImVec2 c) {
+static void axisWidget(ImDrawList* dl, ImVec2 c, const viewport::Ps1View& view) {
     Fonts& f = fonts();
     dl->AddCircleFilled(c, 34, rgb(0x0e1014, 140), 40);
-    // Screen-space directions matching the mockup camera.
+    // Unity's axes (Z negated into GL) as the camera sees them.
+    viewport::Vec3 s, u, fw;
+    view.basis(&s, &u, &fw);
     struct A {
         ImVec2 d;
         ImU32 col;
         const char* l;
-    } axes[3] = {{{0.62f, 0.32f}, color::axisX, "X"}, {{0.0f, -0.82f}, color::axisY, "Y"}, {{-0.66f, 0.30f}, color::axisZ, "Z"}};
+        float depth;
+    } axes[3];
+    const viewport::Vec3 w[3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, -1}};
+    const ImU32 cols[3] = {color::axisX, color::axisY, color::axisZ};
+    const char* labels[3] = {"X", "Y", "Z"};
+    for (int i = 0; i < 3; ++i) {
+        auto d3 = [&](viewport::Vec3 a, viewport::Vec3 b) { return a.x * b.x + a.y * b.y + a.z * b.z; };
+        axes[i] = {ImVec2(d3(w[i], s), -d3(w[i], u)) * 0.82f, cols[i], labels[i], d3(w[i], fw)};
+    }
+    // Far axes first, so the nearer ones overlap them.
+    std::sort(std::begin(axes), std::end(axes), [](const A& a, const A& b) { return a.depth > b.depth; });
     for (auto& a : axes) {
         ImVec2 tip = c + a.d * 24;
         dl->AddLine(c, tip, a.col, 2);
@@ -341,6 +355,63 @@ static void selectedBoxGl(const editor::Document& doc, const splash::FlatObject&
     *hi = toGl({p.x + 0.25f, p.y + 0.25f, p.z + 0.25f});
 }
 
+// GL-space bounds of the selection, or of the whole scene with nothing selected.
+static bool frameBounds(const editor::Document& doc, const viewport::Ps1View& view, const std::vector<splash::FlatObject>& flats,
+                        viewport::Vec3* lo, viewport::Vec3* hi) {
+    if (const splash::Object* sel = doc.selected())
+        for (const splash::FlatObject& fo : flats)
+            if (fo.object == sel) {
+                selectedBoxGl(doc, fo, lo, hi);
+                return true;
+            }
+    return view.sceneBounds(lo, hi);
+}
+
+// Mouse and keys over the viewport, registered after the overlays so the
+// toolbars, icons and gizmo take the mouse first. RMB orbits, MMB pans, the
+// wheel dollies, F frames. Effects show from the next frame's render.
+static void viewportInput(State& st, ImRect r, editor::Document& doc, viewport::Ps1View& view,
+                          const std::vector<splash::FlatObject>& flats) {
+    ImGuiIO& io = ImGui::GetIO();
+    ImGuiContext& g = *GImGui;
+    ImGuiID id = ImGui::GetID("##viewport");
+    ImGui::SetCursorScreenPos(r.Min);
+    ImGui::ItemSize(r.GetSize());
+    ImGui::ItemAdd(r, id);
+    bool hovered = ImGui::ItemHoverable(r, id, 0);
+    if (hovered && g.ActiveId == 0)
+        for (int b = 0; b < 3; ++b)
+            if (ImGui::IsMouseClicked(b)) {
+                ImGui::SetActiveID(id, g.CurrentWindow);
+                ImGui::FocusWindow(g.CurrentWindow);
+                st.vpButton = b;
+                st.vpDragged = false;
+                break;
+            }
+    if (g.ActiveId == id && st.vpButton >= 0) {
+        if (ImGui::IsMouseDown(st.vpButton)) {
+            if (ImGui::IsMouseDragPastThreshold(st.vpButton)) st.vpDragged = true;
+            if (st.vpDragged && (io.MouseDelta.x != 0 || io.MouseDelta.y != 0)) {
+                if (st.vpButton == 1) view.orbit(io.MouseDelta.x, io.MouseDelta.y);
+                if (st.vpButton == 2) view.pan(io.MouseDelta.x, io.MouseDelta.y, r.GetHeight());
+            }
+            if (st.vpButton != 0 && st.vpDragged) ImGui::SetMouseCursor(st.vpButton == 2 ? ImGuiMouseCursor_ResizeAll : ImGuiMouseCursor_Arrow);
+        } else {
+            ImGui::ClearActiveID();
+            st.vpButton = -1;
+        }
+    }
+    if (hovered && io.MouseWheel != 0) view.dolly(io.MouseWheel);
+    if (!io.WantTextInput && !io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_F, false)) {
+        viewport::Vec3 lo, hi;
+        if (frameBounds(doc, view, flats, &lo, &hi)) {
+            viewport::Vec3 c{(lo.x + hi.x) * 0.5f, (lo.y + hi.y) * 0.5f, (lo.z + hi.z) * 0.5f};
+            viewport::Vec3 e{(hi.x - lo.x) * 0.5f, (hi.y - lo.y) * 0.5f, (hi.z - lo.z) * 0.5f};
+            view.frame(c, std::sqrt(e.x * e.x + e.y * e.y + e.z * e.z));
+        }
+    }
+}
+
 static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document& doc, viewport::Ps1View& view) {
     Fonts& f = fonts();
     view.clean = st.viewMode == 1;
@@ -348,6 +419,8 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
     dl->AddImageRounded((ImTextureID)(intptr_t)tex, r.Min, r.Max, ImVec2(0, 1), ImVec2(1, 0), IM_COL32_WHITE, radius::window);
 
     ImVec2 mn = r.Min, sz = r.GetSize();
+    // Overlays follow the camera, so keep them inside the panel.
+    ImGui::PushClipRect(r.Min, r.Max, true);
     std::vector<splash::FlatObject> flats = splash::flatten(doc.scene());
     const splash::Object* sel = doc.selected();
     // Icons: a lightbulb for lights, a generic marker for objects with neither
@@ -405,7 +478,9 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
     dropdown("camera", ImRect(rp, rp + ImVec2(camW, 28)), icon::camera, "Perspective");
     st.viewMode = segmented("viewmode", ImVec2(rp.x + camW + space::sm, p.y + 2), {"PS1", "Clean"}, st.viewMode, &w);
 
-    axisWidget(dl, ImVec2(r.Max.x - 52, r.Min.y + 96));
+    axisWidget(dl, ImVec2(r.Max.x - 52, r.Min.y + 96), view);
+    viewportInput(st, r, doc, view, flats);
+    ImGui::PopClipRect();
 
     // Bottom-left chip describing what the edit view is showing.
     const char* info = st.viewMode == 0 ? "320 x 240  ·  15-bit dither  ·  affine" : "Clean view";
@@ -722,6 +797,12 @@ static void shortcuts(State& st, editor::Document& doc) {
     const bool ctrl = io.KeyCtrl, shift = io.KeyShift;
     if (ctrl && !shift && repeat(ImGuiKey_Z)) doc.undo();
     if (ctrl && ((shift && repeat(ImGuiKey_Z)) || repeat(ImGuiKey_Y))) doc.redo();
+    if (!ctrl && !shift && !io.KeyAlt) {
+        if (pressed(ImGuiKey_Q)) st.tool = 0;
+        if (pressed(ImGuiKey_W)) st.tool = 1;
+        if (pressed(ImGuiKey_E)) st.tool = 2;
+        if (pressed(ImGuiKey_R)) st.tool = 3;
+    }
     if (ctrl && pressed(ImGuiKey_S)) {
         auto err = doc.save();
         st.saveError = err ? "Save failed: " + *err : std::string();

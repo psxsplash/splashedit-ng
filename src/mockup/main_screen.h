@@ -19,6 +19,12 @@ struct State {
     int viewMode = 0;    // 0 PS1, 1 clean
     bool maximized = false;
     std::string saveError;  // last Ctrl+S failure, shown in the status bar; empty after a good save
+    bool snap = true;       // grid snapping for the move gizmo (Ctrl snaps while it is off)
+
+    // Viewport mouse: which button started the current press, and whether it
+    // moved far enough to count as a drag rather than a click.
+    int vpButton = -1;
+    bool vpDragged = false;
 };
 
 // Draws the main screen for `doc` filling `size`. Returns the title-bar
