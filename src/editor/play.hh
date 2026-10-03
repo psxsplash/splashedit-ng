@@ -21,8 +21,9 @@ PlayTools loadPlayTools(const std::filesystem::path& file);
 bool savePlayTools(const std::filesystem::path& file, const PlayTools& tools);
 
 // Fills empty entries from SPLASHEDIT_REDUX, SPLASHEDIT_PSXSPLASH and
-// SPLASHEDIT_BIOS, then looks for pcsx-redux on PATH.
-PlayTools withDefaults(PlayTools tools);
+// SPLASHEDIT_BIOS, then from the copies shipped in `bundle` (the directory
+// holding the editor: redux/ and engine/), then looks for pcsx-redux on PATH.
+PlayTools withDefaults(PlayTools tools, const std::filesystem::path& bundle = {});
 
 // One line per thing Play still needs; empty when it can run.
 std::vector<std::string> missingTools(const PlayTools& tools);

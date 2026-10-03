@@ -603,8 +603,24 @@ void testPlay() {
     CHECK(e.redux == t.redux && e.psxsplash == t.psxsplash);
     editor::PlayTools e2 = editor::withDefaults({});
     CHECK(e2.redux == fs::path("/env/pcsx-redux") && e2.psxsplash == fs::path("/env/psxsplash.ps-exe"));
+
+    // A packaged editor carries redux/ and engine/ beside itself; the
+    // environment still wins over them, and they win over PATH.
+    fs::path bundle = dir / "bundle";
+    fs::create_directories(bundle / "redux");
+    fs::create_directories(bundle / "engine");
+    std::ofstream(bundle / "redux" / "pcsx-redux") << "x";
+    std::ofstream(bundle / "engine" / "psxsplash.ps-exe") << "x";
+    editor::PlayTools envWins = editor::withDefaults({}, bundle);
+    CHECK(envWins.redux == fs::path("/env/pcsx-redux") && envWins.psxsplash == fs::path("/env/psxsplash.ps-exe"));
     setEnv("SPLASHEDIT_PSXSPLASH", "");
     setEnv("SPLASHEDIT_REDUX", "");
+    editor::PlayTools fromBundle = editor::withDefaults({}, bundle);
+    CHECK(fromBundle.redux == bundle / "redux" / "pcsx-redux" &&
+          fromBundle.psxsplash == bundle / "engine" / "psxsplash.ps-exe");
+    CHECK(editor::missingTools(fromBundle).empty());
+    editor::PlayTools empty = editor::withDefaults({}, dir / "nothing-here");
+    CHECK(empty.psxsplash.empty());
 
     // What is missing, and the command once nothing is.
     CHECK(editor::missingTools({}).size() == 2);

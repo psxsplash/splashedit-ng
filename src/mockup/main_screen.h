@@ -44,6 +44,7 @@ struct State {
     struct Play {
         std::filesystem::path settingsFile;  // where tools are saved; empty = not saved (screenshot mode)
         editor::PlayTools tools;             // as set by the user; withDefaults() fills the rest
+        std::filesystem::path bundleDir;     // where the editor lives; redux/ and engine/ ship there
         std::future<splash::ExportResult> build;
         Emulator emu;
         GameView game;            // what redux shows, once it has published a frame
