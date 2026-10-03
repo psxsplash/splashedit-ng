@@ -62,7 +62,7 @@ constexpr float gutter = 4;   // gap between docked panels
 
 // Type scale, in pixels.
 namespace type {
-constexpr float caption = 11.5f, label = 12.5f, body = 13.5f, title = 15.0f, icon = 15.0f;
+constexpr float caption = 12.0f, label = 13.0f, body = 14.0f, title = 15.0f, icon = 15.0f;
 }
 
 struct Fonts {

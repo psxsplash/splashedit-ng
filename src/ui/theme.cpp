@@ -14,7 +14,9 @@ Fonts& fonts() {
 static ImFont* addFace(const std::string& dir, const char* file) {
     ImGuiIO& io = ImGui::GetIO();
     ImFontConfig cfg;
-    cfg.FontLoaderFlags = ImGuiFreeTypeLoaderFlags_LightHinting;
+    // Full hinting at whole-pixel sizes: light hinting only snaps vertically and
+    // reads as soft next to native Windows text.
+    cfg.FontLoaderFlags = 0;
     // Inter carries its own private-use glyphs, which would shadow the icons.
     static const ImWchar privateUse[] = {0xe000, 0xf8ff, 0};
     cfg.GlyphExcludeRanges = privateUse;
@@ -23,7 +25,7 @@ static ImFont* addFace(const std::string& dir, const char* file) {
     // Lucide icons merged into every face, so text and icons share a line.
     ImFontConfig icons;
     icons.MergeMode = true;
-    icons.FontLoaderFlags = ImGuiFreeTypeLoaderFlags_LightHinting;
+    icons.FontLoaderFlags = 0;
     icons.GlyphOffset = ImVec2(0, 2);
     static const ImWchar range[] = {0xe000, 0xe6ff, 0};
     icons.GlyphRanges = range;
