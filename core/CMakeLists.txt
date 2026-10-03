@@ -58,6 +58,8 @@ endif()
 # libpsxav (the encoder psxavenc uses), plain C.
 add_library(psxav STATIC ${psxavenc_SOURCE_DIR}/libpsxav/adpcm.c ${psxavenc_SOURCE_DIR}/libpsxav/cdrom.c)
 target_include_directories(psxav PUBLIC ${psxavenc_SOURCE_DIR}/libpsxav)
+# C11 for _Static_assert (MSVC defaults to an older C).
+set_target_properties(psxav PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
 if(NOT MSVC)
     target_compile_options(psxav PRIVATE -w)
 endif()
