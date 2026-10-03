@@ -9,6 +9,7 @@
 
 #include "binwriter.hh"
 #include "bvh.hh"
+#include "navregion.hh"
 #include "texture.hh"
 #include "vrampacker.hh"
 
@@ -271,6 +272,40 @@ void writeRotation(BinWriter& w, Quat q) {
         for (float v : row) w.i32(toFixed12(v));
 }
 
+// PSXPlayer.FindNavmesh: Physics.Raycast(transform.position, Vector3.down,
+// 100) and the hit point raised by the player height. The scene format has no
+// physics colliders, so the ray is cast against the front faces of every
+// active mesh (what Unity's primitive and mesh colliders amount to).
+Vec3 findCamPoint(Vec3 origin, float height, const std::vector<ExpObject>& exporters) {
+    double bestT = 100.0;
+    bool hit = false;
+    for (const ExpObject& e : exporters) {
+        if (!e.obj->active || !e.flat->activeInHierarchy) continue;
+        const Mat34& m = e.flat->localToWorld;
+        for (const auto& sm : e.mesh->submeshes)
+            for (size_t i = 0; i + 2 < sm.size(); i += 3) {
+                Vec3 a = m.point(e.mesh->positions[size_t(sm[i])]);
+                Vec3 b = m.point(e.mesh->positions[size_t(sm[i + 1])]);
+                Vec3 c = m.point(e.mesh->positions[size_t(sm[i + 2])]);
+                // Edge functions in XZ; a front face seen from above has normal.y > 0.
+                double ax = a.x - double(origin.x), az = a.z - double(origin.z);
+                double bx = b.x - double(origin.x), bz = b.z - double(origin.z);
+                double cx = c.x - double(origin.x), cz = c.z - double(origin.z);
+                double w0 = bz * cx - bx * cz, w1 = cz * ax - cx * az, w2 = az * bx - ax * bz;
+                double area = w0 + w1 + w2;
+                if (area <= 0 || w0 < 0 || w1 < 0 || w2 < 0) continue;
+                double y = (w0 * a.y + w1 * b.y + w2 * c.y) / area;
+                double t = double(origin.y) - y;
+                if (t < 0 || t > bestT) continue;
+                bestT = t;
+                hit = true;
+            }
+    }
+    if (!hit) return origin + Vec3{0, height, 0};
+    Vec3 point{origin.x, float(double(origin.y) - bestT), origin.z};
+    return point + Vec3{0, height, 0};
+}
+
 uint32_t hashSceneId(const std::string& id) {
     if (id.empty()) return 0;
     uint32_t h = 2166136261u;
@@ -424,11 +459,93 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     for (ExpObject& e : exporters)
         if (e.obj->collider && e.obj->collider->kind == ColliderKind::Dynamic) colliderCount++;
 
-    // No player component yet: SplashEdit 2.4's defaults without PSXPlayer
-    // or PSXNavigationSettings.
+    // PSXSceneExporter: the first active PSXPlayer and PSXNavigationSettings
+    // (FindObjectsByType skips inactive objects), in canonical order.
+    const FlatObject* playerObj = nullptr;
+    const FlatObject* navObj = nullptr;
+    for (const FlatObject& fo : flat) {
+        if (!fo.activeInHierarchy || !fo.object->active) continue;
+        if (fo.object->player && !playerObj) playerObj = &fo;
+        if (fo.object->navigation && !navObj) navObj = &fo;
+    }
+    Vec3 navSpawn{};
+    if (navObj) {
+        navSpawn = navObj->worldPosition;
+        const std::string& anchor = navObj->object->navigation->spawnAnchor;
+        if (!anchor.empty()) {
+            auto it = std::find_if(flat.begin(), flat.end(),
+                                   [&](const FlatObject& fo) { return fo.object->name == anchor; });
+            if (it == flat.end()) {
+                res.errors.push_back(navObj->object->name + ": spawnAnchor '" + anchor + "' not found");
+                return res;
+            }
+            navSpawn = it->worldPosition;
+        }
+    }
     Vec3 playerPos{};
+    Quat playerRot{};
     float playerHeight = 1.8f, playerRadius = 0.5f, moveSpeed = 3.f, sprintSpeed = 8.f, jumpHeight = 2.f,
           gravity = 20.f;
+    if (playerObj) {
+        const PlayerComponent& pc = *playerObj->object->player;
+        playerPos = findCamPoint(playerObj->worldPosition, pc.playerHeight, exporters);
+        playerRot = playerObj->worldRotation;
+        playerHeight = pc.playerHeight;
+        playerRadius = pc.playerRadius;
+        moveSpeed = pc.moveSpeed;
+        sprintSpeed = pc.sprintSpeed;
+        jumpHeight = pc.jumpHeight;
+        gravity = pc.gravity;
+    } else if (navObj) {
+        playerPos = navSpawn;
+        playerHeight = navObj->object->navigation->agentHeight;
+        playerRadius = navObj->object->navigation->agentRadius;
+    }
+
+    // Nav regions. Agent size comes from the player (or its defaults); the
+    // navigation settings override everything when present.
+    NavBuildParams np;
+    np.agentRadius = playerRadius;
+    np.agentHeight = playerHeight;
+    const NavBakeSettings* bake = nullptr;
+    if (navObj) {
+        np.agentRadius = navObj->object->navigation->agentRadius;
+        np.agentHeight = navObj->object->navigation->agentHeight;
+        bake = &navObj->object->navigation->nav;
+    } else if (playerObj) {
+        bake = &playerObj->object->player->nav;
+    }
+    if (bake) {
+        np.maxStepHeight = bake->maxStepHeight;
+        np.walkableSlopeAngle = bake->walkableSlopeAngle;
+        np.cellSize = bake->cellSize;
+        np.cellHeight = bake->cellHeight;
+        np.minRegionArea = bake->minRegionArea;
+        np.mergeRegionArea = bake->mergeRegionArea;
+        np.maxSimplifyError = bake->maxSimplifyError;
+        np.maxEdgeLength = bake->maxEdgeLength;
+        np.partition = bake->partition;
+        np.detailSampleDist = bake->detailSampleDist;
+        np.detailMaxError = bake->detailMaxError;
+        np.maxPlaneError = bake->maxPlaneError;
+    }
+    std::vector<NavInputObject> navIn;
+    for (ExpObject& e : exporters) {
+        NavInputObject n{e.obj->collider && e.obj->collider->kind == ColliderKind::Static,
+                         e.obj->collider && e.obj->collider->platform,
+                         e.flat->localToWorld,
+                         &e.mesh->positions,
+                         {},
+                         e.mesh->bounds()};
+        for (const auto& sm : e.mesh->submeshes) n.triangles.insert(n.triangles.end(), sm.begin(), sm.end());
+        navIn.push_back(std::move(n));
+    }
+    NavMesh nav = buildNavRegions(navIn, np, playerObj ? playerPos : navObj ? navSpawn : playerPos, res.errors);
+    if (!res.ok()) return res;
+    if (nav.regions.size() > 65535 || nav.portals.size() > 65535) {
+        res.errors.push_back("too many nav regions or portals");
+        return res;
+    }
 
     BinWriter w;
     // ---- header (144 bytes, v23)
@@ -444,9 +561,12 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     w.i16(toPsxCoord(playerPos.x, gte));
     w.i16(toPsxCoord(-playerPos.y, gte));
     w.i16(toPsxCoord(playerPos.z, gte));
-    w.i16(0);  // player rotation (identity)
-    w.i16(0);
-    w.i16(0);
+    // Euler degrees as radians in 4.12 (2.4.0's encoding).
+    constexpr float deg2rad = 0.0174532924f;  // Mathf.Deg2Rad
+    Vec3 euler = eulerAngles(playerRot);
+    w.i16(toFixed12(euler.x * deg2rad));
+    w.i16(toFixed12(euler.y * deg2rad));
+    w.i16(toFixed12(euler.z * deg2rad));
     w.u16(uint16_t(toPsxCoord(playerHeight, gte)));
     w.i16(scene.settings.script.empty() ? int16_t(-1) : luaIndex(scene.settings.script));
     w.u16(uint16_t(std::min<size_t>(bvh.nodes.size(), 65535)));
@@ -455,8 +575,8 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     w.u16(0);  // trigger boxes
     w.u16(0);  // world collision mesh count (removed)
     w.u16(0);  // world collision tri count (removed)
-    w.u16(0);  // nav regions
-    w.u16(0);  // nav portals
+    w.u16(uint16_t(nav.regions.size()));
+    w.u16(uint16_t(nav.portals.size()));
     {
         const float fps = 30.f;
         float movePerFrame = moveSpeed / fps / gte;
@@ -565,6 +685,12 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
 
     // ---- interactables (none yet)
     w.align4();
+
+    // ---- nav regions
+    if (!nav.regions.empty()) {
+        w.align4();
+        writeNavRegions(w, nav, gte);
+    }
 
     // ---- atlas + CLUT metadata (the reader skips the contents)
     for (Atlas& a : vram.atlases) {

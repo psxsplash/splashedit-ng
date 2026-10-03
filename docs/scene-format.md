@@ -57,6 +57,24 @@ Components so far (more are added feature by feature, matching the splashpack se
 | `collider` | `kind`: `none`, `static`, `dynamic`; `platform` bool |
 | `script` | `lua`: path to a `.lua` file |
 | `light` | `kind` `directional`/`point`/`spot`, `color` RGB 0..1, `intensity`, `range`, `spotAngle`, `innerSpotAngle` |
+| `player` | `playerHeight` 1.8 (eye height above the feet), `playerRadius` 0.5, `moveSpeed` 3, `sprintSpeed` 8 (units/s), nav bake fields (below), `jumpHeight` 2, `gravity` 20 |
+| `navigation` | nav bake without a player: `agentHeight` 1.8, `agentRadius` 0.5, nav bake fields (below), `spawnAnchor` object name or null (null = this object) |
+
+Nav bake fields, shared by `player` and `navigation` (defaults in brackets): `maxStepHeight` [0.35],
+`walkableSlopeAngle` degrees [46], `navCellSize` [0.05], `navCellHeight` [0.025], `navMinRegionArea`
+voxels [8], `navMergeRegionArea` voxels [20], `navMaxSimplifyError` [1.3], `navMaxEdgeLength` [12],
+`navPartitionMethod` `watershed`/`monotone`/`layer` [`watershed`], `navDetailSampleDist` multiple of
+the cell size [6], `navDetailMaxError` [0.025], `navMaxPlaneError` [0.15, editor warning only, does
+not change the export].
+
+The exporter uses the first active object (canonical order) carrying each of these. The player
+start is the point straight below the player's position on the nearest upward-facing triangle of
+any active mesh within 100 units, raised by `playerHeight` (no hit: the position raised by
+`playerHeight`); its rotation is the player's world rotation. Without a player the start is the
+`navigation` spawn point (or the origin) with no rotation, and height/radius come from `navigation`
+(or 1.8/0.5). The nav mesh is baked from the meshes of objects with a `static` collider, with the
+agent size of the player (or 1.8/0.5); if a `navigation` component exists, all its values win over
+the player's.
 
 ## Mesh file (`*.mesh`)
 

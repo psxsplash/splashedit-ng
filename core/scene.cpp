@@ -55,6 +55,38 @@ const std::initializer_list<std::pair<const char*, LightKind>> kLightKinds = {
     {"directional", LightKind::Directional}, {"point", LightKind::Point}, {"spot", LightKind::Spot}};
 const std::initializer_list<std::pair<const char*, SceneType>> kSceneTypes = {
     {"exterior", SceneType::Exterior}, {"interior", SceneType::Interior}};
+const std::initializer_list<std::pair<const char*, NavPartition>> kPartitions = {
+    {"watershed", NavPartition::Watershed}, {"monotone", NavPartition::Monotone}, {"layer", NavPartition::Layer}};
+
+void readNav(const json& c, NavBakeSettings& n) {
+    n.maxStepHeight = c.value("maxStepHeight", n.maxStepHeight);
+    n.walkableSlopeAngle = c.value("walkableSlopeAngle", n.walkableSlopeAngle);
+    n.cellSize = c.value("navCellSize", n.cellSize);
+    n.cellHeight = c.value("navCellHeight", n.cellHeight);
+    n.minRegionArea = c.value("navMinRegionArea", n.minRegionArea);
+    n.mergeRegionArea = c.value("navMergeRegionArea", n.mergeRegionArea);
+    n.maxSimplifyError = c.value("navMaxSimplifyError", n.maxSimplifyError);
+    n.maxEdgeLength = c.value("navMaxEdgeLength", n.maxEdgeLength);
+    if (c.contains("navPartitionMethod")) n.partition = enumFrom(c["navPartitionMethod"], kPartitions);
+    n.detailSampleDist = c.value("navDetailSampleDist", n.detailSampleDist);
+    n.detailMaxError = c.value("navDetailMaxError", n.detailMaxError);
+    n.maxPlaneError = c.value("navMaxPlaneError", n.maxPlaneError);
+}
+
+void writeNav(json& j, const NavBakeSettings& n) {
+    j["maxStepHeight"] = n.maxStepHeight;
+    j["walkableSlopeAngle"] = n.walkableSlopeAngle;
+    j["navCellSize"] = n.cellSize;
+    j["navCellHeight"] = n.cellHeight;
+    j["navMinRegionArea"] = n.minRegionArea;
+    j["navMergeRegionArea"] = n.mergeRegionArea;
+    j["navMaxSimplifyError"] = n.maxSimplifyError;
+    j["navMaxEdgeLength"] = n.maxEdgeLength;
+    j["navPartitionMethod"] = enumTo(n.partition, kPartitions);
+    j["navDetailSampleDist"] = n.detailSampleDist;
+    j["navDetailMaxError"] = n.detailMaxError;
+    j["navMaxPlaneError"] = n.maxPlaneError;
+}
 
 Object readObject(const json& j) {
     Object o;
@@ -108,6 +140,24 @@ Object readObject(const json& j) {
             l.innerSpotAngle = c.value("innerSpotAngle", 0.f);
             l.enabled = c.value("enabled", true);
             o.light = l;
+        } else if (type == "player") {
+            PlayerComponent pc;
+            pc.playerHeight = c.value("playerHeight", pc.playerHeight);
+            pc.playerRadius = c.value("playerRadius", pc.playerRadius);
+            pc.moveSpeed = c.value("moveSpeed", pc.moveSpeed);
+            pc.sprintSpeed = c.value("sprintSpeed", pc.sprintSpeed);
+            readNav(c, pc.nav);
+            pc.jumpHeight = c.value("jumpHeight", pc.jumpHeight);
+            pc.gravity = c.value("gravity", pc.gravity);
+            o.player = pc;
+        } else if (type == "navigation") {
+            NavigationComponent nc;
+            nc.agentHeight = c.value("agentHeight", nc.agentHeight);
+            nc.agentRadius = c.value("agentRadius", nc.agentRadius);
+            readNav(c, nc.nav);
+            if (c.contains("spawnAnchor") && !c["spawnAnchor"].is_null())
+                nc.spawnAnchor = c["spawnAnchor"].get<std::string>();
+            o.navigation = nc;
         } else {
             fail("object '" + o.name + "': unknown component type '" + type + "'");
         }
@@ -158,6 +208,25 @@ json writeObject(const Object& o) {
                          {"spotAngle", l.spotAngle},
                          {"innerSpotAngle", l.innerSpotAngle},
                          {"enabled", l.enabled}});
+    }
+    if (o.player) {
+        const PlayerComponent& pc = *o.player;
+        json pj = {{"type", "player"},
+                   {"playerHeight", pc.playerHeight},
+                   {"playerRadius", pc.playerRadius},
+                   {"moveSpeed", pc.moveSpeed},
+                   {"sprintSpeed", pc.sprintSpeed}};
+        writeNav(pj, pc.nav);
+        pj["jumpHeight"] = pc.jumpHeight;
+        pj["gravity"] = pc.gravity;
+        comps.push_back(pj);
+    }
+    if (o.navigation) {
+        const NavigationComponent& nc = *o.navigation;
+        json nj = {{"type", "navigation"}, {"agentHeight", nc.agentHeight}, {"agentRadius", nc.agentRadius}};
+        writeNav(nj, nc.nav);
+        nj["spawnAnchor"] = nc.spawnAnchor.empty() ? json(nullptr) : json(nc.spawnAnchor);
+        comps.push_back(nj);
     }
     j["components"] = comps;
     json kids = json::array();

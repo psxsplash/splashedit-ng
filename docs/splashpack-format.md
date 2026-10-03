@@ -153,6 +153,16 @@ Portal 20 B: `i32 ax = fp12(a.x/gte), az = fp12(a.y/gte), bx, bz; u16 neighborRe
 `boundaryEdgeMask` exists in `NavRegionExport` but is **not** written. Reader: `NavRegion` 84 B, `NavPortal` 20 B, `NavDataHeader` 8 B (R:navregion.hh), `initializeFromData` returns the advanced cursor.
 Content is produced by a full DotRecast (Recast port) voxelisation pipeline on geometry of exporters with `CollisionType` Static (downward-facing world triangles `normal.y < 0` are dropped), parameters from `PSXNavigationSettings` or `PSXPlayer`; start region = region whose centroid (+plane Y) is closest to spawn.
 
+Port in `core/navregion.cpp` (C++ recastnavigation, built from the upstream commit the 2.4.0
+DotRecast build was synced to): geometry collection, the full Recast pipeline with the same
+parameter conversions, region extraction and winding, plane fit, portals, room assignment by
+portal connectivity, platform flags (`collider.platform`), start region, and the binary layout
+above. Not ported: room assignment from `PSXRoom` volumes (rooms are not in the scene format, so
+every scene uses the connectivity fallback) and `PSXNavWalkoffZone` (no component; the walkoff mask
+only gets platform bits). The multi-step float expressions in the builder's own code are evaluated
+in double, as Unity's Mono does; DotRecast's internals are not, so float-order differences inside
+Recast stay possible on sloped or rotated geometry. Checked against Unity on one flat region only.
+
 ### 2.9 Rooms/portals (only if roomCount>0, i.e. interior with >=1 PSXRoom) - `AlignToFourBytes` first
 Order: `(rooms+1)` x RoomData(36) | `portalCount` x PortalData(40) | `roomTriRefCount` x TriRef(4) | `roomCellCount` x RoomCell(28) | `roomPortalRefCount` x RoomPortalRef(4). Reader reads exactly in this order (cells and portal refs only if their counts >0).
 - RoomData: `i32 aabb x6 (PS1 space, Y negated+swapped; room AABB from PSXRoom.GetWorldBounds); u16 firstTriRef; u16 triRefCount; u16 firstCell; u8 cellCount; u8 portalRefCount; u16 firstPortalRef; u16 pad=0`. Last entry is the catch-all room: AABB = fp12(-1000/gte) x3 .. fp12(1000/gte) x3 (note: min Y written as `-1000/gte`, max Y `+1000/gte`).
