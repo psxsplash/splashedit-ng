@@ -61,7 +61,8 @@ bool GameView::attach(int64_t pid) {
     m_handle = h;
     m_size = info.RegionSize;
 #else
-    int fd = shm_open(("/" + name).c_str(), O_RDWR, 0);
+    // Same name redux passes to shm_open, no leading slash, so both sides agree on macOS.
+    int fd = shm_open(name.c_str(), O_RDWR, 0);
     if (fd < 0) return false;
     struct stat st;
     if (fstat(fd, &st) != 0) {
