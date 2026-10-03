@@ -170,6 +170,21 @@ json writeNavigation(const NavigationComponent& nc) {
     return j;
 }
 
+json writeTrigger(const TriggerComponent& t) {
+    json j = {{"type", "trigger"}, {"size", vec3(t.size)}, {"lua", t.lua.empty() ? json(nullptr) : json(t.lua)}};
+    putExtras(j, t.extra);
+    return j;
+}
+
+json writeInteractable(const InteractableComponent& it) {
+    json j = {{"type", "interactable"},       {"radius", it.radius},
+              {"button", it.button},           {"repeatable", it.repeatable},
+              {"cooldownFrames", it.cooldownFrames}, {"showPrompt", it.showPrompt},
+              {"promptCanvas", it.promptCanvas}, {"lineOfSight", it.lineOfSight}};
+    putExtras(j, it.extra);
+    return j;
+}
+
 Object readObject(const json& j) {
     Object o;
     o.name = j.at("name").get<std::string>();
@@ -248,6 +263,24 @@ Object readObject(const json& j) {
                 nc.spawnAnchor = c["spawnAnchor"].get<std::string>();
             nc.extra = extrasOf(c, writeNavigation(nc));
             o.navigation = nc;
+        } else if (type == "trigger") {
+            TriggerComponent t;
+            if (c.contains("size")) t.size = vec3(c["size"]);
+            if (c.contains("lua") && !c["lua"].is_null()) t.lua = c["lua"].get<std::string>();
+            t.extra = extrasOf(c, writeTrigger(t));
+            o.trigger = t;
+        } else if (type == "interactable") {
+            InteractableComponent it;
+            it.radius = c.value("radius", it.radius);
+            it.button = c.value("button", it.button);
+            if (it.button < 0 || it.button > 15) fail("object '" + o.name + "': interactable button must be 0..15");
+            it.repeatable = c.value("repeatable", it.repeatable);
+            it.cooldownFrames = c.value("cooldownFrames", it.cooldownFrames);
+            it.showPrompt = c.value("showPrompt", it.showPrompt);
+            it.promptCanvas = c.value("promptCanvas", it.promptCanvas);
+            it.lineOfSight = c.value("lineOfSight", it.lineOfSight);
+            it.extra = extrasOf(c, writeInteractable(it));
+            o.interactable = it;
         } else {
             o.unknownComponents.push_back(c.dump());
         }
@@ -272,6 +305,8 @@ json writeObject(const Object& o) {
     if (o.light) comps.push_back(writeLight(*o.light));
     if (o.player) comps.push_back(writePlayer(*o.player));
     if (o.navigation) comps.push_back(writeNavigation(*o.navigation));
+    if (o.trigger) comps.push_back(writeTrigger(*o.trigger));
+    if (o.interactable) comps.push_back(writeInteractable(*o.interactable));
     for (const std::string& c : o.unknownComponents) comps.push_back(json::parse(c));
     j["components"] = comps;
     json kids = json::array();

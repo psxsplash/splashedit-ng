@@ -1,6 +1,8 @@
 #include "splashpack.hh"
 
 #include <algorithm>
+#include <cfloat>
+#include <cstring>
 #include <deque>
 #include <fstream>
 #include <map>
@@ -435,9 +437,18 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     auto addLua = [&](const std::string& p) {
         if (!p.empty() && std::find(luaFiles.begin(), luaFiles.end(), p) == luaFiles.end()) luaFiles.push_back(p);
     };
+    // Trigger boxes and interactables: active objects only (FindObjectsByType
+    // skips inactive ones), in canonical order.
+    std::vector<const FlatObject*> triggers, interactables;
+    for (const FlatObject& fo : flat) {
+        if (!fo.activeInHierarchy || !fo.object->active) continue;
+        if (fo.object->trigger) triggers.push_back(&fo);
+        if (fo.object->interactable) interactables.push_back(&fo);
+    }
     for (ExpObject& e : exporters)
         if (e.obj->script) addLua(e.obj->script->lua);
     addLua(scene.settings.script);
+    for (const FlatObject* t : triggers) addLua(t->object->trigger->lua);
     std::vector<std::string> luaData;
     for (const std::string& p : luaFiles) {
         try {
@@ -563,7 +574,7 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     w.u16(uint16_t(vram.atlases.size()));
     w.u16(uint16_t(clutCount));
     w.u16(uint16_t(colliderCount));
-    w.u16(0);  // interactables
+    w.u16(uint16_t(interactables.size()));
     w.i16(toPsxCoord(playerPos.x, gte));
     w.i16(toPsxCoord(-playerPos.y, gte));
     w.i16(toPsxCoord(playerPos.z, gte));
@@ -578,7 +589,7 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     w.u16(uint16_t(std::min<size_t>(bvh.nodes.size(), 65535)));
     w.u16(uint16_t(std::min<size_t>(bvh.refs.size(), 65535)));
     w.u16(uint16_t(scene.settings.sceneType));
-    w.u16(0);  // trigger boxes
+    w.u16(uint16_t(triggers.size()));
     w.u16(0);  // world collision mesh count (removed)
     w.u16(0);  // world collision tri count (removed)
     w.u16(uint16_t(nav.regions.size()));
@@ -652,7 +663,11 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
         w.u16(uint16_t(e.tris.size()));
         w.i16(e.obj->script ? luaIndex(e.obj->script->lua) : int16_t(-1));
         w.u32(e.obj->active ? 1 : 0);
-        w.u16(0xFFFF);  // interactable
+        {
+            auto it = std::find_if(interactables.begin(), interactables.end(),
+                                   [&](const FlatObject* fo) { return fo->object == e.obj; });
+            w.u16(it == interactables.end() ? 0xFFFF : uint16_t(it - interactables.begin()));
+        }
         w.u16(0);       // uv offset (legacy)
         w.u32(0);       // event mask
         writeWorldAabb(w, e.flat->localToWorld, e.mesh->bounds(), gte);
@@ -666,6 +681,28 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
         w.u8(1);
         w.u8(0xFF);
         w.u16(uint16_t(i));
+        w.u32(0);
+    }
+
+    // ---- trigger boxes (32 bytes): world AABB of the transformed box
+    for (const FlatObject* fo : triggers) {
+        const TriggerComponent& t = *fo->object->trigger;
+        Vec3 half = t.size * 0.5f;
+        Vec3 mn{FLT_MAX, FLT_MAX, FLT_MAX}, mx{-FLT_MAX, -FLT_MAX, -FLT_MAX};
+        for (int i = 0; i < 8; i++) {
+            Vec3 c{(i & 1) ? half.x : -half.x, (i & 2) ? half.y : -half.y, (i & 4) ? half.z : -half.z};
+            Vec3 p = fo->localToWorld.point(c);
+            mn = vmin(mn, p);
+            mx = vmax(mx, p);
+        }
+        w.i32(toWorldFixed12(mn.x / gte));
+        w.i32(toWorldFixed12(-mx.y / gte));
+        w.i32(toWorldFixed12(mn.z / gte));
+        w.i32(toWorldFixed12(mx.x / gte));
+        w.i32(toWorldFixed12(-mn.y / gte));
+        w.i32(toWorldFixed12(mx.z / gte));
+        w.i16(t.lua.empty() ? int16_t(-1) : luaIndex(t.lua));
+        w.u16(0);
         w.u32(0);
     }
 
@@ -689,8 +726,24 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
         w.u16(r.triangleIndex);
     }
 
-    // ---- interactables (none yet)
+    // ---- interactables (28 bytes)
     w.align4();
+    for (const FlatObject* fo : interactables) {
+        const InteractableComponent& it = *fo->object->interactable;
+        // 2.4.0 needs a PSXObjectExporter on the same object; without a mesh
+        // here the index is 0xFFFF.
+        auto ex = std::find_if(exporters.begin(), exporters.end(),
+                               [&](const ExpObject& e) { return e.obj == fo->object; });
+        w.i32(toWorldFixed12(it.radius * it.radius / (gte * gte)));
+        w.u8(uint8_t(it.button));
+        w.u8(uint8_t((it.repeatable ? 1 : 0) | (it.showPrompt ? 2 : 0) | (it.lineOfSight ? 4 : 0)));
+        w.u16(it.cooldownFrames);
+        w.u16(0);  // current cooldown (runtime)
+        w.u16(ex == exporters.end() ? 0xFFFF : uint16_t(ex - exporters.begin()));
+        char name[16] = {};
+        std::memcpy(name, it.promptCanvas.data(), std::min<size_t>(it.promptCanvas.size(), 15));
+        for (char ch : name) w.u8(uint8_t(ch));
+    }
 
     // ---- nav regions
     if (!nav.regions.empty()) {
