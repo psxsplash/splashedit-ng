@@ -49,6 +49,29 @@ else()
     target_compile_options(make_example PRIVATE -Wall -Wextra)
 endif()
 
+# The editor's document model (history, picking): no SDL or GL, so it builds
+# and tests headless, also with SPLASHEDIT_BUILD_EDITOR off.
+add_library(splasheditdoc STATIC
+    src/editor/document.cpp
+    src/editor/pick.cpp)
+target_include_directories(splasheditdoc PUBLIC src)
+target_link_libraries(splasheditdoc PUBLIC splashcore)
+if(MSVC)
+    target_compile_options(splasheditdoc PRIVATE /W4 /utf-8)
+else()
+    target_compile_options(splasheditdoc PRIVATE -Wall -Wextra)
+endif()
+
+enable_testing()
+add_executable(editor_tests src/editor/tests/editor_tests.cpp)
+target_link_libraries(editor_tests PRIVATE splasheditdoc)
+if(MSVC)
+    target_compile_options(editor_tests PRIVATE /W4 /utf-8)
+else()
+    target_compile_options(editor_tests PRIVATE -Wall -Wextra)
+endif()
+add_test(NAME editor_tests COMMAND editor_tests)
+
 if(NOT SPLASHEDIT_BUILD_EDITOR)
     return()
 endif()
@@ -101,11 +124,10 @@ add_executable(splashedit
     src/ui/theme.cpp
     src/ui/widgets.cpp
     src/viewport/ps1view.cpp
-    src/mockup/main_screen.cpp
-    src/editor/document.cpp)
+    src/mockup/main_screen.cpp)
 target_include_directories(splashedit PRIVATE src)
 target_include_directories(splashedit SYSTEM PRIVATE ${stb_SOURCE_DIR})
-target_link_libraries(splashedit PRIVATE imgui splashcore)
+target_link_libraries(splashedit PRIVATE imgui splasheditdoc splashcore)
 target_compile_definitions(splashedit PRIVATE SPLASHEDIT_ASSET_DIR="${CMAKE_CURRENT_SOURCE_DIR}/assets"
     SPLASHEDIT_EXAMPLE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/examples/courtyard")
 if(WIN32)

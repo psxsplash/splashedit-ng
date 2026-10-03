@@ -1,11 +1,14 @@
 #include "mockup/main_screen.h"
 
+#include <algorithm>
 #include <array>
+#include <iterator>
 #include <cfloat>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <functional>
 #include <map>
 #include <optional>
 #include <string>
@@ -65,7 +68,7 @@ static void windowControls(ImDrawList* dl, ImRect bar) {
     }
 }
 
-static ImRect titleBar(State& st, ImDrawList* dl, ImVec2 size, const editor::Document& doc) {
+static ImRect titleBar(State& st, ImDrawList* dl, ImVec2 size, editor::Document& doc) {
     Fonts& f = fonts();
     ImRect bar(ImVec2(0, 0), ImVec2(size.x, size::titleBar));
     dl->AddRectFilled(bar.Min, bar.Max, color::chrome);
@@ -100,7 +103,7 @@ static ImRect titleBar(State& st, ImDrawList* dl, ImVec2 size, const editor::Doc
     const char* stem = doc.sceneStem().c_str();
     text(dl, ImVec2(x, ty), f.medium, type::body, color::text, stem);
     x += measure(f.medium, type::body, stem).x + space::sm;
-    dl->AddCircleFilled(ImVec2(x + 3, bar.GetCenter().y + 1), 3, color::textFaint, 12);
+    if (doc.dirty()) dl->AddCircleFilled(ImVec2(x + 3, bar.GetCenter().y + 1), 3, color::textFaint, 12);
 
     // The three actions a user takes every minute, centred.
     float wPlay = 0, wRun = 0, wExport = 0;
@@ -122,8 +125,12 @@ static ImRect titleBar(State& st, ImDrawList* dl, ImVec2 size, const editor::Doc
 
     // Undo / redo just left of the window controls.
     float rx = size.x - 46 * 3 - space::sm;
-    iconButton("redo", ImRect(ImVec2(rx - 30, bar.Min.y + 6), ImVec2(rx, bar.Max.y - 6)), icon::redo, false, "Redo (Ctrl+Y)");
-    iconButton("undo", ImRect(ImVec2(rx - 62, bar.Min.y + 6), ImVec2(rx - 32, bar.Max.y - 6)), icon::undo, false, "Undo (Ctrl+Z)");
+    if (iconButton("redo", ImRect(ImVec2(rx - 30, bar.Min.y + 6), ImVec2(rx, bar.Max.y - 6)), icon::redo, false, "Redo (Ctrl+Y)",
+                   color::textDim, doc.canRedo()))
+        doc.redo();
+    if (iconButton("undo", ImRect(ImVec2(rx - 62, bar.Min.y + 6), ImVec2(rx - 32, bar.Max.y - 6)), icon::undo, false, "Undo (Ctrl+Z)",
+                   color::textDim, doc.canUndo()))
+        doc.undo();
     windowControls(dl, bar);
     (void)st;
     return bar;
@@ -147,9 +154,11 @@ static std::string fileName(const std::string& projectPath) {
 }
 
 struct TreeCtx {
+    State& st;
     editor::Document& doc;
     ImRect panel;
     float y;
+    bool renameShown = false;
 };
 
 // Clicks left of the chevron's right edge toggle; anywhere else selects.
@@ -185,6 +194,21 @@ static void treeObjects(TreeCtx& c, const std::vector<splash::Object>& objs, edi
             if (row.hasChildren && chevronClicked(rr, row.depth)) c.doc.toggleExpanded(path);
             else c.doc.select(path);
         }
+        // F2: the label becomes a text field.
+        if (c.st.renaming && c.st.renamePath == path) {
+            c.renameShown = true;
+            if (c.st.renameStart) {
+                beginTextEdit("rename", o.name);
+                c.st.renameStart = false;
+            }
+            float lx = rr.Min.x + space::xs + row.depth * 16.0f + 16 + 22;
+            ImRect field(ImVec2(lx - space::xs - 2, rr.Min.y + 2), ImVec2(rr.Max.x - 2, rr.Max.y - 2));
+            std::string typed;
+            TextEdit res = textEdit("rename", field, fonts().medium, type::body, lx, field.Max.x - space::xs, &typed);
+            if (res == TextEdit::Commit && !typed.empty() && typed != o.name)
+                c.doc.edit(path, [&](splash::Object& ob) { ob.name = typed; });
+            if (res != TextEdit::Editing) c.st.renaming = false;
+        }
         c.y += size::row;
         if (row.hasChildren && open) treeObjects(c, o.children, path);
         ImGui::PopID();
@@ -192,7 +216,7 @@ static void treeObjects(TreeCtx& c, const std::vector<splash::Object>& objs, edi
     }
 }
 
-static void sceneTree(ImDrawList* dl, ImRect r, editor::Document& doc) {
+static void sceneTree(State& st, ImDrawList* dl, ImRect r, editor::Document& doc) {
     panel(dl, r);
     std::string count = std::to_string(doc.objectCount()) + (doc.objectCount() == 1 ? " object" : " objects");
     float y = panelHeader(dl, r, "Scene", count.c_str());
@@ -214,9 +238,10 @@ static void sceneTree(ImDrawList* dl, ImRect r, editor::Document& doc) {
         if (top.hasChildren && chevronClicked(rr, 0)) doc.toggleExpanded(root);
         else doc.select(std::nullopt);
     }
-    TreeCtx ctx{doc, r, y + size::row};
+    TreeCtx ctx{st, doc, r, y + size::row};
     editor::ObjectPath path;
     if (rootOpen) treeObjects(ctx, doc.scene().objects, path);
+    if (st.renaming && !ctx.renameShown) st.renaming = false;  // the row is collapsed away or gone
     ImGui::PopClipRect();
 
     // Footer: the project's folder, collapsed.
@@ -224,39 +249,6 @@ static void sceneTree(ImDrawList* dl, ImRect r, editor::Document& doc) {
     std::string files = std::to_string(doc.projectFileCount()) + (doc.projectFileCount() == 1 ? " file" : " files");
     TreeRow assets{0, icon::folder, kind::folder, "Assets", files.c_str(), true, false};
     treeRow("assets", ImRect(ImVec2(foot.Min.x + 6, foot.Min.y + 7), ImVec2(foot.Max.x - 6, foot.Max.y - 7)), assets);
-}
-
-static void moveGizmo(ImDrawList* dl, viewport::Ps1View& view, ImVec2 mn, ImVec2 sz, viewport::Vec3 o) {
-    ImVec2 c;
-    if (!view.project(o, mn, sz, &c)) return;
-    struct Axis {
-        viewport::Vec3 d;
-        ImU32 col;
-    } axes[3] = {{{1.4f, 0, 0}, color::axisX}, {{0, 1.4f, 0}, color::axisY}, {{0, 0, 1.4f}, color::axisZ}};
-    // Plane handles first so the arrows sit on top.
-    ImVec2 px, pz;
-    view.project({o.x + 0.45f, o.y, o.z}, mn, sz, &px);
-    view.project({o.x, o.y, o.z + 0.45f}, mn, sz, &pz);
-    ImVec2 pxz;
-    view.project({o.x + 0.45f, o.y, o.z + 0.45f}, mn, sz, &pxz);
-    ImVec2 quad[4] = {c, px, pxz, pz};
-    dl->AddConvexPolyFilled(quad, 4, rgb(0x7fcb55, 60));
-    dl->AddPolyline(quad, 4, rgb(0x7fcb55, 180), ImDrawFlags_Closed, 1.2f);
-    for (auto& a : axes) {
-        ImVec2 tip;
-        if (!view.project({o.x + a.d.x, o.y + a.d.y, o.z + a.d.z}, mn, sz, &tip)) continue;
-        ImVec2 dir = tip - c;
-        float len = std::sqrt(dir.x * dir.x + dir.y * dir.y);
-        if (len < 1) continue;
-        dir = dir * (1.0f / len);
-        ImVec2 n(-dir.y, dir.x);
-        dl->AddLine(c + dir * 10, tip - dir * 10, rgb(0x000000, 90), 4.5f);
-        dl->AddLine(c + dir * 10, tip - dir * 10, a.col, 2.5f);
-        ImVec2 head[3] = {tip + dir * 6, tip - dir * 10 + n * 6, tip - dir * 10 - n * 6};
-        dl->AddTriangleFilled(head[0], head[1], head[2], a.col);
-    }
-    dl->AddCircleFilled(c, 6, rgb(0xf4f5f8), 20);
-    dl->AddCircle(c, 6, rgb(0x000000, 90), 20, 1.5f);
 }
 
 static void selectionOutline(ImDrawList* dl, viewport::Ps1View& view, ImVec2 mn, ImVec2 sz, viewport::Vec3 a, viewport::Vec3 b) {
@@ -269,23 +261,41 @@ static void selectionOutline(ImDrawList* dl, viewport::Ps1View& view, ImVec2 mn,
     for (auto& ed : e) dl->AddLine(s[ed[0]], s[ed[1]], rgb(0xb3a8ff, 230), 1.5f);
 }
 
-static void sceneIcon(ImDrawList* dl, viewport::Ps1View& view, ImVec2 mn, ImVec2 sz, viewport::Vec3 p, const char* ic, ImU32 col) {
+// A clickable marker for an object without geometry. Returns true when clicked.
+static bool sceneIcon(ImDrawList* dl, viewport::Ps1View& view, ImVec2 mn, ImVec2 sz, viewport::Vec3 p, const char* ic, ImU32 col) {
     ImVec2 c;
-    if (!view.project(p, mn, sz, &c)) return;
+    if (!view.project(p, mn, sz, &c)) return false;
+    if (!ImRect(mn, mn + sz).Contains(c)) return false;
+    Hit h = interact("marker", ImRect(c - ImVec2(13, 13), c + ImVec2(13, 13)));
     dl->AddCircleFilled(c, 13, rgb(0x0e1014, 200), 24);
-    dl->AddCircle(c, 13, col & 0x90ffffff, 24, 1.2f);
+    // The ring brightens on hover.
+    ImU32 ringA = (ImU32)(0x90 + (0xff - 0x90) * h.hover);
+    dl->AddCircle(c, 13, (col & 0x00ffffffu) | (ringA << IM_COL32_A_SHIFT), 24, 1.2f + 0.6f * h.hover);
     textCentered(dl, ImRect(c - ImVec2(13, 13), c + ImVec2(13, 13)), fonts().medium, type::icon - 1, col, ic);
+    return h.clicked;
 }
 
-static void axisWidget(ImDrawList* dl, ImVec2 c) {
+static void axisWidget(ImDrawList* dl, ImVec2 c, const viewport::Ps1View& view) {
     Fonts& f = fonts();
     dl->AddCircleFilled(c, 34, rgb(0x0e1014, 140), 40);
-    // Screen-space directions matching the mockup camera.
+    // Unity's axes (Z negated into GL) as the camera sees them.
+    viewport::Vec3 s, u, fw;
+    view.basis(&s, &u, &fw);
     struct A {
         ImVec2 d;
         ImU32 col;
         const char* l;
-    } axes[3] = {{{0.62f, 0.32f}, color::axisX, "X"}, {{0.0f, -0.82f}, color::axisY, "Y"}, {{-0.66f, 0.30f}, color::axisZ, "Z"}};
+        float depth;
+    } axes[3];
+    const viewport::Vec3 w[3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, -1}};
+    const ImU32 cols[3] = {color::axisX, color::axisY, color::axisZ};
+    const char* labels[3] = {"X", "Y", "Z"};
+    for (int i = 0; i < 3; ++i) {
+        auto d3 = [&](viewport::Vec3 a, viewport::Vec3 b) { return a.x * b.x + a.y * b.y + a.z * b.z; };
+        axes[i] = {ImVec2(d3(w[i], s), -d3(w[i], u)) * 0.82f, cols[i], labels[i], d3(w[i], fw)};
+    }
+    // Far axes first, so the nearer ones overlap them.
+    std::sort(std::begin(axes), std::end(axes), [](const A& a, const A& b) { return a.depth > b.depth; });
     for (auto& a : axes) {
         ImVec2 tip = c + a.d * 24;
         dl->AddLine(c, tip, a.col, 2);
@@ -298,6 +308,192 @@ static void axisWidget(ImDrawList* dl, ImVec2 c) {
 // Scene data is Unity-space (Y-up, left-handed, +Z into the back wall); the
 // renderer is right-handed GL, so world points cross over by negating Z.
 static viewport::Vec3 toGl(splash::Vec3 p) { return {p.x, p.y, -p.z}; }
+
+static float distToSegment(ImVec2 p, ImVec2 a, ImVec2 b) {
+    ImVec2 ab = b - a, ap = p - a;
+    float len2 = ab.x * ab.x + ab.y * ab.y;
+    float t = len2 > 0 ? std::clamp((ap.x * ab.x + ap.y * ab.y) / len2, 0.0f, 1.0f) : 0.0f;
+    ImVec2 d = ap - ab * t;
+    return std::sqrt(d.x * d.x + d.y * d.y);
+}
+
+// Inside a convex quad, either winding.
+static bool inQuad(ImVec2 p, const ImVec2 q[4]) {
+    int pos = 0, neg = 0;
+    for (int i = 0; i < 4; ++i) {
+        ImVec2 a = q[i], b = q[(i + 1) % 4];
+        float c = (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x);
+        (c >= 0 ? pos : neg)++;
+    }
+    return pos == 0 || neg == 0;
+}
+
+// Maps a world-space offset into the local space of an object whose parent
+// has `parentToWorld` (the inverse of its 3x3 part). Identity when singular.
+static splash::Vec3 worldToParentDelta(const splash::Mat34* parentToWorld, splash::Vec3 d) {
+    if (!parentToWorld) return d;
+    const float(*m)[4] = parentToWorld->m;
+    float a = m[0][0], b = m[0][1], c = m[0][2], e = m[1][0], f = m[1][1], g = m[1][2], h = m[2][0], i = m[2][1], k = m[2][2];
+    float det = a * (f * k - g * i) - b * (e * k - g * h) + c * (e * i - f * h);
+    if (std::fabs(det) < 1e-12f) return d;
+    float inv = 1.0f / det;
+    return {((f * k - g * i) * d.x + (c * i - b * k) * d.y + (b * g - c * f) * d.z) * inv,
+            ((g * h - e * k) * d.x + (a * k - c * h) * d.y + (c * e - a * g) * d.z) * inv,
+            ((e * i - f * h) * d.x + (b * h - a * i) * d.y + (a * f - b * e) * d.z) * inv};
+}
+
+static float& component(splash::Vec3& v, int i) { return i == 0 ? v.x : i == 1 ? v.y : v.z; }
+
+// Where the mouse ray meets the horizontal plane at height `y` (Unity space).
+static bool mouseOnPlaneY(const viewport::Ps1View& view, ImRect r, float y, splash::Vec3* hit) {
+    viewport::Vec3 o, d;
+    view.ray(ImGui::GetIO().MousePos, r.Min, r.GetSize(), &o, &d);
+    if (std::fabs(d.y) < 1e-4f) return false;
+    float t = (y - o.y) / d.y;
+    if (t <= 0) return false;
+    *hit = {o.x + d.x * t, o.y + d.y * t, -(o.z + d.z * t)};
+    return true;
+}
+
+// The move gizmo: three world-axis arrows and an XZ plane handle, a fixed
+// size on screen. Dragging an arrow moves along it by the mouse motion
+// projected onto the arrow; dragging the plane follows the mouse across the
+// horizontal plane through the object. One drag is one undo step.
+static void moveGizmo(State& st, ImDrawList* dl, viewport::Ps1View& view, ImRect r, editor::Document& doc, const splash::FlatObject& fo,
+                      const splash::Mat34* parentToWorld) {
+    ImGuiContext& g = *GImGui;
+    ImGuiIO& io = ImGui::GetIO();
+    const ImGuiID gid = ImGui::GetID("##gizmo");
+    ImVec2 mn = r.Min, sz = r.GetSize();
+    State::GizmoDrag& drag = st.gizmo;
+    const bool active = g.ActiveId == gid && drag.handle >= 0;
+    if (active) ImGui::KeepAliveID(gid);
+
+    // Handle geometry, sized from the object's depth so it stays ~76 px long.
+    const splash::Vec3 wpos = fo.localToWorld.position();
+    const viewport::Vec3 o = toGl(wpos);
+    viewport::Vec3 right, up, fwd, eye = view.eye();
+    view.basis(&right, &up, &fwd);
+    float depth = (o.x - eye.x) * fwd.x + (o.y - eye.y) * fwd.y + (o.z - eye.z) * fwd.z;
+    ImVec2 c;
+    bool visible = depth > 0.05f && view.project(o, mn, sz, &c);
+    const splash::Vec3 axisDirs[3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
+    const ImU32 axisCols[3] = {color::axisX, color::axisY, color::axisZ};
+    float len = 76.0f * 2 * depth * std::tan(viewport::Ps1View::kFovY * 0.5f) / sz.y;
+    ImVec2 tips[3];
+    bool tipOk[3] = {};
+    ImVec2 quad[4];
+    bool quadOk = false;
+    if (visible) {
+        for (int i = 0; i < 3; ++i) {
+            viewport::Vec3 t = toGl(wpos + axisDirs[i] * len);
+            tipOk[i] = view.project(t, mn, sz, &tips[i]);
+            if (tipOk[i]) {
+                ImVec2 d = tips[i] - c;
+                tipOk[i] = d.x * d.x + d.y * d.y >= 1;
+            }
+        }
+        const float pl = len * 0.32f;
+        quadOk = view.project(toGl(wpos + splash::Vec3{pl, 0, 0}), mn, sz, &quad[1]) &&
+                 view.project(toGl(wpos + splash::Vec3{pl, 0, pl}), mn, sz, &quad[2]) &&
+                 view.project(toGl(wpos + splash::Vec3{0, 0, pl}), mn, sz, &quad[3]);
+        quad[0] = c;
+    }
+
+    // Hover: arrows over the plane, nearest arrow wins.
+    int hover = -1;
+    if (visible && !active && g.ActiveId == 0 && g.HoveredId == 0 && ImGui::IsWindowHovered() && r.Contains(io.MousePos)) {
+        float best = 7.0f;
+        for (int i = 0; i < 3; ++i) {
+            if (!tipOk[i]) continue;
+            ImVec2 d = tips[i] - c;
+            d = d * (1.0f / std::sqrt(d.x * d.x + d.y * d.y));
+            float dist = distToSegment(io.MousePos, c + d * 8, tips[i] + d * 6);
+            if (dist < best) best = dist, hover = i;
+        }
+        if (hover < 0 && quadOk && inQuad(io.MousePos, quad)) hover = 3;
+        if (hover < 0 && distToSegment(io.MousePos, c, c) < 7) hover = 3;  // the centre dot also moves in XZ
+    }
+    if (hover >= 0) {
+        ImGui::SetHoveredID(gid);
+        if (ImGui::IsMouseClicked(0)) {
+            drag.handle = hover;
+            drag.startMouse = io.MousePos;
+            drag.startWorld = wpos;
+            drag.startLocal = fo.object->transform.position;
+            bool ok = true;
+            if (hover < 3) {
+                ImVec2 d = tips[hover] - c;
+                float l = std::sqrt(d.x * d.x + d.y * d.y);
+                drag.axisDir = d * (1.0f / l);
+                drag.pxPerUnit = l / len;
+            } else {
+                ok = mouseOnPlaneY(view, r, wpos.y, &drag.startHit);
+            }
+            if (ok) {
+                ImGui::SetActiveID(gid, g.CurrentWindow);
+                doc.endMerge();  // a new drag never merges into an earlier edit
+            } else {
+                drag.handle = -1;
+            }
+        }
+    }
+
+    // Drag.
+    if (g.ActiveId == gid && drag.handle >= 0) {
+        if (ImGui::IsMouseDown(0)) {
+            splash::Vec3 nw = drag.startWorld;
+            bool moved = true;
+            if (drag.handle < 3) {
+                ImVec2 m = io.MousePos - drag.startMouse;
+                component(nw, drag.handle) += (m.x * drag.axisDir.x + m.y * drag.axisDir.y) / drag.pxPerUnit;
+            } else {
+                splash::Vec3 hit;
+                moved = mouseOnPlaneY(view, r, drag.startWorld.y, &hit);
+                nw.x += hit.x - drag.startHit.x;
+                nw.z += hit.z - drag.startHit.z;
+            }
+            // Snap the moved world coordinates to the grid.
+            if (moved && (st.snap || io.KeyCtrl)) {
+                const float step = 0.25f;
+                for (int i = 0; i < 3; ++i)
+                    if (drag.handle == i || (drag.handle == 3 && i != 1)) component(nw, i) = std::round(component(nw, i) / step) * step;
+            }
+            splash::Vec3 local = drag.startLocal + worldToParentDelta(parentToWorld, nw - drag.startWorld);
+            if (moved && doc.selection() && !(local == fo.object->transform.position))
+                doc.edit(*doc.selection(), [&](splash::Object& ob) { ob.transform.position = local; }, "gizmo.move");
+            ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
+        } else {
+            doc.endMerge();
+            ImGui::ClearActiveID();
+            drag.handle = -1;
+        }
+    }
+
+    if (!visible) return;
+    // Draw: plane first so the arrows sit on top. Hover and drag brighten and thicken.
+    const int lit = drag.handle >= 0 && g.ActiveId == gid ? drag.handle : hover;
+    float t[4];
+    for (int i = 0; i < 4; ++i) t[i] = anim(gid + 1 + (ImGuiID)i, lit == i);
+    if (quadOk) {
+        ImU32 fill = lerpColor(rgb(0x7fcb55, 60), rgb(0x9be070, 110), t[3]);
+        dl->AddConvexPolyFilled(quad, 4, fill);
+        dl->AddPolyline(quad, 4, lerpColor(rgb(0x7fcb55, 180), rgb(0xd4f5bf, 255), t[3]), ImDrawFlags_Closed, 1.2f + 1.0f * t[3]);
+    }
+    for (int i = 0; i < 3; ++i) {
+        if (!tipOk[i]) continue;
+        ImVec2 dir = tips[i] - c;
+        dir = dir * (1.0f / std::sqrt(dir.x * dir.x + dir.y * dir.y));
+        ImVec2 n(-dir.y, dir.x);
+        ImU32 col = lerpColor(axisCols[i], rgb(0xffffff), 0.35f * t[i]);
+        float wdt = 2.5f + 1.5f * t[i], head = 6 + 2 * t[i];
+        dl->AddLine(c + dir * 10, tips[i] - dir * 10, rgb(0x000000, 90), wdt + 2);
+        dl->AddLine(c + dir * 10, tips[i] - dir * 10, col, wdt);
+        dl->AddTriangleFilled(tips[i] + dir * head, tips[i] - dir * 10 + n * head, tips[i] - dir * 10 - n * head, col);
+    }
+    dl->AddCircleFilled(c, 6, rgb(0xf4f5f8), 20);
+    dl->AddCircle(c, 6, rgb(0x000000, 90), 20, 1.5f);
+}
 
 // Local-space bounds of a mesh, loaded and cached by project path. Empty when
 // the mesh is missing or unreadable.
@@ -337,6 +533,70 @@ static void selectedBoxGl(const editor::Document& doc, const splash::FlatObject&
     *hi = toGl({p.x + 0.25f, p.y + 0.25f, p.z + 0.25f});
 }
 
+// GL-space bounds of the selection, or of the whole scene with nothing selected.
+static bool frameBounds(const editor::Document& doc, const viewport::Ps1View& view, const std::vector<splash::FlatObject>& flats,
+                        viewport::Vec3* lo, viewport::Vec3* hi) {
+    if (const splash::Object* sel = doc.selected())
+        for (const splash::FlatObject& fo : flats)
+            if (fo.object == sel) {
+                selectedBoxGl(doc, fo, lo, hi);
+                return true;
+            }
+    return view.sceneBounds(lo, hi);
+}
+
+// Mouse and keys over the viewport, registered after the overlays so the
+// toolbars, icons and gizmo take the mouse first. RMB orbits, MMB pans, the
+// wheel dollies, F frames. Effects show from the next frame's render.
+static void viewportInput(State& st, ImRect r, editor::Document& doc, viewport::Ps1View& view,
+                          const std::vector<splash::FlatObject>& flats) {
+    ImGuiIO& io = ImGui::GetIO();
+    ImGuiContext& g = *GImGui;
+    ImGuiID id = ImGui::GetID("##viewport");
+    ImGui::SetCursorScreenPos(r.Min);
+    ImGui::ItemSize(r.GetSize());
+    ImGui::ItemAdd(r, id);
+    bool hovered = ImGui::ItemHoverable(r, id, 0);
+    if (hovered && g.ActiveId == 0)
+        for (int b = 0; b < 3; ++b)
+            if (ImGui::IsMouseClicked(b)) {
+                ImGui::SetActiveID(id, g.CurrentWindow);
+                ImGui::FocusWindow(g.CurrentWindow);
+                st.vpButton = b;
+                st.vpDragged = false;
+                break;
+            }
+    if (g.ActiveId == id && st.vpButton >= 0) {
+        if (ImGui::IsMouseDown(st.vpButton)) {
+            if (ImGui::IsMouseDragPastThreshold(st.vpButton)) st.vpDragged = true;
+            if (st.vpDragged && (io.MouseDelta.x != 0 || io.MouseDelta.y != 0)) {
+                if (st.vpButton == 1) view.orbit(io.MouseDelta.x, io.MouseDelta.y);
+                if (st.vpButton == 2) view.pan(io.MouseDelta.x, io.MouseDelta.y, r.GetHeight());
+            }
+            if (st.vpButton != 0 && st.vpDragged) ImGui::SetMouseCursor(st.vpButton == 2 ? ImGuiMouseCursor_ResizeAll : ImGuiMouseCursor_Arrow);
+        } else {
+            // A left click that did not drag selects what is under the mouse, or clears the selection.
+            if (st.vpButton == 0 && !st.vpDragged && r.Contains(io.MousePos)) {
+                std::optional<int> hit = view.pick(io.MousePos, r.Min, r.GetSize());
+                std::vector<editor::ObjectPath> paths = doc.flatPaths();
+                if (hit && *hit >= 0 && (size_t)*hit < paths.size()) doc.select(paths[(size_t)*hit]);
+                else doc.select(std::nullopt);
+            }
+            ImGui::ClearActiveID();
+            st.vpButton = -1;
+        }
+    }
+    if (hovered && io.MouseWheel != 0) view.dolly(io.MouseWheel);
+    if (!io.WantTextInput && !io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_F, false)) {
+        viewport::Vec3 lo, hi;
+        if (frameBounds(doc, view, flats, &lo, &hi)) {
+            viewport::Vec3 c{(lo.x + hi.x) * 0.5f, (lo.y + hi.y) * 0.5f, (lo.z + hi.z) * 0.5f};
+            viewport::Vec3 e{(hi.x - lo.x) * 0.5f, (hi.y - lo.y) * 0.5f, (hi.z - lo.z) * 0.5f};
+            view.frame(c, std::sqrt(e.x * e.x + e.y * e.y + e.z * e.z));
+        }
+    }
+}
+
 static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document& doc, viewport::Ps1View& view) {
     Fonts& f = fonts();
     view.clean = st.viewMode == 1;
@@ -344,31 +604,19 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
     dl->AddImageRounded((ImTextureID)(intptr_t)tex, r.Min, r.Max, ImVec2(0, 1), ImVec2(1, 0), IM_COL32_WHITE, radius::window);
 
     ImVec2 mn = r.Min, sz = r.GetSize();
+    // Overlays follow the camera, so keep them inside the panel.
+    ImGui::PushClipRect(r.Min, r.Max, true);
     std::vector<splash::FlatObject> flats = splash::flatten(doc.scene());
     const splash::Object* sel = doc.selected();
-    // Icons: a lightbulb for lights, a generic marker for objects with neither
-    // mesh nor light (cameras, spawns, audio). Grouping nodes and
-    // script-only objects get none.
-    for (const splash::FlatObject& fo : flats) {
-        viewport::Vec3 p = toGl(fo.localToWorld.position());
-        if (fo.object->light)
-            sceneIcon(dl, view, mn, sz, p, icon::lightbulb, kind::light);
-        else if (!fo.object->mesh && fo.object->children.empty() && !fo.object->script)
-            sceneIcon(dl, view, mn, sz, p, icon::square, kind::folder);
-    }
-    // Selection outline and move gizmo follow the selected object.
-    if (sel) {
-        for (const splash::FlatObject& fo : flats)
-            if (fo.object == sel) {
-                viewport::Vec3 lo, hi;
-                selectedBoxGl(doc, fo, &lo, &hi);
-                selectionOutline(dl, view, mn, sz, lo, hi);
-                moveGizmo(dl, view, mn, sz, toGl(fo.localToWorld.position()));
-                break;
-            }
-    }
+
+    // The mouse goes to the first item that claims it, so items are submitted
+    // toolbars first, then the gizmo, then scene markers, then the viewport
+    // itself; channels keep the drawing in the opposite order.
+    enum { kScene, kGizmo, kChrome };
+    dl->ChannelsSplit(3);
 
     // Floating toolbars.
+    dl->ChannelsSetCurrent(kChrome);
     ImVec2 p = r.Min + ImVec2(space::md, space::md);
     float w = 0;
     ImRect tools(p, p + ImVec2(4 * 30 + 4, 32));
@@ -386,7 +634,9 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
     ImRect snap(ImVec2(tools.Max.x + space::sm, p.y), ImVec2(tools.Max.x + space::sm + 34, p.y + 32));
     dl->AddRectFilled(snap.Min, snap.Max, rgb(0x0e1014, 210), radius::button + 2);
     dl->AddRect(snap.Min, snap.Max, rgb(0xffffff, 14), radius::button + 2);
-    iconButton("snap", ImRect(snap.Min + ImVec2(2, 2), snap.Max - ImVec2(2, 2)), icon::magnet, true, "Snap to grid: 0.25 m");
+    if (iconButton("snap", ImRect(snap.Min + ImVec2(2, 2), snap.Max - ImVec2(2, 2)), icon::magnet, st.snap,
+                   st.snap ? "Snap to grid: 0.25 m" : "Snap to grid: off (hold Ctrl to snap to 0.25 m)"))
+        st.snap = !st.snap;
 
     // Right side: view mode and camera.
     float segW = 0;
@@ -400,8 +650,7 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
     ImVec2 rp(r.Max.x - space::md - segW - space::sm - camW, p.y + 2);
     dropdown("camera", ImRect(rp, rp + ImVec2(camW, 28)), icon::camera, "Perspective");
     st.viewMode = segmented("viewmode", ImVec2(rp.x + camW + space::sm, p.y + 2), {"PS1", "Clean"}, st.viewMode, &w);
-
-    axisWidget(dl, ImVec2(r.Max.x - 52, r.Min.y + 96));
+    axisWidget(dl, ImVec2(r.Max.x - 52, r.Min.y + 96), view);
 
     // Bottom-left chip describing what the edit view is showing.
     const char* info = st.viewMode == 0 ? "320 x 240  ·  15-bit dither  ·  affine" : "Clean view";
@@ -409,6 +658,48 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
     ImRect chip(ImVec2(r.Min.x + space::md, r.Max.y - space::md - 24), ImVec2(r.Min.x + space::md + is.x + 20, r.Max.y - space::md));
     dl->AddRectFilled(chip.Min, chip.Max, rgb(0x0e1014, 190), radius::pill);
     textCentered(dl, chip, f.regular, type::caption, color::textDim, info);
+
+    // Selection outline and move gizmo follow the selected object.
+    if (sel) {
+        for (const splash::FlatObject& fo : flats)
+            if (fo.object == sel) {
+                dl->ChannelsSetCurrent(kScene);
+                viewport::Vec3 lo, hi;
+                selectedBoxGl(doc, fo, &lo, &hi);
+                selectionOutline(dl, view, mn, sz, lo, hi);
+                dl->ChannelsSetCurrent(kGizmo);
+                if (st.tool == 1) {
+                    const splash::Object* par = doc.parent(*doc.selection());
+                    const splash::Mat34* parentToWorld = nullptr;
+                    for (const splash::FlatObject& pf : flats)
+                        if (par && pf.object == par) parentToWorld = &pf.localToWorld;
+                    moveGizmo(st, dl, view, r, doc, fo, parentToWorld);
+                }
+                break;
+            }
+    }
+
+    // Markers: a lightbulb for lights, a generic marker for objects with
+    // neither mesh nor light (cameras, spawns, audio). Grouping nodes and
+    // script-only objects get none. Clicking one selects its object.
+    dl->ChannelsSetCurrent(kScene);
+    std::vector<editor::ObjectPath> paths = doc.flatPaths();
+    for (size_t i = 0; i < flats.size(); ++i) {
+        const splash::FlatObject& fo = flats[i];
+        viewport::Vec3 pos = toGl(fo.localToWorld.position());
+        const char* ic = nullptr;
+        ImU32 col = 0;
+        if (fo.object->light) ic = icon::lightbulb, col = kind::light;
+        else if (!fo.object->mesh && fo.object->children.empty() && !fo.object->script) ic = icon::square, col = kind::folder;
+        if (!ic) continue;
+        ImGui::PushID((int)i);
+        if (sceneIcon(dl, view, mn, sz, pos, ic, col) && i < paths.size()) doc.select(paths[i]);
+        ImGui::PopID();
+    }
+    dl->ChannelsMerge();
+
+    viewportInput(st, r, doc, view, flats);
+    ImGui::PopClipRect();
 }
 
 // Fixed two decimals, as position and scale read in a column ("0.50").
@@ -447,6 +738,17 @@ static splash::Vec3 eulerDegrees(splash::Quat q) {
         ez = std::atan2(2 * (x * y + w * z), 1 - 2 * (x * x + z * z)) * kDeg;
     }
     return {static_cast<float>(ex), static_cast<float>(ey), static_cast<float>(ez)};
+}
+
+// Quaternion.Euler: rotates around Z, then X, then Y (degrees).
+static splash::Quat quatFromEuler(splash::Vec3 deg) {
+    const double h = 3.14159265358979323846 / 360.0;  // half angle, in radians per degree
+    double cx = std::cos(deg.x * h), sx = std::sin(deg.x * h);
+    double cy = std::cos(deg.y * h), sy = std::sin(deg.y * h);
+    double cz = std::cos(deg.z * h), sz = std::sin(deg.z * h);
+    // qY * qX * qZ
+    return {static_cast<float>(cy * sx * cz + sy * cx * sz), static_cast<float>(sy * cx * cz - cy * sx * sz),
+            static_cast<float>(cy * cx * sz - sy * sx * cz), static_cast<float>(cy * cx * cz + sy * sx * sz)};
 }
 
 static ImU32 toColor(const std::array<float, 3>& c) {
@@ -546,7 +848,24 @@ static void inspector(ImDrawList* dl, ImRect r, editor::Document& doc) {
     ImRect ic(ImVec2(x0, y), ImVec2(x0 + 40, y + 40));
     dl->AddRectFilled(ic.Min, ic.Max, (look.color & 0x00ffffffu) | (34u << IM_COL32_A_SHIFT), radius::card);
     textCentered(dl, ic, f.medium, type::icon + 3, look.color, look.icon);
-    text(dl, ImVec2(ic.Max.x + space::md, y + 2), f.semibold, type::title, color::text, o->name.c_str());
+    const editor::ObjectPath path = *doc.selection();
+    // Name: double-click to rename.
+    {
+        ImVec2 np(ic.Max.x + space::md, y + 2);
+        ImRect field(np - ImVec2(space::xs + 2, 2), ImVec2(x1 - 30 - space::md, np.y + 19));
+        std::string typed;
+        TextEdit res = textEdit("objname", field, f.semibold, type::title, np.x, field.Max.x - space::xs, &typed);
+        if (res == TextEdit::Inactive) {
+            ImVec2 ns = measure(f.semibold, type::title, o->name.c_str());
+            ImRect hit(np, np + ImVec2(std::max(ns.x, 40.0f), ns.y));
+            interact("objname", hit);
+            tooltip("Double-click to rename (F2)");
+            if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) beginTextEdit("objname", o->name);
+            text(dl, np, f.semibold, type::title, color::text, o->name.c_str());
+        } else if (res == TextEdit::Commit && !typed.empty() && typed != o->name) {
+            doc.edit(path, [&](splash::Object& ob) { ob.name = typed; });
+        }
+    }
     text(dl, ImVec2(ic.Max.x + space::md, y + 22), f.regular, type::caption, color::textFaint, where.c_str());
     toggle("objactive", ImRect(ImVec2(x1 - 30, y + 12), ImVec2(x1, y + 28)), o->active);
     y += 40 + space::lg;
@@ -578,12 +897,24 @@ static void inspector(ImDrawList* dl, ImRect r, editor::Document& doc) {
     float top = y;
     section("s_transform", ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), icon::move, color::textDim, "Transform", true, true, false);
     y += 34 + space::xs;
-    vec3Field("pos", row("lpos", "Position", "Where the object sits, in metres, relative to its parent."),
-              fmtFixed(t.position.x).c_str(), fmtFixed(t.position.y).c_str(), fmtFixed(t.position.z).c_str());
-    vec3Field("rot", row("lrot", "Rotation", "Rotation around each axis, in degrees."), fmtShort(e.x).c_str(), fmtShort(e.y).c_str(),
-              fmtShort(e.z).c_str());
-    vec3Field("scl", row("lscl", "Scale", "Size multiplier on each axis."), fmtFixed(t.scale.x).c_str(), fmtFixed(t.scale.y).c_str(),
-              fmtFixed(t.scale.z).c_str());
+    // Edits go through the history; a scrub merges into one step per field
+    // until it is released (FieldEdit::done).
+    auto commit = [&](const FieldEdit& fe, const std::string& key, const std::function<void(splash::Object&)>& fn) {
+        if (fe.changed) doc.edit(path, fn, key + "." + std::to_string(fe.index));
+        if (fe.done) doc.endMerge();
+    };
+    float pos[3] = {t.position.x, t.position.y, t.position.z};
+    FieldEdit fe = vec3Field("pos", row("lpos", "Position", "Where the object sits, in metres, relative to its parent."),
+                             fmtFixed(t.position.x).c_str(), fmtFixed(t.position.y).c_str(), fmtFixed(t.position.z).c_str(), nullptr, pos);
+    commit(fe, "pos", [&](splash::Object& ob) { ob.transform.position = {pos[0], pos[1], pos[2]}; });
+    float rot[3] = {e.x, e.y, e.z};
+    fe = vec3Field("rot", row("lrot", "Rotation", "Rotation around each axis, in degrees."), fmtShort(e.x).c_str(), fmtShort(e.y).c_str(),
+                   fmtShort(e.z).c_str(), nullptr, rot);
+    commit(fe, "rot", [&](splash::Object& ob) { ob.transform.rotation = quatFromEuler({rot[0], rot[1], rot[2]}); });
+    float scl[3] = {t.scale.x, t.scale.y, t.scale.z};
+    fe = vec3Field("scl", row("lscl", "Scale", "Size multiplier on each axis."), fmtFixed(t.scale.x).c_str(), fmtFixed(t.scale.y).c_str(),
+                   fmtFixed(t.scale.z).c_str(), nullptr, scl);
+    commit(fe, "scl", [&](splash::Object& ob) { ob.transform.scale = {scl[0], scl[1], scl[2]}; });
     sectionEnd(top);
 
     // Mesh.
@@ -630,8 +961,12 @@ static void inspector(ImDrawList* dl, ImRect r, editor::Document& doc) {
         top = y;
         section("s_col", ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), icon::square, rgb(0x46c98a), "Collider", true);
         y += 34 + space::xs;
-        dropdown("shape", row("lshape", "Shape", "Static never moves. Dynamic can be moved by scripts. None turns collision off."),
-                 nullptr, colliderLabel(o->collider->kind));
+        // Menu order follows the tooltip: Static, Dynamic, None.
+        const splash::ColliderKind kinds[3] = {splash::ColliderKind::Static, splash::ColliderKind::Dynamic, splash::ColliderKind::None};
+        int cur = (int)(std::find(std::begin(kinds), std::end(kinds), o->collider->kind) - std::begin(kinds));
+        int pick = dropdownMenu("shape", row("lshape", "Shape", "Static never moves. Dynamic can be moved by scripts. None turns collision off."),
+                                nullptr, colliderLabel(o->collider->kind), {"Static", "Dynamic", "None"}, cur);
+        if (pick >= 0) doc.edit(path, [&](splash::Object& ob) { ob.collider->kind = kinds[pick]; });
         sectionEnd(top);
     }
 
@@ -641,16 +976,29 @@ static void inspector(ImDrawList* dl, ImRect r, editor::Document& doc) {
         top = y;
         section("s_light", ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), icon::lightbulb, kind::light, "Light", true, l.enabled);
         y += 34 + space::xs;
-        dropdown("lkind", row("llkind", "Type", "Point shines in every direction, spot in a cone, directional from far away."),
-                 nullptr, lightKindLabel(l.kind));
+        // Menu order follows the tooltip: Point, Spot, Directional.
+        const splash::LightKind kinds[3] = {splash::LightKind::Point, splash::LightKind::Spot, splash::LightKind::Directional};
+        int cur = (int)(std::find(std::begin(kinds), std::end(kinds), l.kind) - std::begin(kinds));
+        int pick = dropdownMenu("lkind", row("llkind", "Type", "Point shines in every direction, spot in a cone, directional from far away."),
+                                nullptr, lightKindLabel(l.kind), {"Point", "Spot", "Directional"}, cur);
+        if (pick >= 0) doc.edit(path, [&](splash::Object& ob) { ob.light->kind = kinds[pick]; });
         colorField("lcol", row("llcol", "Colour", "The colour of the light."), toColor(l.color), toHex(l.color).c_str());
-        numberField("lint", row("llint", "Intensity", "How bright the light is. 1 is normal."), fmtShort(l.intensity).c_str());
-        if (l.kind != splash::LightKind::Directional)
-            numberField("lrange", row("llrange", "Range", "How far the light reaches before it fades out."), fmtShort(l.range).c_str(),
-                        "m");
-        if (l.kind == splash::LightKind::Spot)
-            numberField("lspot", row("llspot", "Spot angle", "Width of the cone of light."), fmtShort(l.spotAngle).c_str(),
-                        "\xc2\xb0");
+        float lv = l.intensity;
+        commit(numberField("lint", row("llint", "Intensity", "How bright the light is. 1 is normal."), fmtShort(l.intensity).c_str(),
+                           nullptr, 0, nullptr, &lv),
+               "lint", [&](splash::Object& ob) { ob.light->intensity = std::max(0.0f, lv); });
+        if (l.kind != splash::LightKind::Directional) {
+            float rv = l.range;
+            commit(numberField("lrange", row("llrange", "Range", "How far the light reaches before it fades out."), fmtShort(l.range).c_str(),
+                               "m", 0, nullptr, &rv),
+                   "lrange", [&](splash::Object& ob) { ob.light->range = std::max(0.0f, rv); });
+        }
+        if (l.kind == splash::LightKind::Spot) {
+            float sv = l.spotAngle;
+            commit(numberField("lspot", row("llspot", "Spot angle", "Width of the cone of light."), fmtShort(l.spotAngle).c_str(),
+                               "\xc2\xb0", 0, nullptr, &sv),
+                   "lspot", [&](splash::Object& ob) { ob.light->spotAngle = splash::clampv(sv, 1.0f, 179.0f); });
+        }
         sectionEnd(top);
     }
 
@@ -680,7 +1028,7 @@ static void inspector(ImDrawList* dl, ImRect r, editor::Document& doc) {
     ImGui::PopClipRect();
 }
 
-static void statusBar(ImDrawList* dl, ImVec2 size) {
+static void statusBar(ImDrawList* dl, ImVec2 size, const editor::Document& doc, const State& st) {
     Fonts& f = fonts();
     ImRect bar(ImVec2(0, size.y - size::statusBar), size);
     dl->AddRectFilled(bar.Min, bar.Max, color::chrome);
@@ -695,10 +1043,11 @@ static void statusBar(ImDrawList* dl, ImVec2 size) {
                "Scene data, Lua and the engine in main RAM.");
 
     // Right side: problems and save state.
-    const char* saved = "All changes saved";
+    const char* saved = !st.saveError.empty() ? st.saveError.c_str() : doc.dirty() ? "Unsaved changes" : "All changes saved";
     ImVec2 s = measure(f.regular, type::caption, saved);
     float rx = size.x - space::md - s.x;
-    text(dl, ImVec2(rx, bar.Min.y + (size::statusBar - s.y) * 0.5f), f.regular, type::caption, color::textFaint, saved);
+    text(dl, ImVec2(rx, bar.Min.y + (size::statusBar - s.y) * 0.5f), f.regular, type::caption,
+         st.saveError.empty() ? color::textFaint : color::bad, saved);
     const char* prob = "1 suggestion";
     ImVec2 ps = measure(f.medium, type::caption, prob);
     ImRect pr(ImVec2(rx - space::xl - ps.x - 22, bar.Min.y + 5), ImVec2(rx - space::xl + 8, bar.Max.y - 5));
@@ -708,7 +1057,40 @@ static void statusBar(ImDrawList* dl, ImVec2 size) {
     text(dl, ImVec2(pr.Min.x + 26, bar.Min.y + (size::statusBar - ps.y) * 0.5f), f.medium, type::caption, color::warn, prob);
 }
 
+// Document-wide shortcuts. Skipped while a text field has the keyboard.
+static void shortcuts(State& st, editor::Document& doc) {
+    ImGuiIO& io = ImGui::GetIO();
+    if (io.WantTextInput) return;
+    auto pressed = [](ImGuiKey k) { return ImGui::IsKeyPressed(k, false); };
+    auto repeat = [](ImGuiKey k) { return ImGui::IsKeyPressed(k, true); };
+    const bool ctrl = io.KeyCtrl, shift = io.KeyShift;
+    if (ctrl && !shift && repeat(ImGuiKey_Z)) doc.undo();
+    if (ctrl && ((shift && repeat(ImGuiKey_Z)) || repeat(ImGuiKey_Y))) doc.redo();
+    if (!ctrl && !shift && !io.KeyAlt) {
+        if (pressed(ImGuiKey_Q)) st.tool = 0;
+        if (pressed(ImGuiKey_W)) st.tool = 1;
+        if (pressed(ImGuiKey_E)) st.tool = 2;
+        if (pressed(ImGuiKey_R)) st.tool = 3;
+    }
+    // Object commands on the selection.
+    if (const std::optional<editor::ObjectPath> sel = doc.selection()) {
+        if (!ctrl && pressed(ImGuiKey_Delete)) doc.removeObject(*sel);
+        if (ctrl && !shift && pressed(ImGuiKey_D)) doc.duplicateObject(*sel);
+        if (!ctrl && pressed(ImGuiKey_F2)) {
+            st.renaming = true;
+            st.renameStart = true;
+            st.renamePath = *sel;
+        }
+    }
+    if (ctrl && pressed(ImGuiKey_S)) {
+        auto err = doc.save();
+        st.saveError = err ? "Save failed: " + *err : std::string();
+        if (err) std::fprintf(stderr, "save failed: %s\n", err->c_str());
+    }
+}
+
 ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view, ImVec2 size) {
+    shortcuts(st, doc);
     ImGui::SetNextWindowPos(ImVec2(0, 0));
     ImGui::SetNextWindowSize(size);
     ImGui::Begin("##main", nullptr,
@@ -723,10 +1105,10 @@ ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view,
     ImRect left(ImVec2(g, top), ImVec2(g + 272, bottom));
     ImRect right(ImVec2(size.x - g - 352, top), ImVec2(size.x - g, bottom));
     ImRect mid(ImVec2(left.Max.x + g, top), ImVec2(right.Min.x - g, bottom));
-    sceneTree(dl, left, doc);
+    sceneTree(st, dl, left, doc);
     viewportPanel(st, dl, mid, doc, view);
     inspector(dl, right, doc);
-    statusBar(dl, size);
+    statusBar(dl, size, doc, st);
     ImGui::End();
     return bar;
 }

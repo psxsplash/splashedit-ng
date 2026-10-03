@@ -4,12 +4,16 @@
 #include <imgui_internal.h>
 
 #include <initializer_list>
+#include <string>
 
 #include "ui/theme.h"
 
 // The editor's own widget layer. Everything is drawn with ImDrawList from
 // theme tokens; ImGui is used for input, ids and clipping only.
 namespace ui {
+
+// Linear blend of two colours, alpha included; t is clamped to 0..1.
+ImU32 lerpColor(ImU32 a, ImU32 b, float t);
 
 // Eased 0..1 value that follows `target` over time, keyed by id.
 float anim(ImGuiID id, bool target, float speed = 14.0f);
@@ -34,8 +38,9 @@ void tooltip(const char* text);
 enum class ButtonKind { Primary, Secondary, Ghost };
 bool button(const char* id, ImVec2 pos, const char* icon, const char* label, ButtonKind kind, float* outWidth = nullptr,
             const char* tip = nullptr);
+// A disabled button keeps its tooltip but does not hover, press or click.
 bool iconButton(const char* id, ImRect r, const char* icon, bool toggled = false, const char* tip = nullptr,
-                ImU32 iconColor = theme::color::textDim);
+                ImU32 iconColor = theme::color::textDim, bool enabled = true);
 
 // Segmented control; returns new selection.
 int segmented(const char* id, ImVec2 pos, std::initializer_list<const char*> items, int selected, float* outWidth = nullptr);
@@ -64,9 +69,33 @@ bool section(const char* id, ImRect r, const char* icon, ImU32 iconColor, const 
 // Inspector property row: draws the label (with a tooltip) and returns the value rect.
 ImRect property(const char* id, ImRect row, float labelWidth, const char* label, const char* tip);
 
-void numberField(const char* id, ImRect r, const char* value, const char* unit = nullptr, ImU32 axis = 0, const char* axisLabel = nullptr);
-void vec3Field(const char* id, ImRect r, const char* x, const char* y, const char* z, const char* unit = nullptr);
+// What an editable field did this frame.
+struct FieldEdit {
+    bool changed = false;  // the value was written this frame
+    bool done = false;     // the interaction ended (drag released, text committed or cancelled): close the undo step
+    int index = 0;         // component that changed, for vec3Field
+};
+
+// A number in a well. With `edit`, it is editable: drag horizontally to
+// scrub (faster for larger values, Shift for fine steps), double-click to
+// type (Enter or clicking away commits, Esc cancels). `value` is the text shown.
+FieldEdit numberField(const char* id, ImRect r, const char* value, const char* unit = nullptr, ImU32 axis = 0,
+                      const char* axisLabel = nullptr, float* edit = nullptr);
+// Three numberFields; `edit` points at three floats.
+FieldEdit vec3Field(const char* id, ImRect r, const char* x, const char* y, const char* z, const char* unit = nullptr,
+                    float* edit = nullptr);
+
+// In-place text editing, styled as a focused field well. beginTextEdit()
+// arms the editor for `id` (in the current ID scope); textEdit() draws it over
+// `field` with the text starting at `textX` and ending before `textRight`.
+enum class TextEdit { Inactive, Editing, Commit, Cancel };
+void beginTextEdit(const char* id, const std::string& initial);
+bool textEditing(const char* id);
+TextEdit textEdit(const char* id, ImRect field, ImFont* font, float size, float textX, float textRight, std::string* out);
+
 void dropdown(const char* id, ImRect r, const char* icon, const char* value);
+// A dropdown that opens a themed list under it. Returns the picked index, or -1.
+int dropdownMenu(const char* id, ImRect r, const char* icon, const char* value, std::initializer_list<const char*> items, int current);
 void assetField(const char* id, ImRect r, const char* icon, ImU32 iconColor, const char* name, const char* meta);
 void toggle(const char* id, ImRect r, bool on);
 void colorField(const char* id, ImRect r, ImU32 col, const char* hex);

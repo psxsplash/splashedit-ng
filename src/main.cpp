@@ -4,6 +4,8 @@
 #include <imgui_impl_opengl3.h>
 #include <imgui_impl_sdl3.h>
 
+#include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -46,6 +48,19 @@ SDL_HitTestResult hitTest(SDL_Window* win, const SDL_Point* p, void*) {
     return SDL_HITTEST_NORMAL;
 }
 
+// Scripted input for screenshot mode, so interactions can be checked headless.
+// Actions run one after another from frame 5, in command-line order.
+struct Action {
+    enum Kind { Click, DoubleClick, Drag, Key, Wheel, Text } kind;
+    explicit Action(Kind k) : kind(k) {}
+    float x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+    int button = 0;
+    float wheel = 0;
+    ImGuiKey key = ImGuiKey_None;
+    bool ctrl = false, shift = false;
+    std::string text;
+};
+
 struct Args {
     const char* screenshot = nullptr;
     int width = 1600, height = 960;
@@ -55,7 +70,86 @@ struct Args {
     const char* project = nullptr;  // project root; default: the bundled example
     const char* scene = nullptr;    // relative to the project; default: first *.scene in it
     const char* select = nullptr;   // object name to select at startup
+    std::vector<Action> actions;
 };
+
+// "ctrl+shift+z", "delete", "f2", "w", "enter", "escape".
+bool parseKey(const char* spec, Action& a) {
+    std::string s = spec;
+    for (char& c : s) c = (char)std::tolower((unsigned char)c);
+    size_t plus;
+    while ((plus = s.find('+')) != std::string::npos) {
+        std::string mod = s.substr(0, plus);
+        if (mod == "ctrl") a.ctrl = true;
+        else if (mod == "shift") a.shift = true;
+        else return false;
+        s = s.substr(plus + 1);
+    }
+    if (s.size() == 1 && s[0] >= 'a' && s[0] <= 'z') a.key = (ImGuiKey)(ImGuiKey_A + (s[0] - 'a'));
+    else if (s.size() == 2 && s[0] == 'f' && s[1] >= '1' && s[1] <= '9') a.key = (ImGuiKey)(ImGuiKey_F1 + (s[1] - '1'));
+    else if (s == "delete") a.key = ImGuiKey_Delete;
+    else if (s == "enter") a.key = ImGuiKey_Enter;
+    else if (s == "escape") a.key = ImGuiKey_Escape;
+    else if (s == "backspace") a.key = ImGuiKey_Backspace;
+    else return false;
+    return true;
+}
+
+// Frames an action takes, including a short gap after it.
+int actionFrames(const Action& a) {
+    switch (a.kind) {
+        case Action::Click: return 6;
+        case Action::DoubleClick: return 8;
+        case Action::Drag: return 20;
+        default: return 4;
+    }
+}
+
+// Feeds frame `f` (counted from the action's first frame) of `a` to ImGui.
+void playAction(ImGuiIO& io, const Action& a, int f) {
+    switch (a.kind) {
+        case Action::Click:
+            if (f == 0) io.AddMousePosEvent(a.x0, a.y0);
+            if (f == 1) io.AddMouseButtonEvent(a.button, true);
+            if (f == 2) io.AddMouseButtonEvent(a.button, false);
+            break;
+        case Action::DoubleClick:
+            if (f == 0) io.AddMousePosEvent(a.x0, a.y0);
+            if (f == 1 || f == 3) io.AddMouseButtonEvent(0, true);
+            if (f == 2 || f == 4) io.AddMouseButtonEvent(0, false);
+            break;
+        case Action::Drag: {
+            const int steps = 12;
+            if (f == 0) io.AddMousePosEvent(a.x0, a.y0);
+            if (f == 1) io.AddMouseButtonEvent(a.button, true);
+            if (f >= 2 && f < 2 + steps) {
+                float t = (float)(f - 1) / steps;
+                io.AddMousePosEvent(a.x0 + (a.x1 - a.x0) * t, a.y0 + (a.y1 - a.y0) * t);
+            }
+            if (f == 2 + steps) io.AddMouseButtonEvent(a.button, false);
+            break;
+        }
+        case Action::Key:
+            if (f == 0) {
+                if (a.ctrl) io.AddKeyEvent(ImGuiMod_Ctrl, true);
+                if (a.shift) io.AddKeyEvent(ImGuiMod_Shift, true);
+                io.AddKeyEvent(a.key, true);
+            }
+            if (f == 1) {
+                io.AddKeyEvent(a.key, false);
+                if (a.ctrl) io.AddKeyEvent(ImGuiMod_Ctrl, false);
+                if (a.shift) io.AddKeyEvent(ImGuiMod_Shift, false);
+            }
+            break;
+        case Action::Wheel:
+            if (f == 0) io.AddMousePosEvent(a.x0, a.y0);
+            if (f == 1) io.AddMouseWheelEvent(0, a.wheel);
+            break;
+        case Action::Text:
+            if (f == 0) io.AddInputCharactersUTF8(a.text.c_str());
+            break;
+    }
+}
 
 Args parse(int argc, char** argv) {
     Args a;
@@ -69,6 +163,34 @@ Args parse(int argc, char** argv) {
         else if (!std::strcmp(argv[i], "--project")) a.project = next();
         else if (!std::strcmp(argv[i], "--scene")) a.scene = next();
         else if (!std::strcmp(argv[i], "--select")) a.select = next();
+        else if (!std::strcmp(argv[i], "--click") || !std::strcmp(argv[i], "--dblclick")) {
+            Action act(!std::strcmp(argv[i], "--click") ? Action::Click : Action::DoubleClick);
+            std::sscanf(next(), "%f,%f,%d", &act.x0, &act.y0, &act.button);
+            a.actions.push_back(act);
+        } else if (!std::strcmp(argv[i], "--drag")) {
+            Action act(Action::Drag);
+            std::sscanf(next(), "%f,%f,%f,%f,%d", &act.x0, &act.y0, &act.x1, &act.y1, &act.button);
+            a.actions.push_back(act);
+        } else if (!std::strcmp(argv[i], "--wheel")) {
+            Action act(Action::Wheel);
+            std::sscanf(next(), "%f,%f,%f", &act.x0, &act.y0, &act.wheel);
+            a.actions.push_back(act);
+        } else if (!std::strcmp(argv[i], "--key")) {
+            Action act(Action::Key);
+            const char* spec = next();
+            if (parseKey(spec, act)) a.actions.push_back(act);
+            else std::fprintf(stderr, "unknown key '%s'\n", spec);
+        } else if (!std::strcmp(argv[i], "--text")) {
+            Action act(Action::Text);
+            act.text = next();
+            a.actions.push_back(act);
+        } else if (!std::strcmp(argv[i], "--ctrl-held")) {
+            // Holds Ctrl down for the whole run (Ctrl-snapping while dragging).
+            Action act(Action::Key);
+            act.key = ImGuiMod_Ctrl;
+            act.button = -1;
+            a.actions.insert(a.actions.begin(), act);
+        }
     }
     return a;
 }
@@ -148,6 +270,19 @@ int main(int argc, char** argv) {
     openDocument(doc, args);
     view.setDocument(doc);
 
+    // Scripted input timeline (screenshot mode).
+    int firstFrame = 5, timelineEnd = firstFrame;
+    std::vector<int> actionStart;
+    for (const Action& a : args.actions) {
+        if (a.button == -1) {  // --ctrl-held takes no time
+            actionStart.push_back(-1);
+            continue;
+        }
+        actionStart.push_back(timelineEnd);
+        timelineEnd += actionFrames(a);
+    }
+    if (args.screenshot && !args.actions.empty()) args.frames = std::max(args.frames, timelineEnd + 30);
+
     int frame = 0;
     bool running = true;
     while (running) {
@@ -160,7 +295,15 @@ int main(int argc, char** argv) {
         ImGui_ImplSDL3_NewFrame();
         if (args.screenshot) {
             io.DeltaTime = 1.0f / 60.0f;
-            if (args.mouseX >= 0) io.AddMousePosEvent(args.mouseX, args.mouseY);
+            for (size_t i = 0; i < args.actions.size(); ++i) {
+                const Action& a = args.actions[i];
+                if (actionStart[i] < 0) {
+                    if (frame == 0) io.AddKeyEvent(ImGuiMod_Ctrl, true);
+                    continue;
+                }
+                if (frame >= actionStart[i] && frame < actionStart[i] + actionFrames(a)) playAction(io, a, frame - actionStart[i]);
+            }
+            if (args.mouseX >= 0 && frame >= timelineEnd) io.AddMousePosEvent(args.mouseX, args.mouseY);
         }
         ImGui::NewFrame();
         g_hit.titleBar = mockup::drawMainScreen(state, doc, view, io.DisplaySize);
