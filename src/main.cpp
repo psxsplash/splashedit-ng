@@ -320,7 +320,7 @@ int main(int argc, char** argv) {
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
             ImGui_ImplSDL3_ProcessEvent(&e);
-            if (e.type == SDL_EVENT_QUIT) running = false;
+            if (e.type == SDL_EVENT_QUIT || e.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED) running = false;
         }
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplSDL3_NewFrame();
@@ -343,6 +343,7 @@ int main(int argc, char** argv) {
         for (const ImRect& r : ui::interactiveRects())
             if (r.Overlaps(g_hit.titleBar)) g_hit.controls.push_back(r);
         ImGui::Render();
+        if (state.quit) running = false;
 
         int fw, fh;
         SDL_GetWindowSizeInPixels(window, &fw, &fh);

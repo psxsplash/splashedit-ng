@@ -63,7 +63,7 @@ static float panelHeader(ImDrawList* dl, ImRect r, const char* title, const char
     return h.Max.y;
 }
 
-static void windowControls(ImDrawList* dl, ImRect bar) {
+static void windowControls(State& st, ImDrawList* dl, ImRect bar) {
     float w = 46;
     const char* ids[3] = {"##min", "##max", "##close"};
     for (int i = 0; i < 3; ++i) {
@@ -78,11 +78,7 @@ static void windowControls(ImDrawList* dl, ImRect bar) {
                 else
                     SDL_MaximizeWindow(win);
             }
-            if (i == 2) {
-                SDL_Event quit{};
-                quit.type = SDL_EVENT_QUIT;
-                SDL_PushEvent(&quit);
-            }
+            if (i == 2) st.quit = true;
         }
         if (h.hover > 0) dl->AddRectFilled(r.Min, r.Max, i == 2 ? rgb(0xe0475a, (int)(255 * h.hover)) : rgb(0x2a2f39, (int)(255 * h.hover)));
         ImVec2 c = r.GetCenter();
@@ -326,7 +322,7 @@ static ImRect titleBar(State& st, ImDrawList* dl, ImVec2 size, editor::Document&
     if (iconButton("undo", ImRect(ImVec2(rx - 62, bar.Min.y + 6), ImVec2(rx - 32, bar.Max.y - 6)), icon::undo, false, "Undo (Ctrl+Z)",
                    color::textDim, doc.canUndo()))
         doc.undo();
-    windowControls(dl, bar);
+    windowControls(st, dl, bar);
     (void)st;
     return bar;
 }
