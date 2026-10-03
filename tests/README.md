@@ -98,3 +98,10 @@ must be a palette colour, give or take the one 5-bit step the GPU dither adds.
 With c03 moved to z = 3 all three quads render, and the 4 and 8 bpp quads pass with 16-word
 CLUT padding (half the pixels exact, half one dither step off). Against the wrong palette the
 4 bpp quad fails with a distance of 90.
+
+## Load and save
+
+`roundtrip.py` resaves scene and mesh files with `splashpack-cli resave` and checks that known values
+and unknown keys survive. Bad versions and malformed mesh arrays must fail to load.
+
+    python3 roundtrip.py <splashpack-cli>

@@ -8,6 +8,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "unitymath.hh"
@@ -21,9 +22,17 @@ enum class LightKind : uint8_t { Directional, Point, Spot };
 enum class SceneType : uint8_t { Exterior = 0, Interior = 1 };
 enum class NavPartition : uint8_t { Watershed = 0, Monotone = 1, Layer = 2 };
 
+// Keys in a file that this build does not know: (key, value as JSON text) in
+// file order. Saving writes them back after the known keys.
+using ExtraKeys = std::vector<std::pair<std::string, std::string>>;
+
+// Scene and mesh file format version this build reads and writes.
+constexpr int kFormatVersion = 1;
+
 struct Material {
     std::string texture;  // project-relative path, empty = untextured
     std::array<float, 4> color{1, 1, 1, 1};
+    ExtraKeys extra;
 };
 
 struct MeshComponent {
@@ -34,15 +43,18 @@ struct MeshComponent {
     std::array<uint8_t, 3> flatColor{128, 128, 128};
     bool smoothNormals = true;
     int uvOffsetMaterial = 0;
+    ExtraKeys extra;
 };
 
 struct ColliderComponent {
     ColliderKind kind = ColliderKind::None;
     bool platform = false;
+    ExtraKeys extra;
 };
 
 struct ScriptComponent {
     std::string lua;
+    ExtraKeys extra;
 };
 
 struct LightComponent {
@@ -53,6 +65,7 @@ struct LightComponent {
     float spotAngle = 30;
     float innerSpotAngle = 0;
     bool enabled = true;
+    ExtraKeys extra;
 };
 
 // Nav mesh bake parameters, shared by PSXPlayer and PSXNavigationSettings
@@ -81,6 +94,7 @@ struct PlayerComponent {
     NavBakeSettings nav;
     float jumpHeight = 2.0f;
     float gravity = 20.0f;
+    ExtraKeys extra;
 };
 
 // PSXNavigationSettings: nav bake without a player.
@@ -89,6 +103,7 @@ struct NavigationComponent {
     float agentRadius = 0.5f;
     NavBakeSettings nav;
     std::string spawnAnchor;  // object name; empty = this object
+    ExtraKeys extra;
 };
 
 struct Transform {
@@ -107,13 +122,16 @@ struct Object {
     std::optional<LightComponent> light;
     std::optional<PlayerComponent> player;
     std::optional<NavigationComponent> navigation;
+    std::vector<std::string> unknownComponents;  // components of an unknown type, as JSON text
     std::vector<Object> children;
+    ExtraKeys extra;
 };
 
 struct FogSettings {
     bool enabled = false;
     std::array<float, 3> color{0.5f, 0.5f, 0.6f};
     int density = 5;
+    ExtraKeys extra;
 };
 
 struct SceneSettings {
@@ -122,6 +140,7 @@ struct SceneSettings {
     FogSettings fog;
     std::string networkId;
     std::string script;  // scene Lua file, empty = none
+    ExtraKeys extra;
 };
 
 // Project-wide VRAM layout (Unity: Assets/PSXData.asset).
@@ -138,6 +157,7 @@ struct VramSettings {
 struct Scene {
     SceneSettings settings;
     std::vector<Object> objects;
+    ExtraKeys extra;
 };
 
 // A flattened object: the tree walked depth-first pre-order, which is the

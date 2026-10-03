@@ -37,7 +37,9 @@ static int usage() {
                  "  --project defaults to the directory holding the scene file\n"
                  "  --order-from (parity tests) orders objects like the name table of ref\n"
                  "usage: splashpack-cli texstats <image> [--bpp 4|8|16] [--cutout] [--out <decoded.png>]\n"
-                 "  converts one image the way export does and prints its error against the source\n");
+                 "  converts one image the way export does and prints its error against the source\n"
+                 "usage: splashpack-cli resave <in.scene|in.mesh> <out>\n"
+                 "  loads and saves a scene or mesh file\n");
     return 2;
 }
 
@@ -79,8 +81,24 @@ static int texstats(int argc, char** argv) {
     }
 }
 
+static int resave(int argc, char** argv) {
+    if (argc != 4) return usage();
+    try {
+        fs::path in = argv[2];
+        if (in.extension() == ".mesh")
+            splash::saveMesh(splash::loadMesh(in), argv[3]);
+        else
+            splash::saveScene(splash::loadScene(in), argv[3]);
+        return 0;
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "error: %s\n", e.what());
+        return 1;
+    }
+}
+
 int main(int argc, char** argv) {
     if (argc >= 2 && std::strcmp(argv[1], "texstats") == 0) return texstats(argc, argv);
+    if (argc >= 2 && std::strcmp(argv[1], "resave") == 0) return resave(argc, argv);
     if (argc < 2 || std::strcmp(argv[1], "export") != 0) return usage();
     std::string scenePath, outPath, project, orderFrom;
     for (int i = 2; i < argc; i++) {
