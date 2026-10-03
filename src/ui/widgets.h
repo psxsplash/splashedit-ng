@@ -11,6 +11,9 @@
 // theme tokens; ImGui is used for input, ids and clipping only.
 namespace ui {
 
+// Linear blend of two colours, alpha included; t is clamped to 0..1.
+ImU32 lerpColor(ImU32 a, ImU32 b, float t);
+
 // Eased 0..1 value that follows `target` over time, keyed by id.
 float anim(ImGuiID id, bool target, float speed = 14.0f);
 

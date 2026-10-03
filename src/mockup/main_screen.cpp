@@ -232,39 +232,6 @@ static void sceneTree(ImDrawList* dl, ImRect r, editor::Document& doc) {
     treeRow("assets", ImRect(ImVec2(foot.Min.x + 6, foot.Min.y + 7), ImVec2(foot.Max.x - 6, foot.Max.y - 7)), assets);
 }
 
-static void moveGizmo(ImDrawList* dl, viewport::Ps1View& view, ImVec2 mn, ImVec2 sz, viewport::Vec3 o) {
-    ImVec2 c;
-    if (!view.project(o, mn, sz, &c)) return;
-    struct Axis {
-        viewport::Vec3 d;
-        ImU32 col;
-    } axes[3] = {{{1.4f, 0, 0}, color::axisX}, {{0, 1.4f, 0}, color::axisY}, {{0, 0, 1.4f}, color::axisZ}};
-    // Plane handles first so the arrows sit on top.
-    ImVec2 px, pz;
-    view.project({o.x + 0.45f, o.y, o.z}, mn, sz, &px);
-    view.project({o.x, o.y, o.z + 0.45f}, mn, sz, &pz);
-    ImVec2 pxz;
-    view.project({o.x + 0.45f, o.y, o.z + 0.45f}, mn, sz, &pxz);
-    ImVec2 quad[4] = {c, px, pxz, pz};
-    dl->AddConvexPolyFilled(quad, 4, rgb(0x7fcb55, 60));
-    dl->AddPolyline(quad, 4, rgb(0x7fcb55, 180), ImDrawFlags_Closed, 1.2f);
-    for (auto& a : axes) {
-        ImVec2 tip;
-        if (!view.project({o.x + a.d.x, o.y + a.d.y, o.z + a.d.z}, mn, sz, &tip)) continue;
-        ImVec2 dir = tip - c;
-        float len = std::sqrt(dir.x * dir.x + dir.y * dir.y);
-        if (len < 1) continue;
-        dir = dir * (1.0f / len);
-        ImVec2 n(-dir.y, dir.x);
-        dl->AddLine(c + dir * 10, tip - dir * 10, rgb(0x000000, 90), 4.5f);
-        dl->AddLine(c + dir * 10, tip - dir * 10, a.col, 2.5f);
-        ImVec2 head[3] = {tip + dir * 6, tip - dir * 10 + n * 6, tip - dir * 10 - n * 6};
-        dl->AddTriangleFilled(head[0], head[1], head[2], a.col);
-    }
-    dl->AddCircleFilled(c, 6, rgb(0xf4f5f8), 20);
-    dl->AddCircle(c, 6, rgb(0x000000, 90), 20, 1.5f);
-}
-
 static void selectionOutline(ImDrawList* dl, viewport::Ps1View& view, ImVec2 mn, ImVec2 sz, viewport::Vec3 a, viewport::Vec3 b) {
     viewport::Vec3 p[8] = {{a.x, a.y, a.z}, {b.x, a.y, a.z}, {b.x, a.y, b.z}, {a.x, a.y, b.z},
                            {a.x, b.y, a.z}, {b.x, b.y, a.z}, {b.x, b.y, b.z}, {a.x, b.y, b.z}};
@@ -322,6 +289,192 @@ static void axisWidget(ImDrawList* dl, ImVec2 c, const viewport::Ps1View& view) 
 // Scene data is Unity-space (Y-up, left-handed, +Z into the back wall); the
 // renderer is right-handed GL, so world points cross over by negating Z.
 static viewport::Vec3 toGl(splash::Vec3 p) { return {p.x, p.y, -p.z}; }
+
+static float distToSegment(ImVec2 p, ImVec2 a, ImVec2 b) {
+    ImVec2 ab = b - a, ap = p - a;
+    float len2 = ab.x * ab.x + ab.y * ab.y;
+    float t = len2 > 0 ? std::clamp((ap.x * ab.x + ap.y * ab.y) / len2, 0.0f, 1.0f) : 0.0f;
+    ImVec2 d = ap - ab * t;
+    return std::sqrt(d.x * d.x + d.y * d.y);
+}
+
+// Inside a convex quad, either winding.
+static bool inQuad(ImVec2 p, const ImVec2 q[4]) {
+    int pos = 0, neg = 0;
+    for (int i = 0; i < 4; ++i) {
+        ImVec2 a = q[i], b = q[(i + 1) % 4];
+        float c = (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x);
+        (c >= 0 ? pos : neg)++;
+    }
+    return pos == 0 || neg == 0;
+}
+
+// Maps a world-space offset into the local space of an object whose parent
+// has `parentToWorld` (the inverse of its 3x3 part). Identity when singular.
+static splash::Vec3 worldToParentDelta(const splash::Mat34* parentToWorld, splash::Vec3 d) {
+    if (!parentToWorld) return d;
+    const float(*m)[4] = parentToWorld->m;
+    float a = m[0][0], b = m[0][1], c = m[0][2], e = m[1][0], f = m[1][1], g = m[1][2], h = m[2][0], i = m[2][1], k = m[2][2];
+    float det = a * (f * k - g * i) - b * (e * k - g * h) + c * (e * i - f * h);
+    if (std::fabs(det) < 1e-12f) return d;
+    float inv = 1.0f / det;
+    return {((f * k - g * i) * d.x + (c * i - b * k) * d.y + (b * g - c * f) * d.z) * inv,
+            ((g * h - e * k) * d.x + (a * k - c * h) * d.y + (c * e - a * g) * d.z) * inv,
+            ((e * i - f * h) * d.x + (b * h - a * i) * d.y + (a * f - b * e) * d.z) * inv};
+}
+
+static float& component(splash::Vec3& v, int i) { return i == 0 ? v.x : i == 1 ? v.y : v.z; }
+
+// Where the mouse ray meets the horizontal plane at height `y` (Unity space).
+static bool mouseOnPlaneY(const viewport::Ps1View& view, ImRect r, float y, splash::Vec3* hit) {
+    viewport::Vec3 o, d;
+    view.ray(ImGui::GetIO().MousePos, r.Min, r.GetSize(), &o, &d);
+    if (std::fabs(d.y) < 1e-4f) return false;
+    float t = (y - o.y) / d.y;
+    if (t <= 0) return false;
+    *hit = {o.x + d.x * t, o.y + d.y * t, -(o.z + d.z * t)};
+    return true;
+}
+
+// The move gizmo: three world-axis arrows and an XZ plane handle, a fixed
+// size on screen. Dragging an arrow moves along it by the mouse motion
+// projected onto the arrow; dragging the plane follows the mouse across the
+// horizontal plane through the object. One drag is one undo step.
+static void moveGizmo(State& st, ImDrawList* dl, viewport::Ps1View& view, ImRect r, editor::Document& doc, const splash::FlatObject& fo,
+                      const splash::Mat34* parentToWorld) {
+    ImGuiContext& g = *GImGui;
+    ImGuiIO& io = ImGui::GetIO();
+    const ImGuiID gid = ImGui::GetID("##gizmo");
+    ImVec2 mn = r.Min, sz = r.GetSize();
+    State::GizmoDrag& drag = st.gizmo;
+    const bool active = g.ActiveId == gid && drag.handle >= 0;
+    if (active) ImGui::KeepAliveID(gid);
+
+    // Handle geometry, sized from the object's depth so it stays ~76 px long.
+    const splash::Vec3 wpos = fo.localToWorld.position();
+    const viewport::Vec3 o = toGl(wpos);
+    viewport::Vec3 right, up, fwd, eye = view.eye();
+    view.basis(&right, &up, &fwd);
+    float depth = (o.x - eye.x) * fwd.x + (o.y - eye.y) * fwd.y + (o.z - eye.z) * fwd.z;
+    ImVec2 c;
+    bool visible = depth > 0.05f && view.project(o, mn, sz, &c);
+    const splash::Vec3 axisDirs[3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
+    const ImU32 axisCols[3] = {color::axisX, color::axisY, color::axisZ};
+    float len = 76.0f * 2 * depth * std::tan(viewport::Ps1View::kFovY * 0.5f) / sz.y;
+    ImVec2 tips[3];
+    bool tipOk[3] = {};
+    ImVec2 quad[4];
+    bool quadOk = false;
+    if (visible) {
+        for (int i = 0; i < 3; ++i) {
+            viewport::Vec3 t = toGl(wpos + axisDirs[i] * len);
+            tipOk[i] = view.project(t, mn, sz, &tips[i]);
+            if (tipOk[i]) {
+                ImVec2 d = tips[i] - c;
+                tipOk[i] = d.x * d.x + d.y * d.y >= 1;
+            }
+        }
+        const float pl = len * 0.32f;
+        quadOk = view.project(toGl(wpos + splash::Vec3{pl, 0, 0}), mn, sz, &quad[1]) &&
+                 view.project(toGl(wpos + splash::Vec3{pl, 0, pl}), mn, sz, &quad[2]) &&
+                 view.project(toGl(wpos + splash::Vec3{0, 0, pl}), mn, sz, &quad[3]);
+        quad[0] = c;
+    }
+
+    // Hover: arrows over the plane, nearest arrow wins.
+    int hover = -1;
+    if (visible && !active && g.ActiveId == 0 && g.HoveredId == 0 && ImGui::IsWindowHovered() && r.Contains(io.MousePos)) {
+        float best = 7.0f;
+        for (int i = 0; i < 3; ++i) {
+            if (!tipOk[i]) continue;
+            ImVec2 d = tips[i] - c;
+            d = d * (1.0f / std::sqrt(d.x * d.x + d.y * d.y));
+            float dist = distToSegment(io.MousePos, c + d * 8, tips[i] + d * 6);
+            if (dist < best) best = dist, hover = i;
+        }
+        if (hover < 0 && quadOk && inQuad(io.MousePos, quad)) hover = 3;
+        if (hover < 0 && distToSegment(io.MousePos, c, c) < 7) hover = 3;  // the centre dot also moves in XZ
+    }
+    if (hover >= 0) {
+        ImGui::SetHoveredID(gid);
+        if (ImGui::IsMouseClicked(0)) {
+            drag.handle = hover;
+            drag.startMouse = io.MousePos;
+            drag.startWorld = wpos;
+            drag.startLocal = fo.object->transform.position;
+            bool ok = true;
+            if (hover < 3) {
+                ImVec2 d = tips[hover] - c;
+                float l = std::sqrt(d.x * d.x + d.y * d.y);
+                drag.axisDir = d * (1.0f / l);
+                drag.pxPerUnit = l / len;
+            } else {
+                ok = mouseOnPlaneY(view, r, wpos.y, &drag.startHit);
+            }
+            if (ok) {
+                ImGui::SetActiveID(gid, g.CurrentWindow);
+                doc.endMerge();  // a new drag never merges into an earlier edit
+            } else {
+                drag.handle = -1;
+            }
+        }
+    }
+
+    // Drag.
+    if (g.ActiveId == gid && drag.handle >= 0) {
+        if (ImGui::IsMouseDown(0)) {
+            splash::Vec3 nw = drag.startWorld;
+            bool moved = true;
+            if (drag.handle < 3) {
+                ImVec2 m = io.MousePos - drag.startMouse;
+                component(nw, drag.handle) += (m.x * drag.axisDir.x + m.y * drag.axisDir.y) / drag.pxPerUnit;
+            } else {
+                splash::Vec3 hit;
+                moved = mouseOnPlaneY(view, r, drag.startWorld.y, &hit);
+                nw.x += hit.x - drag.startHit.x;
+                nw.z += hit.z - drag.startHit.z;
+            }
+            // Snap the moved world coordinates to the grid.
+            if (moved && (st.snap || io.KeyCtrl)) {
+                const float step = 0.25f;
+                for (int i = 0; i < 3; ++i)
+                    if (drag.handle == i || (drag.handle == 3 && i != 1)) component(nw, i) = std::round(component(nw, i) / step) * step;
+            }
+            splash::Vec3 local = drag.startLocal + worldToParentDelta(parentToWorld, nw - drag.startWorld);
+            if (moved && doc.selection() && !(local == fo.object->transform.position))
+                doc.edit(*doc.selection(), [&](splash::Object& ob) { ob.transform.position = local; }, "gizmo.move");
+            ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
+        } else {
+            doc.endMerge();
+            ImGui::ClearActiveID();
+            drag.handle = -1;
+        }
+    }
+
+    if (!visible) return;
+    // Draw: plane first so the arrows sit on top. Hover and drag brighten and thicken.
+    const int lit = drag.handle >= 0 && g.ActiveId == gid ? drag.handle : hover;
+    float t[4];
+    for (int i = 0; i < 4; ++i) t[i] = anim(gid + 1 + (ImGuiID)i, lit == i);
+    if (quadOk) {
+        ImU32 fill = lerpColor(rgb(0x7fcb55, 60), rgb(0x9be070, 110), t[3]);
+        dl->AddConvexPolyFilled(quad, 4, fill);
+        dl->AddPolyline(quad, 4, lerpColor(rgb(0x7fcb55, 180), rgb(0xd4f5bf, 255), t[3]), ImDrawFlags_Closed, 1.2f + 1.0f * t[3]);
+    }
+    for (int i = 0; i < 3; ++i) {
+        if (!tipOk[i]) continue;
+        ImVec2 dir = tips[i] - c;
+        dir = dir * (1.0f / std::sqrt(dir.x * dir.x + dir.y * dir.y));
+        ImVec2 n(-dir.y, dir.x);
+        ImU32 col = lerpColor(axisCols[i], rgb(0xffffff), 0.35f * t[i]);
+        float wdt = 2.5f + 1.5f * t[i], head = 6 + 2 * t[i];
+        dl->AddLine(c + dir * 10, tips[i] - dir * 10, rgb(0x000000, 90), wdt + 2);
+        dl->AddLine(c + dir * 10, tips[i] - dir * 10, col, wdt);
+        dl->AddTriangleFilled(tips[i] + dir * head, tips[i] - dir * 10 + n * head, tips[i] - dir * 10 - n * head, col);
+    }
+    dl->AddCircleFilled(c, 6, rgb(0xf4f5f8), 20);
+    dl->AddCircle(c, 6, rgb(0x000000, 90), 20, 1.5f);
+}
 
 // Local-space bounds of a mesh, loaded and cached by project path. Empty when
 // the mesh is missing or unreadable.
@@ -496,7 +649,13 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
                 selectedBoxGl(doc, fo, &lo, &hi);
                 selectionOutline(dl, view, mn, sz, lo, hi);
                 dl->ChannelsSetCurrent(kGizmo);
-                if (st.tool == 1) moveGizmo(dl, view, mn, sz, toGl(fo.localToWorld.position()));
+                if (st.tool == 1) {
+                    const splash::Object* par = doc.parent(*doc.selection());
+                    const splash::Mat34* parentToWorld = nullptr;
+                    for (const splash::FlatObject& pf : flats)
+                        if (par && pf.object == par) parentToWorld = &pf.localToWorld;
+                    moveGizmo(st, dl, view, r, doc, fo, parentToWorld);
+                }
                 break;
             }
     }

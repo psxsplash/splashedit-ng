@@ -5,6 +5,8 @@
 
 #include <string>
 
+#include "unitymath.hh"
+
 namespace viewport {
 class Ps1View;
 }
@@ -25,6 +27,15 @@ struct State {
     // moved far enough to count as a drag rather than a click.
     int vpButton = -1;
     bool vpDragged = false;
+
+    // Move gizmo drag in progress: handle 0..2 = X/Y/Z arrow, 3 = XZ plane, -1 = none.
+    struct GizmoDrag {
+        int handle = -1;
+        ImVec2 startMouse;
+        splash::Vec3 startWorld, startLocal, startHit;
+        ImVec2 axisDir;     // unit screen direction of the dragged arrow
+        float pxPerUnit = 1;  // screen pixels per world metre along it, at the object's depth
+    } gizmo;
 };
 
 // Draws the main screen for `doc` filling `size`. Returns the title-bar

@@ -12,7 +12,7 @@ using namespace theme;
 
 namespace ui {
 
-static ImU32 lerpColor(ImU32 a, ImU32 b, float t) {
+ImU32 lerpColor(ImU32 a, ImU32 b, float t) {
     t = std::clamp(t, 0.0f, 1.0f);
     ImVec4 fa = ImGui::ColorConvertU32ToFloat4(a);
     ImVec4 fb = ImGui::ColorConvertU32ToFloat4(b);

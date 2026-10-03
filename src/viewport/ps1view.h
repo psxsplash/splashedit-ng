@@ -61,6 +61,7 @@ class Ps1View {
     // Unit right, up and forward vectors of the camera.
     void basis(Vec3* right, Vec3* up, Vec3* forward) const;
     float distance() const;
+    Vec3 eye() const { return m_eye; }
     static constexpr float kFovY = 0.95f;
 
     bool clean = false;  // false = PS1 look, true = clean view
