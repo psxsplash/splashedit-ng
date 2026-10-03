@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cfloat>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <unordered_map>
 
@@ -270,28 +272,159 @@ static void well(ImDrawList* dl, ImRect r, float hover) {
     dl->AddRect(r.Min, r.Max, lerpColor(color::border, color::borderStrong, hover), radius::field);
 }
 
-void numberField(const char* id, ImRect r, const char* value, const char* unit, ImU32 axis, const char* axisLabel) {
-    Fonts& f = fonts();
-    Hit h = interact(id, r);
-    if (h.hovered) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
-    ImDrawList* dl = ImGui::GetWindowDrawList();
-    well(dl, r, h.hover);
-    float x = r.Min.x + space::sm;
-    if (axis) {
-        ImRect tag(r.Min, ImVec2(r.Min.x + 18, r.Max.y));
-        dl->AddRectFilled(tag.Min, tag.Max, axis & 0x40ffffff, radius::field, ImDrawFlags_RoundCornersLeft);
-        textCentered(dl, tag, f.semibold, type::caption, axis, axisLabel);
-        x = tag.Max.x + space::xs + 2;
-    }
-    text(dl, ImVec2(x, centerY(f.regular, type::body, r.Min.y, r.Max.y)), f.regular, type::body, color::text, value);
-    if (unit) {
-        ImVec2 s = measure(f.regular, type::label, unit);
-        text(dl, ImVec2(r.Max.x - space::sm - s.x, centerY(f.regular, type::label, r.Min.y, r.Max.y)), f.regular, type::label,
-             color::textFaint, unit);
-    }
+// The one in-place text editor; only one field edits at a time.
+struct TextEditState {
+    ImGuiID id = 0;
+    char buf[256] = {};
+    int frames = 0;
+};
+static TextEditState& textState() {
+    static TextEditState s;
+    return s;
 }
 
-void vec3Field(const char* id, ImRect r, const char* x, const char* y, const char* z, const char* unit) {
+void beginTextEdit(const char* id, const std::string& initial) {
+    TextEditState& s = textState();
+    s.id = ImGui::GetID(id);
+    std::snprintf(s.buf, sizeof s.buf, "%s", initial.c_str());
+    s.frames = 0;
+}
+
+bool textEditing(const char* id) { return textState().id != 0 && textState().id == ImGui::GetID(id); }
+
+TextEdit textEdit(const char* id, ImRect field, ImFont* font, float size, float textX, float textRight, std::string* out) {
+    TextEditState& s = textState();
+    if (s.id == 0 || s.id != ImGui::GetID(id)) return TextEdit::Inactive;
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    // A focused well: the field colours with an accent border.
+    dl->AddRectFilled(field.Min, field.Max, color::field, radius::field);
+    dl->AddRect(field.Min, field.Max, color::accent, radius::field);
+    if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+        s.id = 0;
+        return TextEdit::Cancel;
+    }
+    // Frame padding puts ImGui's text exactly where the static text sits.
+    float padY = centerY(font, size, field.Min.y, field.Max.y) - field.Min.y;
+    ImGui::SetCursorScreenPos(ImVec2(textX, field.Min.y));
+    ImGui::PushFont(font, size);
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0, padY));
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0.0f);
+    ImGui::PushStyleColor(ImGuiCol_FrameBg, 0u);
+    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, 0u);
+    ImGui::PushStyleColor(ImGuiCol_FrameBgActive, 0u);
+    ImGui::PushStyleColor(ImGuiCol_Text, color::text);
+    ImGui::PushStyleColor(ImGuiCol_TextSelectedBg, rgb(0x8b7bff, 110));
+    ImGui::PushStyleColor(ImGuiCol_InputTextCursor, color::accentHover);
+    ImGui::PushStyleColor(ImGuiCol_NavCursor, 0u);
+    ImGui::SetNextItemWidth(std::max(8.0f, textRight - textX));
+    if (s.frames == 0) ImGui::SetKeyboardFocusHere();
+    ImGui::PushID(id);
+    bool enter = ImGui::InputText("##textedit", s.buf, sizeof s.buf, ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll);
+    bool deactivated = ImGui::IsItemDeactivated();
+    bool active = ImGui::IsItemActive();
+    ImGui::PopID();
+    ImGui::PopStyleColor(7);
+    ImGui::PopStyleVar(2);
+    ImGui::PopFont();
+    ++s.frames;
+    if (enter || deactivated || (s.frames > 2 && !active)) {
+        *out = s.buf;
+        s.id = 0;
+        return TextEdit::Commit;
+    }
+    return TextEdit::Editing;
+}
+
+// Scrub state of the number field being dragged.
+struct ScrubState {
+    ImGuiID id = 0;
+    float value = 0;
+    float start = 0;
+    bool dragging = false;
+};
+static ScrubState& scrubState() {
+    static ScrubState s;
+    return s;
+}
+
+FieldEdit numberField(const char* id, ImRect r, const char* value, const char* unit, ImU32 axis, const char* axisLabel, float* edit) {
+    FieldEdit out;
+    Fonts& f = fonts();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImGuiID gid = ImGui::GetID(id);
+    float x = r.Min.x + space::sm;
+    ImRect tag(r.Min, ImVec2(r.Min.x + 18, r.Max.y));
+    if (axis) x = tag.Max.x + space::xs + 2;
+    float unitW = unit ? measure(f.regular, type::label, unit).x : 0;
+    float right = unit ? r.Max.x - space::sm - unitW - space::xs : r.Max.x - space::xs;
+    auto decorations = [&] {
+        if (axis) {
+            dl->AddRectFilled(tag.Min, tag.Max, axis & 0x40ffffff, radius::field, ImDrawFlags_RoundCornersLeft);
+            textCentered(dl, tag, f.semibold, type::caption, axis, axisLabel);
+        }
+        if (unit)
+            text(dl, ImVec2(r.Max.x - space::sm - unitW, centerY(f.regular, type::label, r.Min.y, r.Max.y)), f.regular, type::label,
+                 color::textFaint, unit);
+    };
+
+    // Typing.
+    if (edit && textEditing(id)) {
+        std::string typed;
+        TextEdit res = textEdit(id, r, f.regular, type::body, x, right, &typed);
+        decorations();
+        if (res == TextEdit::Commit) {
+            char* end = nullptr;
+            float v = std::strtof(typed.c_str(), &end);
+            while (end && *end == ' ') ++end;
+            if (end && end != typed.c_str() && *end == 0 && std::isfinite(v) && v != *edit) {
+                *edit = v;
+                out.changed = true;
+            }
+        }
+        out.done = res == TextEdit::Commit || res == TextEdit::Cancel;
+        return out;
+    }
+
+    Hit h = interact(id, r);
+    if (h.hovered || h.held) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+    if (edit) {
+        ScrubState& sc = scrubState();
+        ImGuiContext& g = *GImGui;
+        if (h.held && g.ActiveId == gid && g.ActiveIdIsJustActivated) sc = {gid, *edit, *edit, false};
+        if (h.held && sc.id == gid) {
+            if (!sc.dragging && ImGui::IsMouseDragPastThreshold(0)) sc.dragging = true;
+            float dx = ImGui::GetIO().MouseDelta.x;
+            if (sc.dragging && dx != 0) {
+                // Steps grow with the value: 0.01 per pixel below 1, then 1% of it.
+                float speed = std::max(0.01f, std::fabs(sc.value) * 0.01f) * (ImGui::GetIO().KeyShift ? 0.1f : 1.0f);
+                sc.value += dx * speed;
+                float step = std::pow(10.0f, std::floor(std::log10(speed)));
+                float shown = std::round(sc.value / step) * step;
+                if (shown != *edit) {
+                    *edit = shown;
+                    out.changed = true;
+                }
+            }
+        } else if (sc.id == gid) {
+            out.done = sc.dragging;
+            sc.id = 0;
+        }
+        if (h.hovered && ImGui::IsMouseDoubleClicked(0)) {
+            char b[32];
+            std::snprintf(b, sizeof b, "%.6g", static_cast<double>(*edit));
+            beginTextEdit(id, b);
+        }
+    }
+    bool scrubbing = edit && scrubState().id == gid && scrubState().dragging;
+    well(dl, r, scrubbing ? 1.0f : h.hover);
+    if (scrubbing) dl->AddRect(r.Min, r.Max, rgb(0x8b7bff, 150), radius::field);
+    decorations();
+    text(dl, ImVec2(x, centerY(f.regular, type::body, r.Min.y, r.Max.y)), f.regular, type::body, color::text, value);
+    return out;
+}
+
+FieldEdit vec3Field(const char* id, ImRect r, const char* x, const char* y, const char* z, const char* unit, float* edit) {
+    FieldEdit out;
     float gap = space::xs;
     float w = (r.GetWidth() - gap * 2) / 3;
     const char* vals[3] = {x, y, z};
@@ -300,9 +433,14 @@ void vec3Field(const char* id, ImRect r, const char* x, const char* y, const cha
     for (int i = 0; i < 3; ++i) {
         ImRect c(ImVec2(r.Min.x + i * (w + gap), r.Min.y), ImVec2(r.Min.x + i * (w + gap) + w, r.Max.y));
         ImGui::PushID(i);
-        numberField(id, c, vals[i], unit, cols[i], labels[i]);
+        FieldEdit e = numberField(id, c, vals[i], unit, cols[i], labels[i], edit ? edit + i : nullptr);
         ImGui::PopID();
+        if (e.changed || e.done) {
+            out = e;
+            out.index = i;
+        }
     }
+    return out;
 }
 
 void dropdown(const char* id, ImRect r, const char* ic, const char* value) {
@@ -319,6 +457,55 @@ void dropdown(const char* id, ImRect r, const char* ic, const char* value) {
     text(dl, ImVec2(x, centerY(f.regular, type::body, r.Min.y, r.Max.y)), f.regular, type::body, color::text, value);
     text(dl, ImVec2(r.Max.x - 20, centerY(f.medium, type::label, r.Min.y, r.Max.y)), f.medium, type::label, color::textDim,
          icon::chevronDown);
+}
+
+int dropdownMenu(const char* id, ImRect r, const char* ic, const char* value, std::initializer_list<const char*> items, int current) {
+    Fonts& f = fonts();
+    dropdown(id, r, ic, value);
+    std::string popupId = std::string(id) + "#menu";
+    if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) ImGui::OpenPopup(popupId.c_str());
+
+    const float pad = space::xs, rowH = size::field + 4;
+    ImVec2 size(r.GetWidth(), pad * 2 + rowH * static_cast<float>(items.size()));
+    ImGui::SetNextWindowPos(ImVec2(r.Min.x, r.Max.y + space::xs));
+    ImGui::SetNextWindowSize(size);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_PopupBorderSize, 0.0f);
+    int picked = -1;
+    if (ImGui::BeginPopup(popupId.c_str(), ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
+                                               ImGuiWindowFlags_NoSavedSettings)) {
+        // Drawn like the tooltip card: a raised surface with a soft shadow.
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        ImRect box(ImGui::GetWindowPos(), ImGui::GetWindowPos() + size);
+        dl->AddRectFilled(box.Min + ImVec2(0, 2), box.Max + ImVec2(0, 6), rgb(0x000000, 80), radius::card);
+        dl->AddRectFilled(box.Min, box.Max, color::raised, radius::card);
+        dl->AddRect(box.Min, box.Max, color::borderStrong, radius::card);
+        int i = 0;
+        for (const char* item : items) {
+            ImRect ir(ImVec2(box.Min.x + pad, box.Min.y + pad + rowH * static_cast<float>(i)),
+                      ImVec2(box.Max.x - pad, box.Min.y + pad + rowH * static_cast<float>(i + 1)));
+            ImGui::PushID(i);
+            Hit h = interact("item", ir);
+            ImGui::PopID();
+            if (i == current) {
+                dl->AddRectFilled(ir.Min, ir.Max, color::accentSoft, radius::field);
+                dl->AddRectFilled(ir.Min + ImVec2(0, 5), ImVec2(ir.Min.x + 2, ir.Max.y - 5), color::accent, 1);
+            } else if (h.hover > 0) {
+                dl->AddRectFilled(ir.Min, ir.Max, lerpColor(rgb(0x2a2f39, 0), color::hover, h.hover), radius::field);
+            }
+            text(dl, ImVec2(ir.Min.x + space::sm + (ic ? 20 : 0), centerY(f.regular, type::body, ir.Min.y, ir.Max.y)),
+                 i == current ? f.medium : f.regular, type::body, i == current || h.hover > 0.5f ? color::text : color::textDim, item);
+            if (h.clicked) {
+                picked = i;
+                ImGui::CloseCurrentPopup();
+            }
+            ++i;
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+    ImGui::PopStyleVar(2);
+    return picked == current ? -1 : picked;
 }
 
 void assetField(const char* id, ImRect r, const char* ic, ImU32 iconColor, const char* name, const char* meta) {

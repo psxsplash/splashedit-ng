@@ -4,6 +4,7 @@
 #include <imgui_internal.h>
 
 #include <initializer_list>
+#include <string>
 
 #include "ui/theme.h"
 
@@ -68,9 +69,33 @@ bool section(const char* id, ImRect r, const char* icon, ImU32 iconColor, const 
 // Inspector property row: draws the label (with a tooltip) and returns the value rect.
 ImRect property(const char* id, ImRect row, float labelWidth, const char* label, const char* tip);
 
-void numberField(const char* id, ImRect r, const char* value, const char* unit = nullptr, ImU32 axis = 0, const char* axisLabel = nullptr);
-void vec3Field(const char* id, ImRect r, const char* x, const char* y, const char* z, const char* unit = nullptr);
+// What an editable field did this frame.
+struct FieldEdit {
+    bool changed = false;  // the value was written this frame
+    bool done = false;     // the interaction ended (drag released, text committed or cancelled): close the undo step
+    int index = 0;         // component that changed, for vec3Field
+};
+
+// A number in a well. With `edit`, it is editable: drag horizontally to
+// scrub (faster for larger values, Shift for fine steps), double-click to
+// type (Enter or clicking away commits, Esc cancels). `value` is the text shown.
+FieldEdit numberField(const char* id, ImRect r, const char* value, const char* unit = nullptr, ImU32 axis = 0,
+                      const char* axisLabel = nullptr, float* edit = nullptr);
+// Three numberFields; `edit` points at three floats.
+FieldEdit vec3Field(const char* id, ImRect r, const char* x, const char* y, const char* z, const char* unit = nullptr,
+                    float* edit = nullptr);
+
+// In-place text editing, styled as a focused field well. beginTextEdit()
+// arms the editor for `id` (in the current ID scope); textEdit() draws it over
+// `field` with the text starting at `textX` and ending before `textRight`.
+enum class TextEdit { Inactive, Editing, Commit, Cancel };
+void beginTextEdit(const char* id, const std::string& initial);
+bool textEditing(const char* id);
+TextEdit textEdit(const char* id, ImRect field, ImFont* font, float size, float textX, float textRight, std::string* out);
+
 void dropdown(const char* id, ImRect r, const char* icon, const char* value);
+// A dropdown that opens a themed list under it. Returns the picked index, or -1.
+int dropdownMenu(const char* id, ImRect r, const char* icon, const char* value, std::initializer_list<const char*> items, int current);
 void assetField(const char* id, ImRect r, const char* icon, ImU32 iconColor, const char* name, const char* meta);
 void toggle(const char* id, ImRect r, bool on);
 void colorField(const char* id, ImRect r, ImU32 col, const char* hex);

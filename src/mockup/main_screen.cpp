@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <functional>
 #include <map>
 #include <optional>
 #include <string>
@@ -721,6 +722,17 @@ static splash::Vec3 eulerDegrees(splash::Quat q) {
     return {static_cast<float>(ex), static_cast<float>(ey), static_cast<float>(ez)};
 }
 
+// Quaternion.Euler: rotates around Z, then X, then Y (degrees).
+static splash::Quat quatFromEuler(splash::Vec3 deg) {
+    const double h = 3.14159265358979323846 / 360.0;  // half angle, in radians per degree
+    double cx = std::cos(deg.x * h), sx = std::sin(deg.x * h);
+    double cy = std::cos(deg.y * h), sy = std::sin(deg.y * h);
+    double cz = std::cos(deg.z * h), sz = std::sin(deg.z * h);
+    // qY * qX * qZ
+    return {static_cast<float>(cy * sx * cz + sy * cx * sz), static_cast<float>(sy * cx * cz - cy * sx * sz),
+            static_cast<float>(cy * cx * sz - sy * sx * cz), static_cast<float>(cy * cx * cz + sy * sx * sz)};
+}
+
 static ImU32 toColor(const std::array<float, 3>& c) {
     auto u = [](float v) { return static_cast<int>(splash::clampv(v, 0.0f, 1.0f) * 255.0f + 0.5f); };
     return IM_COL32(u(c[0]), u(c[1]), u(c[2]), 255);
@@ -818,7 +830,24 @@ static void inspector(ImDrawList* dl, ImRect r, editor::Document& doc) {
     ImRect ic(ImVec2(x0, y), ImVec2(x0 + 40, y + 40));
     dl->AddRectFilled(ic.Min, ic.Max, (look.color & 0x00ffffffu) | (34u << IM_COL32_A_SHIFT), radius::card);
     textCentered(dl, ic, f.medium, type::icon + 3, look.color, look.icon);
-    text(dl, ImVec2(ic.Max.x + space::md, y + 2), f.semibold, type::title, color::text, o->name.c_str());
+    const editor::ObjectPath path = *doc.selection();
+    // Name: double-click to rename.
+    {
+        ImVec2 np(ic.Max.x + space::md, y + 2);
+        ImRect field(np - ImVec2(space::xs + 2, 2), ImVec2(x1 - 30 - space::md, np.y + 19));
+        std::string typed;
+        TextEdit res = textEdit("objname", field, f.semibold, type::title, np.x, field.Max.x - space::xs, &typed);
+        if (res == TextEdit::Inactive) {
+            ImVec2 ns = measure(f.semibold, type::title, o->name.c_str());
+            ImRect hit(np, np + ImVec2(std::max(ns.x, 40.0f), ns.y));
+            interact("objname", hit);
+            tooltip("Double-click to rename (F2)");
+            if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) beginTextEdit("objname", o->name);
+            text(dl, np, f.semibold, type::title, color::text, o->name.c_str());
+        } else if (res == TextEdit::Commit && !typed.empty() && typed != o->name) {
+            doc.edit(path, [&](splash::Object& ob) { ob.name = typed; });
+        }
+    }
     text(dl, ImVec2(ic.Max.x + space::md, y + 22), f.regular, type::caption, color::textFaint, where.c_str());
     toggle("objactive", ImRect(ImVec2(x1 - 30, y + 12), ImVec2(x1, y + 28)), o->active);
     y += 40 + space::lg;
@@ -850,12 +879,24 @@ static void inspector(ImDrawList* dl, ImRect r, editor::Document& doc) {
     float top = y;
     section("s_transform", ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), icon::move, color::textDim, "Transform", true, true, false);
     y += 34 + space::xs;
-    vec3Field("pos", row("lpos", "Position", "Where the object sits, in metres, relative to its parent."),
-              fmtFixed(t.position.x).c_str(), fmtFixed(t.position.y).c_str(), fmtFixed(t.position.z).c_str());
-    vec3Field("rot", row("lrot", "Rotation", "Rotation around each axis, in degrees."), fmtShort(e.x).c_str(), fmtShort(e.y).c_str(),
-              fmtShort(e.z).c_str());
-    vec3Field("scl", row("lscl", "Scale", "Size multiplier on each axis."), fmtFixed(t.scale.x).c_str(), fmtFixed(t.scale.y).c_str(),
-              fmtFixed(t.scale.z).c_str());
+    // Edits go through the history; a scrub merges into one step per field
+    // until it is released (FieldEdit::done).
+    auto commit = [&](const FieldEdit& fe, const std::string& key, const std::function<void(splash::Object&)>& fn) {
+        if (fe.changed) doc.edit(path, fn, key + "." + std::to_string(fe.index));
+        if (fe.done) doc.endMerge();
+    };
+    float pos[3] = {t.position.x, t.position.y, t.position.z};
+    FieldEdit fe = vec3Field("pos", row("lpos", "Position", "Where the object sits, in metres, relative to its parent."),
+                             fmtFixed(t.position.x).c_str(), fmtFixed(t.position.y).c_str(), fmtFixed(t.position.z).c_str(), nullptr, pos);
+    commit(fe, "pos", [&](splash::Object& ob) { ob.transform.position = {pos[0], pos[1], pos[2]}; });
+    float rot[3] = {e.x, e.y, e.z};
+    fe = vec3Field("rot", row("lrot", "Rotation", "Rotation around each axis, in degrees."), fmtShort(e.x).c_str(), fmtShort(e.y).c_str(),
+                   fmtShort(e.z).c_str(), nullptr, rot);
+    commit(fe, "rot", [&](splash::Object& ob) { ob.transform.rotation = quatFromEuler({rot[0], rot[1], rot[2]}); });
+    float scl[3] = {t.scale.x, t.scale.y, t.scale.z};
+    fe = vec3Field("scl", row("lscl", "Scale", "Size multiplier on each axis."), fmtFixed(t.scale.x).c_str(), fmtFixed(t.scale.y).c_str(),
+                   fmtFixed(t.scale.z).c_str(), nullptr, scl);
+    commit(fe, "scl", [&](splash::Object& ob) { ob.transform.scale = {scl[0], scl[1], scl[2]}; });
     sectionEnd(top);
 
     // Mesh.
@@ -902,8 +943,12 @@ static void inspector(ImDrawList* dl, ImRect r, editor::Document& doc) {
         top = y;
         section("s_col", ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), icon::square, rgb(0x46c98a), "Collider", true);
         y += 34 + space::xs;
-        dropdown("shape", row("lshape", "Shape", "Static never moves. Dynamic can be moved by scripts. None turns collision off."),
-                 nullptr, colliderLabel(o->collider->kind));
+        // Menu order follows the tooltip: Static, Dynamic, None.
+        const splash::ColliderKind kinds[3] = {splash::ColliderKind::Static, splash::ColliderKind::Dynamic, splash::ColliderKind::None};
+        int cur = (int)(std::find(std::begin(kinds), std::end(kinds), o->collider->kind) - std::begin(kinds));
+        int pick = dropdownMenu("shape", row("lshape", "Shape", "Static never moves. Dynamic can be moved by scripts. None turns collision off."),
+                                nullptr, colliderLabel(o->collider->kind), {"Static", "Dynamic", "None"}, cur);
+        if (pick >= 0) doc.edit(path, [&](splash::Object& ob) { ob.collider->kind = kinds[pick]; });
         sectionEnd(top);
     }
 
@@ -913,16 +958,29 @@ static void inspector(ImDrawList* dl, ImRect r, editor::Document& doc) {
         top = y;
         section("s_light", ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), icon::lightbulb, kind::light, "Light", true, l.enabled);
         y += 34 + space::xs;
-        dropdown("lkind", row("llkind", "Type", "Point shines in every direction, spot in a cone, directional from far away."),
-                 nullptr, lightKindLabel(l.kind));
+        // Menu order follows the tooltip: Point, Spot, Directional.
+        const splash::LightKind kinds[3] = {splash::LightKind::Point, splash::LightKind::Spot, splash::LightKind::Directional};
+        int cur = (int)(std::find(std::begin(kinds), std::end(kinds), l.kind) - std::begin(kinds));
+        int pick = dropdownMenu("lkind", row("llkind", "Type", "Point shines in every direction, spot in a cone, directional from far away."),
+                                nullptr, lightKindLabel(l.kind), {"Point", "Spot", "Directional"}, cur);
+        if (pick >= 0) doc.edit(path, [&](splash::Object& ob) { ob.light->kind = kinds[pick]; });
         colorField("lcol", row("llcol", "Colour", "The colour of the light."), toColor(l.color), toHex(l.color).c_str());
-        numberField("lint", row("llint", "Intensity", "How bright the light is. 1 is normal."), fmtShort(l.intensity).c_str());
-        if (l.kind != splash::LightKind::Directional)
-            numberField("lrange", row("llrange", "Range", "How far the light reaches before it fades out."), fmtShort(l.range).c_str(),
-                        "m");
-        if (l.kind == splash::LightKind::Spot)
-            numberField("lspot", row("llspot", "Spot angle", "Width of the cone of light."), fmtShort(l.spotAngle).c_str(),
-                        "\xc2\xb0");
+        float lv = l.intensity;
+        commit(numberField("lint", row("llint", "Intensity", "How bright the light is. 1 is normal."), fmtShort(l.intensity).c_str(),
+                           nullptr, 0, nullptr, &lv),
+               "lint", [&](splash::Object& ob) { ob.light->intensity = std::max(0.0f, lv); });
+        if (l.kind != splash::LightKind::Directional) {
+            float rv = l.range;
+            commit(numberField("lrange", row("llrange", "Range", "How far the light reaches before it fades out."), fmtShort(l.range).c_str(),
+                               "m", 0, nullptr, &rv),
+                   "lrange", [&](splash::Object& ob) { ob.light->range = std::max(0.0f, rv); });
+        }
+        if (l.kind == splash::LightKind::Spot) {
+            float sv = l.spotAngle;
+            commit(numberField("lspot", row("llspot", "Spot angle", "Width of the cone of light."), fmtShort(l.spotAngle).c_str(),
+                               "\xc2\xb0", 0, nullptr, &sv),
+                   "lspot", [&](splash::Object& ob) { ob.light->spotAngle = splash::clampv(sv, 1.0f, 179.0f); });
+        }
         sectionEnd(top);
     }
 
