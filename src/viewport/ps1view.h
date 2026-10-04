@@ -71,7 +71,6 @@ class Ps1View {
         float px, py, pz;
         float u, v;
         float r, g, b;
-        float tex;  // >= 0: textured geometry, < 0: sky backdrop (vertex colour, unfogged)
     };
     // A run of vertices drawn with one GL texture bound.
     struct Batch {

@@ -72,14 +72,12 @@ static const char* kVert = R"(#version 330 core
 layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec2 aUv;
 layout(location = 2) in vec3 aCol;
-layout(location = 3) in float aTex;
 uniform mat4 uViewProj;
 uniform vec2 uRes;
 uniform int uClean;
 noperspective out vec2 vUvAffine;
 out vec2 vUvPersp;
 out vec3 vCol;
-flat out float vTex;
 out float vDepth;
 void main() {
     vec4 clip = uViewProj * vec4(aPos, 1.0);
@@ -93,7 +91,6 @@ void main() {
     vUvAffine = aUv;
     vUvPersp = aUv;
     vCol = aCol;
-    vTex = aTex;
     vDepth = clip.w;
 }
 )";
@@ -102,7 +99,6 @@ static const char* kFrag = R"(#version 330 core
 noperspective in vec2 vUvAffine;
 in vec2 vUvPersp;
 in vec3 vCol;
-flat in float vTex;
 in float vDepth;
 uniform sampler2D uTex;
 uniform int uClean;
@@ -111,14 +107,9 @@ out vec4 oColor;
 const float kDither[16] = float[16](-4, 0, -3, 1, 2, -2, 3, -1, -3, 1, -4, 0, 3, -1, 2, -2);
 void main() {
     vec2 uv = uClean == 0 ? vUvAffine : vUvPersp;
-    vec3 c;
-    if (vTex < 0.0) {
-        c = vCol;  // sky backdrop, untextured and unfogged
-    } else {
-        c = texture(uTex, fract(uv)).rgb * vCol * 2.0;
-        float fog = clamp((vDepth - 10.0) / 22.0, 0.0, 1.0);
-        c = mix(c, uFog, fog * 0.85);
-    }
+    vec3 c = texture(uTex, fract(uv)).rgb * vCol * 2.0;
+    float fog = clamp((vDepth - 10.0) / 22.0, 0.0, 1.0);
+    c = mix(c, uFog, fog * 0.85);
     if (uClean == 0) {
         ivec2 p = ivec2(gl_FragCoord.xy) & 3;
         vec3 v = floor(clamp(c * 255.0 + kDither[p.y * 4 + p.x], 0.0, 255.0));
@@ -344,7 +335,7 @@ void Ps1View::rebuild() {
                 Vec3 col = shade(wp[i], wn[i], points, ambient, sunDir, sunColor);
                 if (!textured) col = {col.x * mat.color[0], col.y * mat.color[1], col.z * mat.color[2]};
                 splash::Vec2 uv = haveUv ? mesh->uv[i] : splash::Vec2{};
-                bucket.push_back({wp[i].x, wp[i].y, -wp[i].z, uv.x, uv.y, col.x, col.y, col.z, 0.0f});
+                bucket.push_back({wp[i].x, wp[i].y, -wp[i].z, uv.x, uv.y, col.x, col.y, col.z});
             }
         }
     }
@@ -416,8 +407,7 @@ bool Ps1View::init() {
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, px));
     glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, u));
     glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, r));
-    glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, tex));
-    for (int i = 0; i < 4; ++i) glEnableVertexAttribArray(i);
+    for (int i = 0; i < 3; ++i) glEnableVertexAttribArray(i);
     glBindVertexArray(0);
 
     const uint8_t whitePx[4] = {255, 255, 255, 255};
