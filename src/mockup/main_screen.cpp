@@ -439,9 +439,13 @@ static void treeObjects(TreeCtx& c, const std::vector<splash::Object>& objs, edi
     }
 }
 
+static splash::Vec3 spawnPoint(const viewport::Ps1View& view, const editor::Document& doc,
+                               const editor::ObjectPath& parentPath);
+
 // The Add object picker. A new object goes right after the selection, as its
-// sibling, or at the end of the scene when nothing is selected.
-static void addObjectPicker(State& st, editor::Document& doc, ImVec2 pos) {
+// sibling, or at the end of the scene when nothing is selected. It lands on
+// the viewport's pivot, the point the camera orbits and frames on.
+static void addObjectPicker(State& st, editor::Document& doc, const viewport::Ps1View& view, ImVec2 pos) {
     const char* id = "##addobject";
     if (st.openAddObject) {
         st.openAddObject = false;
@@ -471,17 +475,18 @@ static void addObjectPicker(State& st, editor::Document& doc, ImVec2 pos) {
     const splash::Object* parent = doc.object(parentPath);
     const std::vector<splash::Object>& siblings = parent ? parent->children : doc.scene().objects;
     splash::Object obj = editor::makeObject(ps[order[pick]], siblings);
+    obj.transform.position = spawnPoint(view, doc, parentPath);
     if (!doc.expanded(parentPath)) doc.toggleExpanded(parentPath);
     doc.insertObject(at, std::move(obj));
 }
 
-static void sceneTree(State& st, ImDrawList* dl, ImRect r, editor::Document& doc) {
+static void sceneTree(State& st, ImDrawList* dl, ImRect r, editor::Document& doc, const viewport::Ps1View& view) {
     panel(dl, r);
     std::string count = std::to_string(doc.objectCount()) + (doc.objectCount() == 1 ? " object" : " objects");
     float y = panelHeader(dl, r, "Scene", count.c_str());
     ImRect addBtn(ImVec2(r.Max.x - 62, r.Min.y + 5), ImVec2(r.Max.x - 36, r.Min.y + 29));
     if (iconButton("addobj", addBtn, icon::plus, false, "Add object (Ctrl+A)")) st.openAddObject = true;
-    addObjectPicker(st, doc, ImVec2(addBtn.Min.x, addBtn.Max.y + space::xs));
+    addObjectPicker(st, doc, view, ImVec2(addBtn.Min.x, addBtn.Max.y + space::xs));
     iconButton("treemenu", ImRect(ImVec2(r.Max.x - 32, r.Min.y + 5), ImVec2(r.Max.x - 6, r.Min.y + 29)), icon::ellipsis);
     searchField("treesearch", ImRect(ImVec2(r.Min.x + space::sm, y), ImVec2(r.Max.x - space::sm, y + 28)), "Filter objects",
                 "Ctrl F");
@@ -600,6 +605,21 @@ static splash::Vec3 worldToParentDelta(const splash::Mat34* parentToWorld, splas
     return {((f * k - g * i) * d.x + (c * i - b * k) * d.y + (b * g - c * f) * d.z) * inv,
             ((g * h - e * k) * d.x + (a * k - c * h) * d.y + (c * e - a * g) * d.z) * inv,
             ((e * i - f * h) * d.x + (b * h - a * i) * d.y + (a * f - b * e) * d.z) * inv};
+}
+
+// The viewport pivot in the local space of the object at `parentPath` (the
+// scene root when the path is empty).
+static splash::Vec3 spawnPoint(const viewport::Ps1View& view, const editor::Document& doc,
+                               const editor::ObjectPath& parentPath) {
+    viewport::Vec3 r, u, f, e = view.eye();
+    view.basis(&r, &u, &f);
+    float d = view.distance();
+    splash::Vec3 w{e.x + f.x * d, e.y + f.y * d, -(e.z + f.z * d)};
+    const splash::Object* parent = doc.object(parentPath);
+    if (!parent) return w;
+    for (const splash::FlatObject& pf : splash::flatten(doc.scene()))
+        if (pf.object == parent) return worldToParentDelta(&pf.localToWorld, w - pf.localToWorld.position());
+    return w;
 }
 
 static float& component(splash::Vec3& v, int i) { return i == 0 ? v.x : i == 1 ? v.y : v.z; }
@@ -2121,7 +2141,7 @@ ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view,
     ImRect left(ImVec2(g, top), ImVec2(g + 272, bottom));
     ImRect right(ImVec2(size.x - g - 352, top), ImVec2(size.x - g, bottom));
     ImRect mid(ImVec2(left.Max.x + g, top), ImVec2(right.Min.x - g, bottom));
-    sceneTree(st, dl, left, doc);
+    sceneTree(st, dl, left, doc, view);
     viewportPanel(st, dl, mid, doc, view);
     inspector(st, dl, right, doc);
     statusBar(dl, size, doc, st);
