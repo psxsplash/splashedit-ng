@@ -149,6 +149,15 @@ void testSettings() {
     CHECK(d.scene().settings.orderingTableSize == 500);
 }
 
+void testRenderPeak() {
+    editor::RenderPeak p;
+    CHECK(editor::parseRenderPeak("psxsplash: render peak depth 258 of 988, bump 11808 of 51656", &p));
+    CHECK(p.depth == 258 && p.orderingTable == 988 && p.bump == 11808 && p.bumpSize == 51656);
+    CHECK(editor::parseRenderPeak("[tty] psxsplash: render peak depth 3 of 256, bump 0 of 4000", &p) && p.bumpSize == 4000);
+    CHECK(!editor::parseRenderPeak("psxsplash: render peak depth", &p));
+    CHECK(!editor::parseRenderPeak("Loading scene 0", &p));
+}
+
 void testDirtyAndSave() {
     std::error_code ec;
     std::filesystem::path dir = g_outDir;
@@ -711,6 +720,7 @@ int main(int argc, char** argv) {
     testApplyUndoRedo();
     testMerge();
     testSettings();
+    testRenderPeak();
     testDirtyAndSave();
     testStructure();
     testPick();

@@ -2,6 +2,7 @@
 // boot it in pcsx-redux. This half has no SDL; the process lives in the app.
 #pragma once
 
+#include <cstdint>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -32,6 +33,15 @@ std::vector<std::string> missingTools(const PlayTools& tools);
 // loader opens for the first scene.
 splash::ExportResult exportForPlay(const splash::Scene& scene, const std::filesystem::path& projectRoot,
                                    const std::filesystem::path& dir);
+
+// What a development (PCdrv) psxsplash reports using, from its line
+// "psxsplash: render peak depth D of N, bump B of M".
+struct RenderPeak {
+    int depth = 0;
+    uint32_t orderingTable = 0, bump = 0, bumpSize = 0;
+};
+// Parses one output line; false if it is not a peak report.
+bool parseRenderPeak(const std::string& line, RenderPeak* out);
 
 // Program and arguments that boot psxsplash on the files in `dir`.
 std::vector<std::string> reduxCommand(const PlayTools& tools, const std::filesystem::path& dir);

@@ -1,6 +1,8 @@
 #include "editor/play.hh"
 
+#include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <exception>
 #include <fstream>
 #include <initializer_list>
@@ -127,6 +129,18 @@ splash::ExportResult exportForPlay(const splash::Scene& scene, const fs::path& p
         r.errors.push_back(e.what());
     }
     return r;
+}
+
+bool parseRenderPeak(const std::string& line, RenderPeak* out) {
+    const char* tag = "psxsplash: render peak depth ";
+    size_t at = line.find(tag);
+    if (at == std::string::npos) return false;
+    RenderPeak p;
+    if (std::sscanf(line.c_str() + at + std::strlen(tag), "%d of %u, bump %u of %u", &p.depth, &p.orderingTable, &p.bump,
+                    &p.bumpSize) != 4)
+        return false;
+    *out = p;
+    return true;
 }
 
 std::vector<std::string> reduxCommand(const PlayTools& t, const fs::path& dir) {

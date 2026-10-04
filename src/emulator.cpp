@@ -11,6 +11,7 @@ bool Emulator::start(const std::vector<std::string>& cmd, std::string* error) {
     m_exit.reset();
     m_lines.clear();
     m_partial.clear();
+    m_total = 0;
     std::vector<const char*> args;
     for (const std::string& a : cmd) args.push_back(a.c_str());
     args.push_back(nullptr);
@@ -43,6 +44,7 @@ void Emulator::addText(const char* data, size_t n) {
         }
         m_lines.push_back(std::move(m_partial));
         m_partial.clear();
+        ++m_total;
         if (m_lines.size() > kMaxLines) m_lines.pop_front();
     }
 }

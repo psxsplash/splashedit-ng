@@ -29,6 +29,8 @@ public:
     const std::optional<int>& exitCode() const { return m_exit; }
     // The last lines it printed, oldest first.
     const std::deque<std::string>& output() const { return m_lines; }
+    // Lines printed since start(), including those output() has dropped.
+    uint64_t lineCount() const { return m_total; }
 
 private:
     void drain();
@@ -37,4 +39,5 @@ private:
     std::optional<int> m_exit;
     std::deque<std::string> m_lines;
     std::string m_partial;
+    uint64_t m_total = 0;
 };

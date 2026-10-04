@@ -109,6 +109,8 @@ static void togglePlay(State& st, const editor::Document& doc) {
     }
     if (p.build.valid()) return;
     p.message.clear();
+    p.peak.reset();
+    p.peakScene = doc.loadId();
     if (!editor::missingTools(editor::withDefaults(p.tools, p.bundleDir)).empty()) {
         p.openSetup = true;
         return;
@@ -121,6 +123,15 @@ static void togglePlay(State& st, const editor::Document& doc) {
 static void updatePlay(State& st) {
     State::Play& p = st.play;
     p.emu.poll();
+    // Read lines printed since the last frame (some may already have scrolled out).
+    const std::deque<std::string>& out = p.emu.output();
+    if (p.emu.lineCount() < p.linesSeen) p.linesSeen = 0;  // restarted
+    const uint64_t first = p.emu.lineCount() - out.size();
+    for (uint64_t i = std::max(p.linesSeen, first); i < p.emu.lineCount(); ++i) {
+        editor::RenderPeak rp;
+        if (editor::parseRenderPeak(out[size_t(i - first)], &rp)) p.peak = rp;
+    }
+    p.linesSeen = p.emu.lineCount();
     if (p.emu.running()) {
         if (!p.game.attached() && p.game.attach(p.emu.pid())) p.showGame = true;
         p.game.update();
@@ -1821,7 +1832,11 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
             "Depth slots the renderer sorts triangles into, back to front. One slot per depth step, so this is also how far "
             "the camera sees: anything farther away is not drawn. Larger costs 8 bytes of RAM per slot.",
             "slots", set.orderingTableSize, otNeed, otUsed, &splash::SceneSettings::orderingTableSize});
+    const editor::RenderPeak* peak = st.play.peak && st.play.peakScene == doc.loadId() ? &*st.play.peak : nullptr;
     if (otUsed) caption("Draws up to " + metres(otUsed) + " away", color::textFaint);
+    if (peak)
+        caption("In Play: farthest drawn at " + std::to_string(peak->depth) + " (" + metres(uint32_t(peak->depth)) + ")",
+                otUsed && uint32_t(peak->depth) >= otUsed ? color::warn : color::accentHover);
     const uint32_t buNeed = stats ? stats->bumpAllocatorNeed : 0, buUsed = stats ? stats->bumpAllocatorSize : 0;
     buffer({"bump", "Primitive buffer",
             "Bytes of GPU commands one frame can build: every triangle drawn, plus sprites and text. If a frame needs more, "
@@ -1829,6 +1844,10 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
             "psxsplash calls it the bump allocator.",
             "bytes", set.bumpAllocatorSize, buNeed, buUsed, &splash::SceneSettings::bumpAllocatorSize});
     if (buUsed) caption("Up to " + std::to_string(buUsed / 28) + " plain triangles per frame", color::textFaint);
+    if (peak)
+        caption("In Play: busiest frame used " + std::to_string(peak->bump) + " bytes" +
+                    (buUsed ? " (" + std::to_string(int(100.0 * peak->bump / buUsed + 0.5)) + "%)" : std::string()),
+                buUsed && peak->bump > buUsed ? color::warn : color::accentHover);
     if (stats) caption(kb(stats->rendererBytes()) + " KB of RAM for both, double-buffered", color::textFaint);
     else caption("Sizes appear once the scene exports.", color::textFaint);
     dl->AddRect(ImVec2(x0, top), ImVec2(x1, y + space::sm), rgb(0xffffff, 10), radius::card);
