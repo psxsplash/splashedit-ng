@@ -192,6 +192,7 @@ void buildTris(ExpObject& e, float gte, const std::vector<SceneLight>& lights, E
     const Mesh& m = *e.mesh;
     const MeshComponent& mc = *e.mc;
     const FlatObject& fo = *e.flat;
+    if (m.positions.empty()) return;
     if (m.normals.empty()) {
         res.errors.push_back(e.obj->name + ": mesh " + mc.mesh + " has no normals");
         return;
@@ -972,7 +973,20 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     for (const FlatObject& fo : flat) {
         if (fo.object->skin && !fo.object->mesh)
             res.errors.push_back(fo.object->name + ": a skin component needs a mesh component");
-        if (!fo.object->mesh) continue;
+        if (!fo.object->mesh) {
+            // A script needs a game object to run on. Without a mesh it ships as
+            // one with no triangles, which the engine draws as nothing.
+            if (fo.object->script) {
+                static const MeshComponent noMeshComponent = [] {
+                    MeshComponent mc;
+                    mc.dynamicLighting = DynamicLighting::Off;
+                    return mc;
+                }();
+                static const Mesh noMesh{};
+                exporters.push_back(ExpObject{&fo, fo.object, &noMeshComponent, &noMesh, {}, {}, {}, {}, {}});
+            }
+            continue;
+        }
         ExpObject e{&fo, fo.object, &*fo.object->mesh, nullptr, {}, {}, {}, {}, {}};
         try {
             e.mesh = meshFor(e.mc->mesh);

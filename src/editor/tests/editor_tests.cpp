@@ -521,6 +521,33 @@ void testExportStats() {
           splash::kRendererBytes + std::max({d.stats.splashpackBytes, d.stats.vramFileBytes, d.stats.spuFileBytes}));
 }
 
+// A script on an object with no mesh (the courtyard's Game Logic) ships as a
+// game object with no triangles, so the engine still runs it.
+void testScriptWithoutMesh() {
+    namespace fs = std::filesystem;
+    const fs::path project = fs::path(SPLASHEDIT_SOURCE_DIR) / "examples" / "courtyard";
+    const fs::path dir = g_outDir / "meshless-script";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    auto exportBytes = [&](const splash::Scene& scene, splash::ExportResult& r) {
+        r = splash::exportSplashpack(scene, project, dir / "scene.splashpack");
+        std::ifstream in(dir / "scene.splashpack", std::ios::binary);
+        return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    };
+    splash::Scene scene = splash::loadScene(project / "courtyard.scene");
+    splash::ExportResult with;
+    std::string a = exportBytes(scene, with);
+    CHECK(with.ok());
+    CHECK(a.find("scene-wide game logic") != std::string::npos);
+    CHECK(a.find("Game Logic") != std::string::npos);
+    std::erase_if(scene.objects, [](const splash::Object& o) { return o.name == "Game Logic"; });
+    splash::ExportResult without;
+    std::string b = exportBytes(scene, without);
+    CHECK(without.ok());
+    CHECK(b.find("scene-wide game logic") == std::string::npos);
+    CHECK(with.stats.triangles == without.stats.triangles);
+}
+
 // LiveExport: waits for edits to settle, then exports the current revision.
 void testLiveExport() {
     const std::filesystem::path project = std::filesystem::path(SPLASHEDIT_SOURCE_DIR) / "examples" / "courtyard";
@@ -656,6 +683,7 @@ int main(int argc, char** argv) {
     testGizmoUndo();
     testCatalog();
     testExportStats();
+    testScriptWithoutMesh();
     testLiveExport();
     testPlay();
     if (g_failures) {
