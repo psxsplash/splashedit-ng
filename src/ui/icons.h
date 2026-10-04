@@ -44,6 +44,7 @@ inline constexpr const char* magnet = "\xee\x8a\xb5";          // e2b5
 inline constexpr const char* globe = "\xee\x83\xa8";           // e0e8
 inline constexpr const char* user = "\xee\x86\x9f";            // e19f
 inline constexpr const char* pointer = "\xee\x87\x83";         // e1c3
+inline constexpr const char* hand = "\xee\x87\x97";            // e1d7
 inline constexpr const char* gamepad = "\xee\x83\x9f";         // e0df
 inline constexpr const char* wand = "\xee\x8d\x97";            // e357
 inline constexpr const char* help = "\xee\x82\x82";            // e082

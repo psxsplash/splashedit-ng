@@ -28,6 +28,7 @@ struct Mat4 {
     float m[16] = {};
     static Mat4 identity();
     static Mat4 perspective(float fovyRad, float aspect, float zn, float zf);
+    static Mat4 ortho(float halfW, float halfH, float zn, float zf);
     static Mat4 lookAt(Vec3 eye, Vec3 target, Vec3 up);
     Mat4 operator*(const Mat4& o) const;
 };
@@ -53,6 +54,19 @@ class Ps1View {
     void dolly(float steps);
     // Puts the pivot at `center` and backs off until a sphere of `radius` fits.
     void frame(Vec3 center, float radius);
+    // Turns the camera about the eye by a mouse delta in pixels; the pivot
+    // stays in front of it at the same distance.
+    void lookAround(float dxPx, float dyPx);
+    // Moves eye and pivot by `move` in camera space (right, up, forward).
+    void fly(Vec3 move);
+    // Moves eye and pivot by a world offset.
+    void translate(Vec3 d);
+    // Looks along `forward` (GL space, unit) at the same pivot and distance.
+    void lookAlong(Vec3 forward);
+    void setOrtho(bool on) { m_ortho = on; }
+    bool ortho() const { return m_ortho; }
+    // World units covered by one panel pixel at `depth` in front of the eye.
+    float worldPerPixel(float depth, float panelH) const;
     // Index (in splash::flatten order) of the object whose drawn triangles the
     // ray through a screen point hits first, or nullopt.
     std::optional<int> pick(ImVec2 screen, ImVec2 panelMin, ImVec2 panelSize) const;
@@ -61,8 +75,12 @@ class Ps1View {
     // Unit right, up and forward vectors of the camera.
     void basis(Vec3* right, Vec3* up, Vec3* forward) const;
     float distance() const;
-    Vec3 eye() const { return m_eye; }
+    // Where the view is rendered from: the eye, or in orthographic a point
+    // backed away along the view so nothing near the pivot is clipped.
+    Vec3 eye() const;
+    Vec3 pivot() const { return m_target; }
     static constexpr float kFovY = 0.95f;
+    static constexpr float kOrthoBack = 150.0f;  // orthographic: render eye's distance behind the pivot
 
     bool clean = false;  // false = PS1 look, true = clean view
 
@@ -101,6 +119,7 @@ class Ps1View {
     size_t m_vboCap = 0;
     int m_fboW = 0, m_fboH = 0;
     Vec3 m_eye{7.6f, 5.2f, 9.2f}, m_target{-0.9f, 0.9f, -2.0f};
+    bool m_ortho = false;
     Mat4 m_viewProj;
 };
 

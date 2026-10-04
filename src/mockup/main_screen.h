@@ -24,7 +24,7 @@ class Document;
 namespace mockup {
 
 struct State {
-    int tool = 1;        // 0 select, 1 move, 2 rotate, 3 scale
+    int tool = 1;        // 0 hand, 1 move, 2 rotate, 3 scale
     int viewMode = 0;    // 0 PS1, 1 clean
     bool maximized = false;
     bool quit = false;   // the close button was pressed
@@ -63,6 +63,20 @@ struct State {
     // moved far enough to count as a drag rather than a click.
     int vpButton = -1;
     bool vpDragged = false;
+    bool vpAlt = false;  // Alt was down when the press started (orbit / zoom drags)
+
+    // Right-button flythrough: speed (wheel while held), how long a move key
+    // has been held (acceleration), and when the speed readout fades.
+    float flySpeed = 3.0f;
+    float flyHeld = 0;
+    double flySpeedShownUntil = 0;
+
+    // Shift+F: the camera keeps the selected object framed as it moves.
+    bool follow = false;
+    const void* followObject = nullptr;
+    float followAt[3] = {};
+    // A hierarchy double-click asks the viewport to frame the selection.
+    bool frameRequest = false;
 
     // Gizmo drag in progress, for the tool in `tool`. Move: handle 0..2 =
     // X/Y/Z arrow, 3 = XZ plane. Rotate: 0..2 = X/Y/Z ring. Scale: 0..2 =
