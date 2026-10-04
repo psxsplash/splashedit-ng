@@ -293,7 +293,9 @@ void Ps1View::rebuild() {
     m_pick.clear();
     for (size_t fi = 0; fi < flats.size(); ++fi) {
         const splash::FlatObject& fo = flats[fi];
-        if (!fo.activeInHierarchy || !fo.object->mesh) continue;
+        // Inactive objects ship switched off and the runtime skips them until a
+        // script turns them on; their lights still bake, so only meshes drop out.
+        if (!fo.activeInHierarchy || !fo.object->active || !fo.object->mesh) continue;
         const splash::MeshComponent& mc = *fo.object->mesh;
         if (mc.mesh.empty() || mc.materials.empty()) continue;
         const splash::Mesh* mesh = nullptr;
