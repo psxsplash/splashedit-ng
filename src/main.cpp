@@ -59,13 +59,13 @@ SDL_HitTestResult hitTest(SDL_Window* win, const SDL_Point* p, void*) {
 // Scripted input for screenshot mode, so interactions can be checked headless.
 // Actions run one after another from frame 5, in command-line order.
 struct Action {
-    enum Kind { Click, DoubleClick, Drag, Key, Wheel, Text, Wait } kind;
+    enum Kind { Click, DoubleClick, Drag, Key, Wheel, Text, Wait, KeyDown, KeyUp, MouseDown, MouseUp, Move } kind;
     explicit Action(Kind k) : kind(k) {}
     float x0 = 0, y0 = 0, x1 = 0, y1 = 0;
     int button = 0;
     float wheel = 0;
     ImGuiKey key = ImGuiKey_None;
-    bool ctrl = false, shift = false;
+    bool ctrl = false, shift = false, alt = false;
     bool hold = false;  // a drag that never lets go (mid-drag screenshots)
     std::string text;
     int waitFrames = 0;
@@ -93,6 +93,7 @@ bool parseKey(const char* spec, Action& a) {
         std::string mod = s.substr(0, plus);
         if (mod == "ctrl") a.ctrl = true;
         else if (mod == "shift") a.shift = true;
+        else if (mod == "alt") a.alt = true;
         else return false;
         s = s.substr(plus + 1);
     }
@@ -104,6 +105,9 @@ bool parseKey(const char* spec, Action& a) {
     else if (s == "backspace") a.key = ImGuiKey_Backspace;
     else if (s == "up") a.key = ImGuiKey_UpArrow;
     else if (s == "down") a.key = ImGuiKey_DownArrow;
+    else if (s == "ctrl") a.key = ImGuiKey_LeftCtrl, a.ctrl = true;
+    else if (s == "shift") a.key = ImGuiKey_LeftShift, a.shift = true;
+    else if (s == "alt") a.key = ImGuiKey_LeftAlt, a.alt = true;
     else return false;
     return true;
 }
@@ -115,6 +119,7 @@ int actionFrames(const Action& a) {
         case Action::DoubleClick: return 8;
         case Action::Drag: return 20;
         case Action::Wait: return a.waitFrames;
+        case Action::Move: return 14;
         default: return 4;
     }
 }
@@ -147,14 +152,44 @@ void playAction(ImGuiIO& io, const Action& a, int f) {
             if (f == 0) {
                 if (a.ctrl) io.AddKeyEvent(ImGuiMod_Ctrl, true);
                 if (a.shift) io.AddKeyEvent(ImGuiMod_Shift, true);
+                if (a.alt) io.AddKeyEvent(ImGuiMod_Alt, true);
                 io.AddKeyEvent(a.key, true);
             }
             if (f == 1) {
                 io.AddKeyEvent(a.key, false);
                 if (a.ctrl) io.AddKeyEvent(ImGuiMod_Ctrl, false);
                 if (a.shift) io.AddKeyEvent(ImGuiMod_Shift, false);
+                if (a.alt) io.AddKeyEvent(ImGuiMod_Alt, false);
             }
             break;
+        case Action::KeyDown:
+        case Action::KeyUp:
+            // A key (or modifier) pressed or let go, staying that way until the matching action.
+            if (f == 0) {
+                bool down = a.kind == Action::KeyDown;
+                if (a.ctrl) io.AddKeyEvent(ImGuiMod_Ctrl, down);
+                if (a.shift) io.AddKeyEvent(ImGuiMod_Shift, down);
+                if (a.alt) io.AddKeyEvent(ImGuiMod_Alt, down);
+                io.AddKeyEvent(a.key, down);
+            }
+            break;
+        case Action::MouseDown:
+            if (f == 0) io.AddMousePosEvent(a.x0, a.y0);
+            if (f == 1) io.AddMouseButtonEvent(a.button, true);
+            break;
+        case Action::MouseUp:
+            if (f == 0) io.AddMouseButtonEvent(a.button, false);
+            break;
+        case Action::Move: {
+            // From wherever the mouse is to (x1, y1), in 12 steps.
+            const int steps = 12;
+            if (f >= 1 && f <= steps) {
+                ImVec2 from = io.MousePos;
+                float t = 1.0f / (steps - f + 1);
+                io.AddMousePosEvent(from.x + (a.x1 - from.x) * t, from.y + (a.y1 - from.y) * t);
+            }
+            break;
+        }
         case Action::Wheel:
             if (f == 0) io.AddMousePosEvent(a.x0, a.y0);
             if (f == 1) io.AddMouseWheelEvent(0, a.wheel);
@@ -197,6 +232,24 @@ Args parse(int argc, char** argv) {
             const char* spec = next();
             if (parseKey(spec, act)) a.actions.push_back(act);
             else std::fprintf(stderr, "unknown key '%s'\n", spec);
+        } else if (!std::strcmp(argv[i], "--keydown") || !std::strcmp(argv[i], "--keyup")) {
+            // Holds a key ("w", "shift", "alt+...") until --keyup of the same spec.
+            Action act(!std::strcmp(argv[i], "--keydown") ? Action::KeyDown : Action::KeyUp);
+            const char* spec = next();
+            if (parseKey(spec, act)) a.actions.push_back(act);
+            else std::fprintf(stderr, "unknown key '%s'\n", spec);
+        } else if (!std::strcmp(argv[i], "--mousedown")) {
+            Action act(Action::MouseDown);
+            std::sscanf(next(), "%f,%f,%d", &act.x0, &act.y0, &act.button);
+            a.actions.push_back(act);
+        } else if (!std::strcmp(argv[i], "--mouseup")) {
+            Action act(Action::MouseUp);
+            act.button = std::atoi(next());
+            a.actions.push_back(act);
+        } else if (!std::strcmp(argv[i], "--move")) {
+            Action act(Action::Move);
+            std::sscanf(next(), "%f,%f", &act.x1, &act.y1);
+            a.actions.push_back(act);
         } else if (!std::strcmp(argv[i], "--wait")) {
             // Idle frames before the next action (lets the background export finish).
             Action act(Action::Wait);

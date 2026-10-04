@@ -419,6 +419,10 @@ static void treeObjects(TreeCtx& c, const std::vector<splash::Object>& objs, edi
             if (row.hasChildren && chevronClicked(rr, row.depth)) c.doc.toggleExpanded(path);
             else c.doc.select(path);
         }
+        if (h.hovered && ImGui::IsMouseDoubleClicked(0) && !(row.hasChildren && chevronClicked(rr, row.depth))) {
+            c.doc.select(path);
+            c.st.frameRequest = true;
+        }
         // F2: the label becomes a text field.
         if (c.st.renaming && c.st.renamePath == path) {
             c.renameShown = true;
@@ -542,8 +546,13 @@ static bool sceneIcon(ImDrawList* dl, viewport::Ps1View& view, ImVec2 mn, ImVec2
     return h.clicked;
 }
 
-static void axisWidget(ImDrawList* dl, ImVec2 c, const viewport::Ps1View& view) {
+// Unity's scene gizmo. Clicking an axis tip (or the faint opposite end)
+// looks down that axis from its side, orthographic; the centre toggles
+// perspective and orthographic. The caption names the view.
+static void axisWidget(ImDrawList* dl, ImVec2 c, viewport::Ps1View& view) {
     Fonts& f = fonts();
+    Hit h = interact("##axiswidget", ImRect(c - ImVec2(34, 34), c + ImVec2(34, 34)));
+    ImVec2 m = ImGui::GetIO().MousePos;
     dl->AddCircleFilled(c, 34, rgb(0x0e1014, 140), 40);
     // Unity's axes (Z negated into GL) as the camera sees them.
     viewport::Vec3 s, u, fw;
@@ -553,23 +562,51 @@ static void axisWidget(ImDrawList* dl, ImVec2 c, const viewport::Ps1View& view) 
         ImU32 col;
         const char* l;
         float depth;
+        int axis;
     } axes[3];
     const viewport::Vec3 w[3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, -1}};
     const ImU32 cols[3] = {color::axisX, color::axisY, color::axisZ};
     const char* labels[3] = {"X", "Y", "Z"};
-    for (int i = 0; i < 3; ++i) {
-        auto d3 = [&](viewport::Vec3 a, viewport::Vec3 b) { return a.x * b.x + a.y * b.y + a.z * b.z; };
-        axes[i] = {ImVec2(d3(w[i], s), -d3(w[i], u)) * 0.82f, cols[i], labels[i], d3(w[i], fw)};
+    auto d3 = [](viewport::Vec3 a, viewport::Vec3 b) { return a.x * b.x + a.y * b.y + a.z * b.z; };
+    for (int i = 0; i < 3; ++i) axes[i] = {ImVec2(d3(w[i], s), -d3(w[i], u)) * 0.82f, cols[i], labels[i], d3(w[i], fw), i};
+    // What the mouse is over: an axis tip (sign +-1), the centre (axis 3), or nothing.
+    int hotAxis = -1, hotSign = 0;
+    // The centre wins over a tip pointing straight at the camera, which would only re-pick the current view.
+    if ((h.hovered || h.held) && std::hypot(m.x - c.x, m.y - c.y) < 7) hotAxis = 3;
+    else if (h.hovered || h.held) {
+        float best = 1e9f;
+        for (const A& a : axes)
+            for (int sign : {1, -1}) {
+                ImVec2 p = c + a.d * (24.0f * sign);
+                float dist = std::hypot(m.x - p.x, m.y - p.y);
+                if (dist < (sign > 0 ? 9.0f : 7.0f) && dist < best) best = dist, hotAxis = a.axis, hotSign = sign;
+            }
+    }
+    if (h.clicked && hotAxis == 3) view.setOrtho(!view.ortho());
+    if (h.clicked && hotAxis >= 0 && hotAxis < 3) {
+        viewport::Vec3 a = w[hotAxis];
+        view.lookAlong({-a.x * hotSign, -a.y * hotSign, -a.z * hotSign});
+        view.setOrtho(true);
     }
     // Far axes first, so the nearer ones overlap them.
     std::sort(std::begin(axes), std::end(axes), [](const A& a, const A& b) { return a.depth > b.depth; });
     for (auto& a : axes) {
         ImVec2 tip = c + a.d * 24;
+        bool hot = hotAxis == a.axis;
         dl->AddLine(c, tip, a.col, 2);
-        dl->AddCircleFilled(tip, 8, a.col, 20);
+        dl->AddCircleFilled(tip, hot && hotSign > 0 ? 9.5f : 8, a.col, 20);
         textCentered(dl, ImRect(tip - ImVec2(8, 8), tip + ImVec2(8, 8)), f.semibold, type::caption - 1, rgb(0x111318), a.l);
-        dl->AddCircleFilled(c - a.d * 24, 5, a.col & 0x70ffffff, 16);
+        dl->AddCircleFilled(c - a.d * 24, hot && hotSign < 0 ? 6.5f : 5, hot && hotSign < 0 ? a.col : a.col & 0x70ffffff, 16);
     }
+    dl->AddCircleFilled(c, 5, hotAxis == 3 ? rgb(0xffffff) : rgb(0xd8dbe2, 200), 16);
+    // Caption: the named side when looking straight down an axis, else Persp / Iso.
+    const char* name = view.ortho() ? "Iso" : "Persp";
+    static const char* sides[3][2] = {{"Right", "Left"}, {"Top", "Bottom"}, {"Back", "Front"}};
+    for (int i = 0; i < 3; ++i) {
+        float k = d3(w[i], fw);
+        if (view.ortho() && std::fabs(k) > 0.9999f) name = sides[i][k < 0 ? 0 : 1];
+    }
+    textCentered(dl, ImRect(c + ImVec2(-34, 38), c + ImVec2(34, 54)), f.medium, type::caption, color::textDim, name);
 }
 
 // Scene data is Unity-space (Y-up, left-handed, +Z into the back wall); the
@@ -613,10 +650,8 @@ static splash::Vec3 worldToParentDelta(const splash::Mat34* parentToWorld, splas
 // scene root when the path is empty).
 static splash::Vec3 spawnPoint(const viewport::Ps1View& view, const editor::Document& doc,
                                const editor::ObjectPath& parentPath) {
-    viewport::Vec3 r, u, f, e = view.eye();
-    view.basis(&r, &u, &f);
-    float d = view.distance();
-    splash::Vec3 w{e.x + f.x * d, e.y + f.y * d, -(e.z + f.z * d)};
+    viewport::Vec3 p = view.pivot();
+    splash::Vec3 w{p.x, p.y, -p.z};
     const splash::Object* parent = doc.object(parentPath);
     if (!parent) return w;
     for (const splash::FlatObject& pf : splash::flatten(doc.scene()))
@@ -655,14 +690,16 @@ static GizmoFrame gizmoFrame(const viewport::Ps1View& view, ImRect r, const spla
     view.basis(&right, &up, &fwd);
     float depth = (o.x - eye.x) * fwd.x + (o.y - eye.y) * fwd.y + (o.z - eye.z) * fwd.z;
     gf.visible = depth > 0.05f && view.project(o, r.Min, r.GetSize(), &gf.c);
-    gf.len = 76.0f * 2 * depth * std::tan(viewport::Ps1View::kFovY * 0.5f) / r.GetHeight();
+    gf.len = 76.0f * view.worldPerPixel(depth, r.GetHeight());
     return gf;
 }
 
 // A gizmo may take hover only when nothing else holds or hovers the mouse.
 static bool gizmoMayHover(bool active, ImRect r) {
     ImGuiContext& g = *GImGui;
-    return !active && g.ActiveId == 0 && g.HoveredId == 0 && ImGui::IsWindowHovered() && r.Contains(ImGui::GetIO().MousePos);
+    // Alt+LMB orbits the camera, so gizmos let go of the mouse while Alt is down.
+    return !active && g.ActiveId == 0 && g.HoveredId == 0 && !ImGui::GetIO().KeyAlt && ImGui::IsWindowHovered() &&
+           r.Contains(ImGui::GetIO().MousePos);
 }
 
 static float length(ImVec2 v) { return std::sqrt(v.x * v.x + v.y * v.y); }
@@ -1233,9 +1270,83 @@ static bool frameBounds(const editor::Document& doc, const viewport::Ps1View& vi
     return view.sceneBounds(lo, hi);
 }
 
+// Puts the camera's pivot on the selection (or the scene) and backs off to fit it.
+static void frameSelection(const editor::Document& doc, viewport::Ps1View& view, const std::vector<splash::FlatObject>& flats) {
+    viewport::Vec3 lo, hi;
+    if (!frameBounds(doc, view, flats, &lo, &hi)) return;
+    viewport::Vec3 c{(lo.x + hi.x) * 0.5f, (lo.y + hi.y) * 0.5f, (lo.z + hi.z) * 0.5f};
+    viewport::Vec3 e{(hi.x - lo.x) * 0.5f, (hi.y - lo.y) * 0.5f, (hi.z - lo.z) * 0.5f};
+    view.frame(c, std::sqrt(e.x * e.x + e.y * e.y + e.z * e.z));
+}
+
+// The selected object's world origin (GL space) and identity, for Shift+F.
+static bool selectedOrigin(const editor::Document& doc, const std::vector<splash::FlatObject>& flats, const void** id,
+                           viewport::Vec3* at) {
+    const splash::Object* sel = doc.selected();
+    if (!sel) return false;
+    for (const splash::FlatObject& fo : flats)
+        if (fo.object == sel) {
+            *id = sel;
+            *at = toGl(fo.localToWorld.position());
+            return true;
+        }
+    return false;
+}
+
+// Unity's Quaternion.LookRotation(forward, up), both unit and orthogonal.
+static splash::Quat lookRotation(splash::Vec3 f, splash::Vec3 u) {
+    splash::Vec3 r{u.y * f.z - u.z * f.y, u.z * f.x - u.x * f.z, u.x * f.y - u.y * f.x};
+    float m00 = r.x, m01 = u.x, m02 = f.x, m10 = r.y, m11 = u.y, m12 = f.y, m20 = r.z, m21 = u.z, m22 = f.z;
+    splash::Quat q;
+    float tr = m00 + m11 + m22;
+    if (tr > 0) {
+        float k = std::sqrt(tr + 1) * 2;
+        q = {(m21 - m12) / k, (m02 - m20) / k, (m10 - m01) / k, k / 4};
+    } else if (m00 > m11 && m00 > m22) {
+        float k = std::sqrt(1 + m00 - m11 - m22) * 2;
+        q = {k / 4, (m01 + m10) / k, (m02 + m20) / k, (m21 - m12) / k};
+    } else if (m11 > m22) {
+        float k = std::sqrt(1 + m11 - m00 - m22) * 2;
+        q = {(m01 + m10) / k, k / 4, (m12 + m21) / k, (m02 - m20) / k};
+    } else {
+        float k = std::sqrt(1 + m22 - m00 - m11) * 2;
+        q = {(m02 + m20) / k, (m12 + m21) / k, k / 4, (m10 - m01) / k};
+    }
+    return editor::quatNormalize(q);
+}
+
+// Ctrl+Shift+F: moves and turns the selection to where the camera is and
+// how it looks, like Unity's Align With View.
+static void alignWithView(editor::Document& doc, const viewport::Ps1View& view, const std::vector<splash::FlatObject>& flats) {
+    const std::optional<editor::ObjectPath> path = doc.selection();
+    if (!path) return;
+    viewport::Vec3 s, u, f, e = view.ortho() ? view.pivot() : view.eye();
+    view.basis(&s, &u, &f);
+    splash::Vec3 worldPos{e.x, e.y, -e.z};
+    splash::Quat worldRot = lookRotation({f.x, f.y, -f.z}, {u.x, u.y, -u.z});
+    const splash::Object* par = doc.parent(*path);
+    const splash::FlatObject* pf = nullptr;
+    for (const splash::FlatObject& fo : flats)
+        if (par && fo.object == par) pf = &fo;
+    splash::Vec3 pos = pf ? worldToParentDelta(&pf->localToWorld, worldPos - pf->localToWorld.position()) : worldPos;
+    splash::Quat rot = worldRot;
+    if (pf) {
+        splash::Quat inv{-pf->worldRotation.x, -pf->worldRotation.y, -pf->worldRotation.z, pf->worldRotation.w};
+        rot = editor::quatNormalize(editor::quatMul(inv, worldRot));
+    }
+    doc.edit(*path, [&](splash::Object& ob) {
+        ob.transform.position = pos;
+        ob.transform.rotation = rot;
+    });
+}
+
 // Mouse and keys over the viewport, registered after the overlays so the
-// toolbars, icons and gizmo take the mouse first. RMB orbits, MMB pans, the
-// wheel dollies, F frames. Effects show from the next frame's render.
+// toolbars, icons and gizmo take the mouse first. Unity's Scene view
+// controls: RMB looks around, and with it held WASD/QE fly (Shift faster,
+// the wheel sets the speed); Alt+LMB orbits the pivot, Alt+RMB zooms,
+// MMB (or LMB with the hand tool) pans, the wheel zooms to the pivot. F
+// frames the selection, Shift+F also follows it, Ctrl+Shift+F aligns it
+// with the view. Effects show from the next frame's render.
 static void viewportInput(State& st, ImRect r, editor::Document& doc, viewport::Ps1View& view,
                           const std::vector<splash::FlatObject>& flats) {
     ImGuiIO& io = ImGui::GetIO();
@@ -1252,19 +1363,57 @@ static void viewportInput(State& st, ImRect r, editor::Document& doc, viewport::
                 ImGui::FocusWindow(g.CurrentWindow);
                 st.vpButton = b;
                 st.vpDragged = false;
+                st.vpAlt = io.KeyAlt;
+                st.flyHeld = 0;
                 break;
             }
+    enum { None, Select, Look, Orbit, Zoom, Pan } mode = None;
     if (g.ActiveId == id && st.vpButton >= 0) {
+        if (st.vpButton == 0) mode = st.vpAlt ? Orbit : st.tool == 0 ? Pan : Select;
+        if (st.vpButton == 1) mode = st.vpAlt ? Zoom : Look;
+        if (st.vpButton == 2) mode = Pan;
+    }
+    bool moved = false;
+    if (mode != None) {
         if (ImGui::IsMouseDown(st.vpButton)) {
             if (ImGui::IsMouseDragPastThreshold(st.vpButton)) st.vpDragged = true;
-            if (st.vpDragged && (io.MouseDelta.x != 0 || io.MouseDelta.y != 0)) {
-                if (st.vpButton == 1) view.orbit(io.MouseDelta.x, io.MouseDelta.y);
-                if (st.vpButton == 2) view.pan(io.MouseDelta.x, io.MouseDelta.y, r.GetHeight());
+            ImVec2 d = io.MouseDelta;
+            if (st.vpDragged && (d.x != 0 || d.y != 0)) {
+                if (mode == Look) view.lookAround(d.x, d.y);
+                if (mode == Orbit) view.orbit(d.x, d.y);
+                if (mode == Pan) view.pan(d.x, d.y, r.GetHeight());
+                if (mode == Zoom) view.dolly((std::fabs(d.x) > std::fabs(d.y) ? -d.x : d.y) * 0.03f);
+                moved = mode == Pan || mode == Look;  // orbit and zoom keep a Shift+F follow
             }
-            if (st.vpButton != 0 && st.vpDragged) ImGui::SetMouseCursor(st.vpButton == 2 ? ImGuiMouseCursor_ResizeAll : ImGuiMouseCursor_Arrow);
+            if (mode == Look) {
+                // Flythrough: camera-space WASD + Q down / E up, accelerating while held.
+                viewport::Vec3 dir;
+                if (ImGui::IsKeyDown(ImGuiKey_D)) dir.x += 1;
+                if (ImGui::IsKeyDown(ImGuiKey_A)) dir.x -= 1;
+                if (ImGui::IsKeyDown(ImGuiKey_E)) dir.y += 1;
+                if (ImGui::IsKeyDown(ImGuiKey_Q)) dir.y -= 1;
+                if (ImGui::IsKeyDown(ImGuiKey_W)) dir.z += 1;
+                if (ImGui::IsKeyDown(ImGuiKey_S)) dir.z -= 1;
+                if (dir.x != 0 || dir.y != 0 || dir.z != 0) {
+                    st.flyHeld += io.DeltaTime;
+                    float speed = st.flySpeed * (1 + std::min(st.flyHeld, 2.0f) * 1.5f) * (io.KeyShift ? 4.0f : 1.0f);
+                    float len = std::sqrt(dir.x * dir.x + dir.y * dir.y + dir.z * dir.z);
+                    float k = speed * io.DeltaTime / len;
+                    view.fly({dir.x * k, dir.y * k, dir.z * k});
+                    moved = true;
+                } else {
+                    st.flyHeld = 0;
+                }
+                if (hovered && io.MouseWheel != 0) {
+                    st.flySpeed = std::clamp(st.flySpeed * std::pow(1.2f, io.MouseWheel), 0.05f, 200.0f);
+                    st.flySpeedShownUntil = ImGui::GetTime() + 1.0;
+                }
+            }
+            if (st.vpDragged && mode != Select)
+                ImGui::SetMouseCursor(mode == Pan ? ImGuiMouseCursor_ResizeAll : ImGuiMouseCursor_Arrow);
         } else {
             // A left click that did not drag selects what is under the mouse, or clears the selection.
-            if (st.vpButton == 0 && !st.vpDragged && r.Contains(io.MousePos)) {
+            if (mode == Select && !st.vpDragged && r.Contains(io.MousePos)) {
                 std::optional<int> hit = view.pick(io.MousePos, r.Min, r.GetSize());
                 std::vector<editor::ObjectPath> paths = doc.flatPaths();
                 if (hit && *hit >= 0 && (size_t)*hit < paths.size()) doc.select(paths[(size_t)*hit]);
@@ -1272,16 +1421,42 @@ static void viewportInput(State& st, ImRect r, editor::Document& doc, viewport::
             }
             ImGui::ClearActiveID();
             st.vpButton = -1;
+            st.flyHeld = 0;
         }
     }
-    if (hovered && io.MouseWheel != 0) view.dolly(io.MouseWheel);
-    if (!io.WantTextInput && !io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_F, false)) {
-        viewport::Vec3 lo, hi;
-        if (frameBounds(doc, view, flats, &lo, &hi)) {
-            viewport::Vec3 c{(lo.x + hi.x) * 0.5f, (lo.y + hi.y) * 0.5f, (lo.z + hi.z) * 0.5f};
-            viewport::Vec3 e{(hi.x - lo.x) * 0.5f, (hi.y - lo.y) * 0.5f, (hi.z - lo.z) * 0.5f};
-            view.frame(c, std::sqrt(e.x * e.x + e.y * e.y + e.z * e.z));
-        }
+    if (hovered && io.MouseWheel != 0 && mode != Look) view.dolly(io.MouseWheel);
+
+    // Shift+F follow: stays on until the camera is panned or flown, or the selection changes.
+    const void* selId = nullptr;
+    viewport::Vec3 selAt;
+    bool haveSel = selectedOrigin(doc, flats, &selId, &selAt);
+    if (moved || !haveSel || selId != st.followObject) st.follow = false;
+    if (st.follow) {
+        view.translate({selAt.x - st.followAt[0], selAt.y - st.followAt[1], selAt.z - st.followAt[2]});
+        st.followAt[0] = selAt.x, st.followAt[1] = selAt.y, st.followAt[2] = selAt.z;
+    }
+
+    const bool keys = !io.WantTextInput && !(st.play.showGame && st.play.game.attached());
+    if (keys && io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_F, false)) alignWithView(doc, view, flats);
+    if ((keys && !io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_F, false)) || st.frameRequest) {
+        frameSelection(doc, view, flats);
+        st.follow = keys && io.KeyShift && !st.frameRequest && haveSel;
+        st.followObject = selId;
+        st.followAt[0] = selAt.x, st.followAt[1] = selAt.y, st.followAt[2] = selAt.z;
+    }
+    st.frameRequest = false;
+
+    // The fly speed, shown for a moment after the wheel changes it.
+    if (ImGui::GetTime() < st.flySpeedShownUntil) {
+        Fonts& f = fonts();
+        char b[32];
+        std::snprintf(b, sizeof b, "Speed %.2f", st.flySpeed);
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        ImVec2 ts = measure(f.medium, type::label, b);
+        ImVec2 c = r.GetCenter();
+        ImRect chip(c - ImVec2(ts.x / 2 + 12, 14), c + ImVec2(ts.x / 2 + 12, 14));
+        dl->AddRectFilled(chip.Min, chip.Max, rgb(0x0e1014, 210), radius::pill);
+        textCentered(dl, chip, f.medium, type::label, color::text, b);
     }
 }
 
@@ -1380,8 +1555,8 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
     ImRect tools(p, p + ImVec2(4 * 30 + 4, 32));
     dl->AddRectFilled(tools.Min, tools.Max, rgb(0x0e1014, 210), radius::button + 2);
     dl->AddRect(tools.Min, tools.Max, rgb(0xffffff, 14), radius::button + 2);
-    const char* tIcons[4] = {icon::pointer, icon::move, icon::rotate, icon::scale};
-    const char* tTips[4] = {"Select (Q)", "Move (W)", "Rotate (E)", "Scale (R)"};
+    const char* tIcons[4] = {icon::hand, icon::move, icon::rotate, icon::scale};
+    const char* tTips[4] = {"Hand (Q)", "Move (W)", "Rotate (E)", "Scale (R)"};
     for (int i = 0; i < 4; ++i) {
         ImGui::PushID(i);
         if (iconButton("tool", ImRect(ImVec2(p.x + 2 + i * 30, p.y + 2), ImVec2(p.x + 2 + i * 30 + 30, p.y + 30)), tIcons[i],
@@ -1406,7 +1581,7 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
     }
     float camW = 128;
     ImVec2 rp(r.Max.x - space::md - segW - space::sm - camW, p.y + 2);
-    dropdown("camera", ImRect(rp, rp + ImVec2(camW, 28)), icon::camera, "Perspective");
+    dropdown("camera", ImRect(rp, rp + ImVec2(camW, 28)), icon::camera, view.ortho() ? "Orthographic" : "Perspective");
     st.viewMode = segmented("viewmode", ImVec2(rp.x + camW + space::sm, p.y + 2), {"PS1", "Clean"}, st.viewMode, &w);
     axisWidget(dl, ImVec2(r.Max.x - 52, r.Min.y + 96), view);
 
@@ -2104,7 +2279,8 @@ static void shortcuts(State& st, editor::Document& doc) {
     }
     if (ctrl && !shift && repeat(ImGuiKey_Z)) doc.undo();
     if (ctrl && ((shift && repeat(ImGuiKey_Z)) || repeat(ImGuiKey_Y))) doc.redo();
-    if (!ctrl && !shift && !io.KeyAlt) {
+    // While the right button is held in the viewport, QWE fly the camera.
+    if (!ctrl && !shift && !io.KeyAlt && st.vpButton != 1) {
         if (pressed(ImGuiKey_Q)) st.tool = 0;
         if (pressed(ImGuiKey_W)) st.tool = 1;
         if (pressed(ImGuiKey_E)) st.tool = 2;

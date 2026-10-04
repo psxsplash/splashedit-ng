@@ -44,6 +44,15 @@ Mat4 Mat4::perspective(float fovy, float aspect, float zn, float zf) {
     return r;
 }
 
+Mat4 Mat4::ortho(float hw, float hh, float zn, float zf) {
+    Mat4 r = identity();
+    r.m[0] = 1 / hw;
+    r.m[5] = 1 / hh;
+    r.m[10] = -2 / (zf - zn);
+    r.m[14] = -(zf + zn) / (zf - zn);
+    return r;
+}
+
 Mat4 Mat4::lookAt(Vec3 eye, Vec3 target, Vec3 up) {
     Vec3 f = normalize(target - eye);
     Vec3 s = normalize(cross(f, up));
@@ -457,7 +466,15 @@ unsigned Ps1View::render(int panelW, int panelH, int lines) {
         glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, m_depth);
     }
 
-    m_viewProj = Mat4::perspective(kFovY, (float)panelW / panelH, 0.1f, 200.0f) * Mat4::lookAt(m_eye, m_target, {0, 1, 0});
+    Vec3 bRight, bUp, bFwd;
+    basis(&bRight, &bUp, &bFwd);
+    const float aspect = (float)panelW / panelH;
+    if (m_ortho) {
+        float hh = distance() * std::tan(kFovY * 0.5f);
+        m_viewProj = Mat4::ortho(hh * aspect, hh, 0.1f, 2 * kOrthoBack) * Mat4::lookAt(eye(), m_target, bUp);
+    } else {
+        m_viewProj = Mat4::perspective(kFovY, aspect, 0.1f, 200.0f) * Mat4::lookAt(m_eye, m_target, bUp);
+    }
 
     const float fog[3] = {0.10f, 0.11f, 0.17f};
     glBindFramebuffer(GL_FRAMEBUFFER, m_fbo);
@@ -507,10 +524,22 @@ unsigned Ps1View::render(int panelW, int panelH, int lines) {
 
 void Ps1View::basis(Vec3* right, Vec3* up, Vec3* forward) const {
     Vec3 f = normalize(m_target - m_eye);
-    Vec3 s = normalize(cross(f, {0, 1, 0}));
+    // Straight down (top view) or up has no yaw; screen-up is then Unity +Z
+    // (GL -Z) looking down, like Unity's Top view.
+    Vec3 worldUp = std::fabs(f.y) > 0.9999f ? Vec3{0, 0, f.y < 0 ? -1.0f : 1.0f} : Vec3{0, 1, 0};
+    Vec3 s = normalize(cross(f, worldUp));
     if (right) *right = s;
     if (up) *up = cross(s, f);
     if (forward) *forward = f;
+}
+
+Vec3 Ps1View::eye() const {
+    if (!m_ortho) return m_eye;
+    return m_target - normalize(m_target - m_eye) * kOrthoBack;
+}
+
+float Ps1View::worldPerPixel(float depth, float panelH) const {
+    return 2 * (m_ortho ? distance() : depth) * std::tan(kFovY * 0.5f) / std::max(panelH, 1.0f);
 }
 
 float Ps1View::distance() const {
@@ -524,6 +553,12 @@ void Ps1View::ray(ImVec2 screen, ImVec2 mn, ImVec2 sz, Vec3* origin, Vec3* dir) 
     float nx = (screen.x - mn.x) / sz.x * 2 - 1;
     float ny = 1 - (screen.y - mn.y) / sz.y * 2;
     float th = std::tan(kFovY * 0.5f);
+    if (m_ortho) {
+        float hh = distance() * th;
+        *origin = eye() + s * (nx * hh * sz.x / sz.y) + u * (ny * hh);
+        *dir = f;
+        return;
+    }
     *origin = m_eye;
     *dir = normalize(f + s * (nx * th * sz.x / sz.y) + u * (ny * th));
 }
@@ -543,7 +578,7 @@ void Ps1View::orbit(float dx, float dy) {
 void Ps1View::pan(float dx, float dy, float panelH) {
     Vec3 s, u;
     basis(&s, &u, nullptr);
-    float perPx = 2 * distance() * std::tan(kFovY * 0.5f) / std::max(panelH, 1.0f);
+    float perPx = worldPerPixel(distance(), panelH);
     Vec3 move = s * (-dx * perPx) + u * (dy * perPx);
     m_eye = m_eye + move;
     m_target = m_target + move;
@@ -563,6 +598,35 @@ void Ps1View::frame(Vec3 center, float radius) {
     float r = std::max(radius, 0.1f) / std::sin(kFovY * 0.5f) * 1.3f;
     m_target = center;
     m_eye = center + dir * std::max(r, 0.5f);
+}
+
+void Ps1View::lookAround(float dx, float dy) {
+    Vec3 f = normalize(m_target - m_eye);
+    float r = distance();
+    if (r <= 0) return;
+    float yaw = std::atan2(f.x, -f.z);
+    float pitch = std::asin(std::clamp(f.y, -1.0f, 1.0f));
+    const float k = 0.004f;  // radians per pixel
+    yaw += dx * k;
+    pitch = std::clamp(pitch - dy * k, -1.55f, 1.55f);
+    Vec3 nf{std::cos(pitch) * std::sin(yaw), std::sin(pitch), -std::cos(pitch) * std::cos(yaw)};
+    m_target = m_eye + nf * r;
+}
+
+void Ps1View::fly(Vec3 move) {
+    Vec3 s, u, f;
+    basis(&s, &u, &f);
+    translate(s * move.x + u * move.y + f * move.z);
+}
+
+void Ps1View::translate(Vec3 d) {
+    m_eye = m_eye + d;
+    m_target = m_target + d;
+}
+
+void Ps1View::lookAlong(Vec3 forward) {
+    float r = distance();
+    m_eye = m_target - normalize(forward) * (r > 0 ? r : 1.0f);
 }
 
 std::optional<int> Ps1View::pick(ImVec2 screen, ImVec2 mn, ImVec2 sz) const {
