@@ -54,7 +54,7 @@ def comp(s, name):
 def read(d):
     version, = struct.unpack_from('<H', d, 2)
     nlua, ngo = struct.unpack_from('<HH', d, 4)
-    header = 148 if version >= 24 else 144
+    header = 156 if version >= 25 else 148 if version >= 24 else 144
     objs = []
     for i in range(ngo):
         o = header + nlua * 8 + i * 92
@@ -84,7 +84,7 @@ def read(d):
 r, d = export()
 check('export', r.returncode == 0, r.stderr)
 version, table, objs, lights = read(d)
-check('version 24 with runtime lights', version == 24, version)
+check('version 25', version == 25, version)
 check('light table offset set and aligned', table != 0 and table % 4 == 0, table)
 check('disabled runtime light still exported', [l['name'] for l in lights] == ['Red', 'Spare'], lights)
 red = lights[0]
@@ -109,10 +109,10 @@ check('lit mesh: runtime light not baked', objs['Lit']['colours'] == objs_none['
 check('lit mesh: baked light changes colours (control)', objs_baked['Lit']['colours'] != objs_none['Lit']['colours'])
 check('off mesh: runtime light still baked', objs['Unlit']['colours'] == objs_baked['Unlit']['colours'])
 
-# No runtime lights -> v23 with the 144-byte header, as before.
+# No runtime lights -> no light table.
 _, d23 = export(lambda s: [comp(s, n).update(runtime=False) for n in ('Red', 'Spare')])
 v, t, o23, l23 = read(d23)
-check('baked-only scene stays v23', v == 23 and t == 0 and not l23, (v, t))
+check('baked-only scene has no light table', t == 0 and not l23, (v, t))
 check('no dynamic flags without runtime lights', all(x['flags'] & 0x30000 == 0 for x in o23.values()))
 
 # The table holds 16; extra lights are dropped with a warning.

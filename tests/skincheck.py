@@ -38,10 +38,11 @@ def export(edit=lambda s: None, files=None):
 
 
 def read(d):
-    nlua, ngo = struct.unpack_from('<HH', d, 4)
+    version, nlua, ngo = struct.unpack_from('<HHH', d, 2)
+    header = 156 if version >= 25 else 148 if version >= 24 else 144
     gos = []
     for i in range(ngo):
-        o = 144 + nlua * 8 + i * 92
+        o = header + nlua * 8 + i * 92
         mesh, = struct.unpack_from('<I', d, o)
         poly, = struct.unpack_from('<H', d, o + 52)
         flags, = struct.unpack_from('<I', d, o + 56)

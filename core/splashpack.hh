@@ -1,5 +1,5 @@
 // Splashpack writer: Scene IR -> .splashpack + .vram + .spu, as SplashEdit 2.4
-// writes them (splashpack v23). See docs/splashpack-format.md.
+// writes them (splashpack v25). See docs/splashpack-format.md.
 #pragma once
 
 #include <filesystem>
@@ -34,6 +34,14 @@ struct ExportStats {
     // starts at 0x1010 and rounds each clip's address and size up to 16 bytes.
     size_t spuEnd = 0;
     int triangles = 0;
+    // psxsplash render buffers. The *Need values are the exporter's worst case
+    // for this scene; the plain ones are what the splashpack carries, which is
+    // the scene's override when it has one.
+    uint32_t orderingTableNeed = 0, bumpAllocatorNeed = 0;
+    uint32_t orderingTableSize = 0, bumpAllocatorSize = 0;
+    // Bytes psxsplash allocates for them: two ordering tables of size + 1
+    // four-byte entries and two bump allocators.
+    size_t rendererBytes() const { return 2 * (size_t(orderingTableSize) + 1) * 4 + 2 * size_t(bumpAllocatorSize); }
 };
 
 struct ExportResult {
