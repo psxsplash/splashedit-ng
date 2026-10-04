@@ -412,8 +412,10 @@ static void treeObjects(TreeCtx& c, const std::vector<splash::Object>& objs, edi
         row.hidden = !o.active;
         ImRect rr(ImVec2(c.panel.Min.x + space::xs + 2, c.y), ImVec2(c.panel.Max.x - space::xs - 2, c.y + size::row));
         ImGui::PushID(static_cast<int>(i));
-        Hit h = treeRow("row", rr, row);
-        if (h.clicked) {
+        bool flipActive = false;
+        Hit h = treeRow("row", rr, row, &flipActive);
+        if (flipActive) c.doc.edit(path, [](splash::Object& ob) { ob.active = !ob.active; });
+        else if (h.clicked) {
             if (row.hasChildren && chevronClicked(rr, row.depth)) c.doc.toggleExpanded(path);
             else c.doc.select(path);
         }

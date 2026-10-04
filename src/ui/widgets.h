@@ -65,7 +65,8 @@ struct TreeRow {
     bool hidden = false;
 };
 // Returns the row's hit state so the caller can tell a chevron click from a row click.
-Hit treeRow(const char* id, ImRect r, const TreeRow& row);
+// With `visibilityClicked` the row draws an eye that sets it when clicked; the eye wins over the row.
+Hit treeRow(const char* id, ImRect r, const TreeRow& row, bool* visibilityClicked = nullptr);
 
 // Collapsible inspector section. Returns open state.
 // A removable section's ellipsis opens a menu; `removed` is set when its
