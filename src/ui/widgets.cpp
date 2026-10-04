@@ -71,6 +71,11 @@ void tooltip(const char* t) {
     ImVec2 s = measure(f.regular, type::label, t);
     ImVec2 m = ImGui::GetIO().MousePos;
     ImRect r(ImVec2(m.x + 14, m.y + 18), ImVec2(m.x + 14 + s.x + space::md * 2, m.y + 18 + s.y + space::sm * 2));
+    // Keep it on screen near the right and bottom edges.
+    ImVec2 d = ImGui::GetIO().DisplaySize;
+    ImVec2 shift(std::min(0.0f, d.x - space::xs - r.Max.x), std::min(0.0f, d.y - space::xs - r.Max.y));
+    r.Min += shift;
+    r.Max += shift;
     ImDrawList* dl = ImGui::GetForegroundDrawList();
     dl->AddRectFilled(r.Min + ImVec2(0, 2), r.Max + ImVec2(0, 4), rgb(0x000000, 70), radius::card);
     dl->AddRectFilled(r.Min, r.Max, color::active, radius::card);
@@ -236,11 +241,13 @@ Hit treeRow(const char* id, ImRect r, const TreeRow& row) {
     return h;
 }
 
+static void drawToggle(ImDrawList* dl, const char* id, ImRect r, bool on, float hover);
+
 bool section(const char* id, ImRect r, const char* ic, ImU32 iconColor, const char* title, bool open, bool enabled,
-             bool removable, bool* removed) {
+             bool removable, bool* removed, bool* toggled) {
     Fonts& f = fonts();
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    // The ellipsis registers before the header so it wins the hover where they overlap.
+    // The ellipsis and the switch register before the header so they win the hover where they overlap.
     ImRect dots(ImVec2(r.Max.x - space::sm - 20, r.Min.y + 5), ImVec2(r.Max.x - space::xs, r.Max.y - 5));
     std::string menuId = std::string(id) + "#menu";
     float dotsHover = 0;
@@ -248,6 +255,14 @@ bool section(const char* id, ImRect r, const char* ic, ImU32 iconColor, const ch
         Hit d = interact((std::string(id) + "#dots").c_str(), dots);
         dotsHover = d.hover;
         if (d.clicked) ImGui::OpenPopup(menuId.c_str());
+    }
+    const float switchRight = r.Max.x - space::sm - (removable ? 26 : 0);
+    ImRect sw(ImVec2(switchRight - 26, r.Min.y + 9), ImVec2(switchRight, r.Max.y - 9));
+    std::string switchId = std::string(id) + "#on";
+    Hit s{};
+    if (toggled) {
+        s = interact(switchId.c_str(), sw);
+        if (s.clicked) *toggled = true;
     }
     Hit h = interact(id, r);
     dl->AddRectFilled(r.Min, r.Max, lerpColor(color::raised, color::hover, h.hover * 0.6f), radius::card,
@@ -267,8 +282,7 @@ bool section(const char* id, ImRect r, const char* ic, ImU32 iconColor, const ch
              lerpColor(color::textFaint, dotsHover > 0 ? color::text : color::textDim, std::max(h.hover, dotsHover)), icon::ellipsis);
         right -= 26;
     }
-    if (removable)
-        toggle((std::string(id) + "#on").c_str(), ImRect(ImVec2(right - 26, r.Min.y + 9), ImVec2(right, r.Max.y - 9)), enabled);
+    if (toggled) drawToggle(dl, switchId.c_str(), sw, enabled, s.hover);
     if (removable && removed) {
         const float pad = space::xs, rowH = size::field + 4, w = 176;
         ImVec2 size(w, pad * 2 + rowH);
@@ -716,17 +730,21 @@ void assetField(const char* id, ImRect r, const char* ic, ImU32 iconColor, const
     }
 }
 
-void toggle(const char* id, ImRect r, bool on) {
-    Hit h = interact(id, r);
-    ImDrawList* dl = ImGui::GetWindowDrawList();
+static void drawToggle(ImDrawList* dl, const char* id, ImRect r, bool on, float hover) {
     float t = anim(ImGui::GetID((std::string(id) + "#k").c_str()), on, 18.0f);
     ImU32 track = lerpColor(color::active, color::accent, t);
-    if (h.hover > 0 && !on) track = lerpColor(track, color::borderStrong, h.hover);
+    if (hover > 0 && !on) track = lerpColor(track, color::borderStrong, hover);
     float rad = r.GetHeight() * 0.5f;
     dl->AddRectFilled(r.Min, r.Max, track, rad);
     float cx = r.Min.x + rad + (r.GetWidth() - rad * 2) * t;
     dl->AddCircleFilled(ImVec2(cx, r.Min.y + rad + 0.5f), rad - 2.5f, rgb(0x000000, 50), 20);
     dl->AddCircleFilled(ImVec2(cx, r.Min.y + rad), rad - 2.5f, rgb(0xf4f5f8), 20);
+}
+
+bool toggle(const char* id, ImRect r, bool on) {
+    Hit h = interact(id, r);
+    drawToggle(ImGui::GetWindowDrawList(), id, r, on, h.hover);
+    return h.clicked;
 }
 
 void colorField(const char* id, ImRect r, ImU32 col, const char* hex) {

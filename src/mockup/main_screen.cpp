@@ -1633,7 +1633,9 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
         }
     }
     text(dl, ImVec2(ic.Max.x + space::md, y + 22), f.regular, type::caption, color::textFaint, where.c_str());
-    toggle("objactive", ImRect(ImVec2(x1 - 30, y + 12), ImVec2(x1, y + 28)), o->active);
+    if (toggle("objactive", ImRect(ImVec2(x1 - 30, y + 12), ImVec2(x1, y + 28)), o->active))
+        doc.edit(path, [](splash::Object& ob) { ob.active = !ob.active; });
+    tooltip("Inactive objects start switched off in the game. Scripts and cutscenes can switch them on.");
     y += 40 + space::lg;
 
     const float lw = 96, rowH = 32;
@@ -1747,8 +1749,10 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
     if (o->light) {
         const splash::LightComponent& l = *o->light;
         top = y;
+        bool flipLight = false;
         section("s_light", ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), icon::lightbulb, kind::light, "Light", true, l.enabled, true,
-                removeFlag(editor::ComponentKind::Light));
+                removeFlag(editor::ComponentKind::Light), &flipLight);
+        if (flipLight) doc.edit(path, [](splash::Object& ob) { ob.light->enabled = !ob.light->enabled; });
         y += 34 + space::xs;
         // Menu order follows the tooltip: Point, Spot, Directional.
         const splash::LightKind kinds[3] = {splash::LightKind::Point, splash::LightKind::Spot, splash::LightKind::Directional};
