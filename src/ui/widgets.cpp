@@ -197,15 +197,23 @@ void searchField(const char* id, ImRect r, const char* placeholder, const char* 
     }
 }
 
-Hit treeRow(const char* id, ImRect r, const TreeRow& row) {
+Hit treeRow(const char* id, ImRect r, const TreeRow& row, bool* visibilityClicked) {
     Fonts& f = fonts();
+    // The eye registers before the row so it wins the click where they overlap.
+    ImRect eye(ImVec2(r.Max.x - space::sm - 18, r.Min.y), ImVec2(r.Max.x - space::sm + 4, r.Max.y));
+    Hit e{};
+    if (visibilityClicked) {
+        e = interact((std::string(id) + "#eye").c_str(), eye);
+        if (e.clicked) *visibilityClicked = true;
+    }
     Hit h = interact(id, r);
+    const float rowHover = std::max(h.hover, e.hover);
     ImDrawList* dl = ImGui::GetWindowDrawList();
     if (row.selected) {
         dl->AddRectFilled(r.Min, r.Max, color::accentSoft, radius::field);
         dl->AddRectFilled(r.Min, ImVec2(r.Min.x + 2, r.Max.y), color::accent, 1);
-    } else if (h.hover > 0) {
-        dl->AddRectFilled(r.Min, r.Max, rgb(0x2a2f39, (int)(160 * h.hover)), radius::field);
+    } else if (rowHover > 0) {
+        dl->AddRectFilled(r.Min, r.Max, rgb(0x2a2f39, (int)(160 * rowHover)), radius::field);
     }
     float x = r.Min.x + space::xs + row.depth * 16.0f;
     ImU32 dimmed = row.hidden ? color::textFaint : color::text;
@@ -222,10 +230,11 @@ Hit treeRow(const char* id, ImRect r, const TreeRow& row) {
          row.label);
     float right = r.Max.x - space::sm;
     // Visibility toggle shows on hover, or always when the object is hidden.
-    if (h.hover > 0.01f || row.hidden) {
-        float a = row.hidden ? 1.0f : h.hover;
-        text(dl, ImVec2(right - 14, centerY(f.medium, type::icon, r.Min.y, r.Max.y)), f.medium, type::icon - 2,
-             rgb(0xa0a7b6, (int)(255 * a)), row.hidden ? icon::eyeOff : icon::eye);
+    if (visibilityClicked && (rowHover > 0.01f || row.hidden)) {
+        float a = row.hidden ? 1.0f : rowHover;
+        ImU32 col = lerpColor(rgb(0xa0a7b6, (int)(255 * a)), color::text, e.hover);
+        text(dl, ImVec2(right - 14, centerY(f.medium, type::icon, r.Min.y, r.Max.y)), f.medium, type::icon - 2, col,
+             row.hidden ? icon::eyeOff : icon::eye);
         right -= 22;
     }
     if (row.warning) {
