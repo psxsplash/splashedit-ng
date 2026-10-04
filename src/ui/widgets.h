@@ -71,7 +71,7 @@ Hit treeRow(const char* id, ImRect r, const TreeRow& row);
 // A removable section's ellipsis opens a menu; `removed` is set when its
 // Remove component item is picked.
 bool section(const char* id, ImRect r, const char* icon, ImU32 iconColor, const char* title, bool open, bool enabled = true,
-             bool removable = true, bool* removed = nullptr);
+             bool removable = true, bool* removed = nullptr, bool* toggled = nullptr);
 
 // Inspector property row: draws the label (with a tooltip) and returns the value rect.
 ImRect property(const char* id, ImRect row, float labelWidth, const char* label, const char* tip);
@@ -119,7 +119,8 @@ struct PickerItem {
 int picker(const char* id, ImVec2 pos, float width, const char* placeholder, std::string* query, const std::vector<PickerItem>& items);
 
 void assetField(const char* id, ImRect r, const char* icon, ImU32 iconColor, const char* name, const char* meta);
-void toggle(const char* id, ImRect r, bool on);
+// Returns true on the frame the switch is clicked.
+bool toggle(const char* id, ImRect r, bool on);
 void colorField(const char* id, ImRect r, ImU32 col, const char* hex);
 void slider(const char* id, ImRect r, float t, const char* value);
 
