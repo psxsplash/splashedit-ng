@@ -928,8 +928,6 @@ void writeSequences(BinWriter& w, size_t tableOffsetPos, const std::vector<Seque
 // Rectangle 3, Sprite 4, Line 3, TPage 1.
 constexpr uint32_t kFragGouraudTri = 28, kFragTexturedTri = 40, kFragRect = 16, kFragSprite = 20, kFragLine = 16,
                    kFragTPage = 8;
-// Renderer::WORLD_DEPTH_MIN; the ordering table must reach past the 2D bands.
-constexpr uint32_t kOtMin = 256, kOtMax = 65536;
 // A triangle crossing the near plane is split up to MAX_SUBDIV_DEPTH (5) times,
 // up to 32 pieces. How many cross it in one frame is not known here; this
 // allowance (16 such triangles, textured and fogged) is a guess, which is why

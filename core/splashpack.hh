@@ -24,6 +24,10 @@ struct ExportOptions {
 };
 
 // What one export puts on the console, in bytes unless noted.
+// Ordering table size limits. The low end is Renderer::WORLD_DEPTH_MIN: the
+// table must reach past the 2D bands. The exporter clamps overrides to these.
+constexpr uint32_t kOtMin = 256, kOtMax = 65536;
+
 struct ExportStats {
     size_t splashpackBytes = 0, vramFileBytes = 0, spuFileBytes = 0;
     // VRAM: display and draw buffers, texture atlases (each width x 256 at

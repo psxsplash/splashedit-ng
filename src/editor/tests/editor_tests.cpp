@@ -128,6 +128,27 @@ void testMerge() {
     CHECK(e.object({1})->transform.position.x == 2);
 }
 
+// Scene settings edit through the same history as objects.
+void testSettings() {
+    editor::Document d;
+    d.reset(sample());
+    unsigned rev = d.revision();
+    for (int v : {300, 400, 500}) d.editSettings([&](splash::SceneSettings& s) { s.orderingTableSize = v; }, "ot");
+    CHECK(d.historySize() == 1);
+    CHECK(d.revision() > rev);
+    CHECK(d.dirty());
+    d.endMerge();
+    d.editSettings([](splash::SceneSettings& s) { s.orderingTableSize = 0; });
+    CHECK(d.scene().settings.orderingTableSize == 0);
+    CHECK(d.undo());
+    CHECK(d.scene().settings.orderingTableSize == 500);
+    CHECK(d.undo());
+    CHECK(d.scene().settings.orderingTableSize == 0);
+    CHECK(!d.dirty());
+    CHECK(d.redo());
+    CHECK(d.scene().settings.orderingTableSize == 500);
+}
+
 void testDirtyAndSave() {
     std::error_code ec;
     std::filesystem::path dir = g_outDir;
@@ -518,7 +539,21 @@ void testExportStats() {
     CHECK(d.stats.spuEnd == end);
     CHECK(splash::spuBudget(d.stats).used == end);
     CHECK(splash::ramBudget(d.stats).used ==
-          splash::kRendererBytes + std::max({d.stats.splashpackBytes, d.stats.vramFileBytes, d.stats.spuFileBytes}));
+          d.stats.rendererBytes() + std::max({d.stats.splashpackBytes, d.stats.vramFileBytes, d.stats.spuFileBytes}));
+
+    // Overrides replace the estimate in the pack and in the RAM meter; an
+    // ordering table below the minimum is raised to it.
+    CHECK(d.stats.orderingTableSize == d.stats.orderingTableNeed && d.stats.bumpAllocatorSize == d.stats.bumpAllocatorNeed);
+    scene.settings.orderingTableSize = 10;
+    scene.settings.bumpAllocatorSize = 4001;
+    splash::ExportResult o = splash::exportSplashpack(scene, project, dir / "scene.splashpack", dry);
+    CHECK(o.ok());
+    CHECK(o.stats.orderingTableSize == splash::kOtMin);
+    CHECK(o.stats.bumpAllocatorSize == 4004);
+    CHECK(o.stats.orderingTableNeed == d.stats.orderingTableNeed);
+    CHECK(o.stats.rendererBytes() == 2 * (splash::kOtMin + 1) * 4 + 2 * 4004);
+    CHECK(splash::ramBudget(o.stats).used == o.stats.rendererBytes() + std::max({o.stats.splashpackBytes, o.stats.vramFileBytes,
+                                                                                  o.stats.spuFileBytes}));
 }
 
 // A script on an object with no mesh (the courtyard's Game Logic) ships as a
@@ -675,6 +710,7 @@ int main(int argc, char** argv) {
     g_outDir = (exe.has_parent_path() ? exe.parent_path() : std::filesystem::current_path()) / "editor_tests_out";
     testApplyUndoRedo();
     testMerge();
+    testSettings();
     testDirtyAndSave();
     testStructure();
     testPick();
