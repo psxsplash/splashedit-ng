@@ -189,6 +189,10 @@ struct SceneSettings {
     FogSettings fog;
     std::string networkId;
     std::string script;  // scene Lua file, empty = none
+    // psxsplash render buffers: ordering table buckets and bump allocator
+    // bytes per frame. 0 = computed by the exporter (ExportStats).
+    int orderingTableSize = 0;
+    int bumpAllocatorSize = 0;
     ExtraKeys extra;
 };
 

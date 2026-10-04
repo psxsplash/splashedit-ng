@@ -238,6 +238,24 @@ private:
     std::string m_key;
 };
 
+class SettingsCommand : public Command {
+public:
+    SettingsCommand(splash::SceneSettings before, splash::SceneSettings after, std::string key)
+        : m_before(std::move(before)), m_after(std::move(after)), m_key(std::move(key)) {}
+    void apply(Document& doc) override { doc.settingsMut() = m_after; }
+    void revert(Document& doc) override { doc.settingsMut() = m_before; }
+    bool merge(const Command& next) override {
+        auto* n = dynamic_cast<const SettingsCommand*>(&next);
+        if (!n || m_key.empty() || n->m_key != m_key) return false;
+        m_after = n->m_after;
+        return true;
+    }
+
+private:
+    splash::SceneSettings m_before, m_after;
+    std::string m_key;
+};
+
 // Inserts (forward) or removes (inverse) one object with its subtree.
 class StructureCommand : public Command {
 public:
@@ -312,6 +330,12 @@ bool Document::edit(const ObjectPath& path, const std::function<void(splash::Obj
     after.children.clear();
     execute(std::make_unique<EditCommand>(path, std::move(before), std::move(after), mergeKey), !mergeKey.empty());
     return true;
+}
+
+void Document::editSettings(const std::function<void(splash::SceneSettings&)>& fn, const std::string& mergeKey) {
+    splash::SceneSettings after = m_scene.settings;
+    fn(after);
+    execute(std::make_unique<SettingsCommand>(m_scene.settings, std::move(after), mergeKey), !mergeKey.empty());
 }
 
 bool Document::insertObject(const ObjectPath& path, splash::Object obj) {

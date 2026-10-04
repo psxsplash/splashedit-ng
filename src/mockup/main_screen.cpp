@@ -109,6 +109,8 @@ static void togglePlay(State& st, const editor::Document& doc) {
     }
     if (p.build.valid()) return;
     p.message.clear();
+    p.peak.reset();
+    p.peakScene = doc.loadId();
     if (!editor::missingTools(editor::withDefaults(p.tools, p.bundleDir)).empty()) {
         p.openSetup = true;
         return;
@@ -121,6 +123,15 @@ static void togglePlay(State& st, const editor::Document& doc) {
 static void updatePlay(State& st) {
     State::Play& p = st.play;
     p.emu.poll();
+    // Read lines printed since the last frame (some may already have scrolled out).
+    const std::deque<std::string>& out = p.emu.output();
+    if (p.emu.lineCount() < p.linesSeen) p.linesSeen = 0;  // restarted
+    const uint64_t first = p.emu.lineCount() - out.size();
+    for (uint64_t i = std::max(p.linesSeen, first); i < p.emu.lineCount(); ++i) {
+        editor::RenderPeak rp;
+        if (editor::parseRenderPeak(out[size_t(i - first)], &rp)) p.peak = rp;
+    }
+    p.linesSeen = p.emu.lineCount();
     if (p.emu.running()) {
         if (!p.game.attached() && p.game.attach(p.emu.pid())) p.showGame = true;
         p.game.update();
@@ -1742,31 +1753,130 @@ static const char* lightKindLabel(splash::LightKind k) {
     return "";
 }
 
-static void emptyInspector(ImDrawList* dl, ImRect body) {
+static std::string kb(size_t bytes);
+
+// With nothing selected (or the scene row picked) the inspector shows the
+// scene's own settings. For now: psxsplash's render buffers, sized by the
+// exporter unless overridden.
+static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor::Document& doc) {
     Fonts& f = fonts();
-    const char* title = "Nothing selected";
-    const char* hint = "Pick an object in the Scene panel to see and edit its properties.";
-    float wrap = body.GetWidth() - space::xl * 2;
-    ImVec2 ts = measure(f.semibold, type::body, title);
-    float cy = body.Min.y + body.GetHeight() * 0.38f;
-    textCentered(dl, ImRect(ImVec2(body.Min.x, cy - 44), ImVec2(body.Max.x, cy - 20)), f.medium, type::icon + 9, color::textFaint,
-                 icon::pointer);
-    text(dl, ImVec2(body.GetCenter().x - ts.x * 0.5f, cy), f.semibold, type::body, color::textDim, title);
-    // Centre each wrapped line of the hint.
-    float y = cy + ts.y + space::xs;
-    const char* s = hint;
-    const char* end = hint + std::strlen(hint);
-    while (s < end) {
-        const char* e = f.regular->CalcWordWrapPosition(type::label, s, end, wrap);
-        if (e == s) e = s + 1;
-        std::string line(s, e);
-        while (!line.empty() && line.back() == ' ') line.pop_back();
-        ImVec2 ls = measure(f.regular, type::label, line.c_str());
-        text(dl, ImVec2(body.GetCenter().x - ls.x * 0.5f, y), f.regular, type::label, color::textFaint, line.c_str());
-        y += ls.y;
-        s = e;
-        while (s < end && *s == ' ') ++s;
-    }
+    ImGui::PushClipRect(ImVec2(r.Min.x, y), ImVec2(r.Max.x, r.Max.y - 1), true);
+    const float x0 = r.Min.x + space::md, x1 = r.Max.x - space::md;
+    const splash::SceneSettings& set = doc.scene().settings;
+
+    ImRect ic(ImVec2(x0, y), ImVec2(x0 + 40, y + 40));
+    dl->AddRectFilled(ic.Min, ic.Max, (color::accentHover & 0x00ffffffu) | (34u << IM_COL32_A_SHIFT), radius::card);
+    textCentered(dl, ic, f.medium, type::icon + 3, color::accentHover, icon::layers);
+    text(dl, ImVec2(ic.Max.x + space::md, y + 2), f.semibold, type::title, color::text, doc.sceneStem().c_str());
+    text(dl, ImVec2(ic.Max.x + space::md, y + 22), f.regular, type::caption, color::textFaint, "Scene settings");
+    y += 40 + space::lg;
+
+    const std::optional<splash::ExportResult>& res = st.live.result();
+    const splash::ExportStats* stats = res && res->ok() ? &res->stats : nullptr;
+    const float lw = 112, rowH = 32;
+    auto row = [&](const char* id, const char* label, const char* tip) {
+        ImRect rr(ImVec2(x0 + space::sm, y), ImVec2(x1 - space::sm, y + rowH));
+        y += rowH;
+        return property(id, rr, lw, label, tip);
+    };
+    auto caption = [&](const std::string& s, ImU32 col) {
+        float tx = x0 + space::sm + lw;
+        dl->AddText(f.regular, type::caption, ImVec2(tx, y - 2), col, s.c_str(), nullptr, x1 - space::sm - tx);
+        y += f.regular->CalcTextSizeA(type::caption, FLT_MAX, x1 - space::sm - tx, s.c_str()).y + space::xs;
+    };
+
+    float top = y;
+    section("s_render", ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), icon::cpu, color::textDim, "Render buffers", true, true, false);
+    y += 34 + space::xs;
+
+    // One buffer: an integer field showing the size the export uses, "auto"
+    // while the exporter picks it, and a reset button once overridden.
+    struct Buf {
+        const char* id;
+        const char* label;
+        const char* tip;
+        const char* unit;  // shown once overridden
+        int setting;
+        uint32_t need;  // 0 = no export yet
+        uint32_t used;  // what the export writes
+        int splash::SceneSettings::*field;
+    };
+    auto buffer = [&](const Buf& b) {
+        ImRect vr = row(b.id, b.label, b.tip);
+        const bool over = b.setting > 0;
+        ImRect field = over ? ImRect(vr.Min, ImVec2(vr.Max.x - 28, vr.Max.y)) : vr;
+        std::string shown = b.used ? std::to_string(b.used) : over ? std::to_string(b.setting) : std::string("...");
+        float v = float(b.used ? b.used : std::max(b.setting, 0));
+        FieldEdit fe = numberField((std::string(b.id) + "f").c_str(), field, shown.c_str(), over ? b.unit : "auto", 0, nullptr, &v);
+        if (fe.changed) {
+            int n = std::max(1, int(std::lround(v)));
+            doc.editSettings([&](splash::SceneSettings& s) { s.*b.field = n; }, b.id);
+        }
+        if (fe.done) doc.endMerge();
+        if (over) {
+            if (iconButton((std::string(b.id) + "r").c_str(), ImRect(ImVec2(vr.Max.x - 24, vr.Min.y + 4), ImVec2(vr.Max.x, vr.Max.y - 4)),
+                           icon::undo, false, "Size automatically again"))
+                doc.editSettings([&](splash::SceneSettings& s) { s.*b.field = 0; });
+        }
+    };
+
+    const float gte = set.gteScaling > 0 ? set.gteScaling : 100.f;
+    auto metres = [&](uint32_t depth) {
+        char m[32];
+        std::snprintf(m, sizeof m, "%.1f m", double(depth) * gte / 4096.0);
+        return std::string(m);
+    };
+
+    const uint32_t otNeed = stats ? stats->orderingTableNeed : 0, otUsed = stats ? stats->orderingTableSize : 0;
+    buffer({"ot", "Ordering table",
+            "Depth slots the renderer sorts triangles into, back to front. One slot per depth step, so this is also how far "
+            "the camera sees: anything farther away is not drawn. Larger costs 8 bytes of RAM per slot.",
+            "slots", set.orderingTableSize, otNeed, otUsed, &splash::SceneSettings::orderingTableSize});
+    const editor::RenderPeak* peak = st.play.peak && st.play.peakScene == doc.loadId() ? &*st.play.peak : nullptr;
+    if (otUsed) caption("Draws up to " + metres(otUsed) + " away", color::textFaint);
+    if (peak)
+        caption("In Play: farthest drawn at " + std::to_string(peak->depth) + " (" + metres(uint32_t(peak->depth)) + ")",
+                otUsed && uint32_t(peak->depth) >= otUsed ? color::warn : color::accentHover);
+    const uint32_t buNeed = stats ? stats->bumpAllocatorNeed : 0, buUsed = stats ? stats->bumpAllocatorSize : 0;
+    buffer({"bump", "Primitive buffer",
+            "Bytes of GPU commands one frame can build: every triangle drawn, plus sprites and text. If a frame needs more, "
+            "the game stops with \"Out of memory\". Larger costs twice its size in RAM, one per frame being drawn. "
+            "psxsplash calls it the bump allocator.",
+            "bytes", set.bumpAllocatorSize, buNeed, buUsed, &splash::SceneSettings::bumpAllocatorSize});
+    if (buUsed) caption("Up to " + std::to_string(buUsed / 28) + " plain triangles per frame", color::textFaint);
+    if (peak)
+        caption("In Play: busiest frame used " + std::to_string(peak->bump) + " bytes" +
+                    (buUsed ? " (" + std::to_string(int(100.0 * peak->bump / buUsed + 0.5)) + "%)" : std::string()),
+                buUsed && peak->bump > buUsed ? color::warn : color::accentHover);
+    if (stats) caption(kb(stats->rendererBytes()) + " KB of RAM for both, double-buffered", color::textFaint);
+    else caption("Sizes appear once the scene exports.", color::textFaint);
+    dl->AddRect(ImVec2(x0, top), ImVec2(x1, y + space::sm), rgb(0xffffff, 10), radius::card);
+    y += space::sm + space::md;
+
+    // An override below the estimate is allowed (the estimate has margin)
+    // but deserves a word.
+    auto warn = [&](const char* id, const char* title, const std::string& body, int splash::SceneSettings::*field) {
+        bool fix = false;
+        float h = problemCard(id, ImVec2(x0, y), x1 - x0, title, body.c_str(), "Size automatically", &fix);
+        y += h + space::sm;
+        if (fix) doc.editSettings([&](splash::SceneSettings& s) { s.*field = 0; });
+    };
+    if (set.orderingTableSize > 0 && otNeed && otUsed < otNeed)
+        warn("otwarn", "Ordering table may cut off the scene",
+             "The scene reaches " + metres(otNeed) + " from end to end, but only what is within " + metres(otUsed) +
+                 " of the camera is drawn. Fine if the camera never sees that far.",
+             &splash::SceneSettings::orderingTableSize);
+    if (set.bumpAllocatorSize > 0 && buNeed && buUsed < buNeed)
+        warn("bumpwarn", "Primitive buffer may run out",
+             "The estimate for this scene is " + std::to_string(buNeed) + " bytes: every triangle, plus a margin. With " +
+                 std::to_string(buUsed) + ", a frame that draws more stops the game. Play the scene to see what a frame really uses.",
+             &splash::SceneSettings::bumpAllocatorSize);
+
+    const char* hint = "Pick an object in the Scene panel to edit it.";
+    ImVec2 hs = measure(f.regular, type::label, hint);
+    text(dl, ImVec2((r.Min.x + r.Max.x - hs.x) * 0.5f, std::max(y + space::lg, r.Max.y - space::xl - hs.y)), f.regular, type::label,
+         color::textFaint, hint);
+    ImGui::PopClipRect();
 }
 
 static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc) {
@@ -1778,7 +1888,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
 
     const splash::Object* o = doc.selected();
     if (!o) {
-        emptyInspector(dl, ImRect(ImVec2(r.Min.x, y), r.Max));
+        sceneInspector(st, dl, r, y, doc);
         return;
     }
     ImGui::PushClipRect(ImVec2(r.Min.x, y), ImVec2(r.Max.x, r.Max.y - 1), true);

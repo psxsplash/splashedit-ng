@@ -1,4 +1,4 @@
-# splashpack scene format (writer v23 / v24, reader accepts v20..v24)
+# splashpack scene format (writer v25, reader accepts v20..v25)
 
 Sources read (all via `git show origin/main:<path>`, never the working checkout):
 
@@ -26,9 +26,9 @@ A fifth, separate format `.loading` ("LP" magic, `PSXLoaderPackWriter`) exists f
 
 Version written (W:PSXSceneWriter.cs:233): `writer.Write((ushort)(hasLights ? 24 : 23));`
 So the writer emits exactly two versions: **23** when `pointLights.Length == 0`, **24** otherwise.
-Header size: **144 bytes (v23)**, **148 bytes (v24)** (W comment: "Header (144 bytes - splashpack v23, 148 bytes - v24)").
-Reader (R:splashpack.cpp): `static_assert(sizeof(SPLASHPACKFileHeader) == 148 ...)`, `assert(header->version >= 20, ...)`, and
-`splashpackHeaderSize`: `>=24 -> 148`, `>=22 -> 144`, `>=21 -> 128`, else `120`. The reader assumes the header only ever grows by appending.
+Header size: **144 bytes (v23)**, **148 bytes (v24)**, **156 bytes (v25)**. The writer always emits v25.
+Reader (R:splashpack.cpp): `static_assert(sizeof(SPLASHPACKFileHeader) == 156 ...)`, `assert(header->version >= 20, ...)`, and
+`splashpackHeaderSize`: `>=25 -> 156`, `>=24 -> 148`, `>=22 -> 144`, `>=21 -> 128`, else `120`. The reader assumes the header only ever grows by appending.
 The doc comment at the top of W says "splashpack v16"; the Write() doc says "v20". Both are stale. The emitted number is 23/24.
 
 Field table (writer order = reader struct order; `writer.Write('S')` writes the single byte 0x53 because BinaryWriter encodes a `char` as UTF-8):
@@ -93,9 +93,11 @@ Field table (writer order = reader struct order; `writer.Write('S')` writes the 
 | 134 | 2 | u16 | spriteAnimCount | |
 | 136 | 4 | u32 | sceneHash | FNV-1a32 of `SceneNetworkId`, 0 if empty (sec. 3) |
 | 140 | 4 | u32 | tilemapTableOffset | backfilled only if a tilemap exists |
-| 144 | 4 | u32 | lightTableOffset | **v24 only**; backfilled after the light chunk |
+| 144 | 4 | u32 | lightTableOffset | v24+; backfilled after the light chunk, 0 if no runtime lights |
+| 148 | 4 | u32 | orderingTableSize | v25+; ordering table buckets, 0 = engine default |
+| 152 | 4 | u32 | bumpAllocatorSize | v25+; bump allocator bytes per frame, 0 = engine default |
 
-Reader gating (R:splashpack.cpp): agentCount only used if `version>=22`; skin table `version>=18`; memcard `>=21`; sprite/sceneHash `>=22`; tilemap `>=23`; lights `>=24`; stream table `>=21`; per-cutscene/animation skin events `>=19`. Since the writer only emits 23/24, all gates are satisfied.
+Reader gating (R:splashpack.cpp): agentCount only used if `version>=22`; skin table `version>=18`; memcard `>=21`; sprite/sceneHash `>=22`; tilemap `>=23`; lights `>=24`; render buffer sizes `>=25`; stream table `>=21`; per-cutscene/animation skin events `>=19`. The writer emits v25, so all gates are satisfied.
 
 ---
 

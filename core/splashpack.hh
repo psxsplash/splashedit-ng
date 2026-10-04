@@ -1,5 +1,5 @@
 // Splashpack writer: Scene IR -> .splashpack + .vram + .spu, as SplashEdit 2.4
-// writes them (splashpack v23). See docs/splashpack-format.md.
+// writes them (splashpack v25). See docs/splashpack-format.md.
 #pragma once
 
 #include <filesystem>
@@ -24,6 +24,10 @@ struct ExportOptions {
 };
 
 // What one export puts on the console, in bytes unless noted.
+// Ordering table size limits. The low end is Renderer::WORLD_DEPTH_MIN: the
+// table must reach past the 2D bands. The exporter clamps overrides to these.
+constexpr uint32_t kOtMin = 256, kOtMax = 65536;
+
 struct ExportStats {
     size_t splashpackBytes = 0, vramFileBytes = 0, spuFileBytes = 0;
     // VRAM: display and draw buffers, texture atlases (each width x 256 at
@@ -34,6 +38,14 @@ struct ExportStats {
     // starts at 0x1010 and rounds each clip's address and size up to 16 bytes.
     size_t spuEnd = 0;
     int triangles = 0;
+    // psxsplash render buffers. The *Need values are the exporter's worst case
+    // for this scene; the plain ones are what the splashpack carries, which is
+    // the scene's override when it has one.
+    uint32_t orderingTableNeed = 0, bumpAllocatorNeed = 0;
+    uint32_t orderingTableSize = 0, bumpAllocatorSize = 0;
+    // Bytes psxsplash allocates for them: two ordering tables of size + 1
+    // four-byte entries and two bump allocators.
+    size_t rendererBytes() const { return 2 * (size_t(orderingTableSize) + 1) * 4 + 2 * size_t(bumpAllocatorSize); }
 };
 
 struct ExportResult {

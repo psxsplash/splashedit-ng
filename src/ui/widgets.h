@@ -126,7 +126,9 @@ void colorField(const char* id, ImRect r, ImU32 col, const char* hex);
 void slider(const char* id, ImRect r, float t, const char* value);
 
 // Problem card with an inline fix action. Returns its height.
-float problemCard(const char* id, ImVec2 pos, float width, const char* title, const char* body, const char* fixLabel);
+// `fixed`, when given, is set on the frame the fix button is clicked.
+float problemCard(const char* id, ImVec2 pos, float width, const char* title, const char* body, const char* fixLabel,
+                  bool* fixed = nullptr);
 
 // Budget meter for the status bar. Returns its width.
 // fraction < 0 draws no bar (a plain count).

@@ -52,6 +52,11 @@ struct State {
         uint64_t startedAt = 0;   // SDL ticks when redux started, to notice it never publishing
         std::string message;  // why the last Play did not start, for the status bar
         bool openSetup = false, openOutput = false;
+        // What the engine reported using in the last Play of scene `peakScene`
+        // (Document::loadId), kept after it stops.
+        std::optional<editor::RenderPeak> peak;
+        unsigned peakScene = 0;
+        uint64_t linesSeen = 0;
     } play;
 
     // F2 rename in the tree: the object's path, and whether the editor still has to open.

@@ -923,6 +923,61 @@ void writeSequences(BinWriter& w, size_t tableOffsetPos, const std::vector<Seque
 }
 }  // namespace
 
+// psxsplash render buffer sizing. Fragment bytes are a 4-byte chain word plus
+// the psyqo primitive: GouraudTriangle 6 words, GouraudTexturedTriangle 9,
+// Rectangle 3, Sprite 4, Line 3, TPage 1.
+constexpr uint32_t kFragGouraudTri = 28, kFragTexturedTri = 40, kFragRect = 16, kFragSprite = 20, kFragLine = 16,
+                   kFragTPage = 8;
+// A triangle crossing the near plane is split up to MAX_SUBDIV_DEPTH (5) times,
+// up to 32 pieces. How many cross it in one frame is not known here; this
+// allowance (16 such triangles, textured and fogged) is a guess, which is why
+// the editor also shows the peak psxsplash measures while playing.
+constexpr uint32_t kNearPlaneAllowance = 16 * 31 * (kFragGouraudTri + kFragTexturedTri);
+
+// Ordering table: the renderer uses a triangle's largest screen Z as its
+// bucket and drops it at or past the table size, so the table is the far clip
+// in GTE units (1 m = 4096 / gteScaling). The farthest any vertex can be from
+// the camera is the diagonal of everything in the scene; fog culls past
+// 20000 / density.
+static uint32_t orderingTableNeed(const Scene& scene, const std::vector<ExpObject>& objs, float gte) {
+    bool any = false;
+    Vec3 mn{}, mx{};
+    for (const ExpObject& e : objs)
+        for (const Vec3& v : e.mesh->positions) {
+            Vec3 p = e.flat->localToWorld.point(v);
+            mn = any ? vmin(mn, p) : p;
+            mx = any ? vmax(mx, p) : p;
+            any = true;
+        }
+    Vec3 d = mx - mn;
+    double far = std::sqrt(double(d.x) * d.x + double(d.y) * d.y + double(d.z) * d.z) * 4096.0 / gte;
+    if (scene.settings.fog.enabled && scene.settings.fog.density > 0)
+        far = std::min(far, 20000.0 / scene.settings.fog.density);
+    return uint32_t(std::clamp(std::ceil(far) + 1, double(kOtMin), double(kOtMax)));
+}
+
+// Bump allocator: every triangle in the scene drawn in one frame (textured and
+// fogged ones take two fragments), the near-plane allowance, the dither TPage,
+// and the UI with every text at its longest.
+static uint32_t bumpAllocatorNeed(const Scene& scene, const std::vector<ExpObject>& objs, const std::vector<UICanvas>& canvases) {
+    const bool fog = scene.settings.fog.enabled;
+    uint64_t n = kFragTPage + kNearPlaneAllowance;
+    for (const ExpObject& e : objs)
+        for (const PsxTri& t : e.tris)
+            n += t.textureIndex < 0 ? kFragGouraudTri : kFragTexturedTri + (fog ? kFragGouraudTri : 0);
+    for (const UICanvas& cv : canvases)
+        for (const UIElement& el : cv.elements) switch (el.type) {
+                case UIElementType::Box: n += kFragRect; break;
+                case UIElementType::Progress: n += 2 * kFragRect; break;
+                case UIElementType::Line: n += kFragLine; break;
+                case UIElementType::Image: n += 2 * kFragTexturedTri; break;
+                case UIElementType::Text:
+                    if (!el.font.empty()) n += kFragTPage + uint64_t(kUiTextMax) * kFragSprite;
+                    break;
+            }
+    return uint32_t(std::min<uint64_t>((n + 3) & ~uint64_t(3), UINT32_MAX));
+}
+
 ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs::path& out,
                               const ExportOptions& options) {
     ExportResult res;
@@ -1324,11 +1379,20 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     }
 
     BinWriter w;
-    // ---- header (144 bytes, v23; 148 with the v24 light table offset)
+    ExportStats& st = res.stats;
+    st.orderingTableNeed = orderingTableNeed(scene, exporters, gte);
+    st.bumpAllocatorNeed = bumpAllocatorNeed(scene, exporters, canvases);
+    st.orderingTableSize = scene.settings.orderingTableSize > 0
+                               ? uint32_t(std::clamp(scene.settings.orderingTableSize, int(kOtMin), int(kOtMax)))
+                               : st.orderingTableNeed;
+    st.bumpAllocatorSize = scene.settings.bumpAllocatorSize > 0 ? (uint32_t(scene.settings.bumpAllocatorSize) + 3) & ~3u
+                                                                 : st.bumpAllocatorNeed;
+
+    // ---- header (156 bytes, v25)
     bool hasLights = !runtimeLights.empty();
     w.u8('S');
     w.u8('P');
-    w.u16(hasLights ? 24 : 23);
+    w.u16(25);
     w.u16(uint16_t(luaFiles.size()));
     w.u16(uint16_t(exporters.size()));
     w.u16(uint16_t(vram.atlases.size()));
@@ -1407,7 +1471,9 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     w.u32(hashSceneId(scene.settings.networkId));
     w.u32(0);  // tilemap table offset
     size_t lightTableOffsetPos = w.pos();
-    if (hasLights) w.u32(0);
+    w.u32(0);
+    w.u32(st.orderingTableSize);
+    w.u32(st.bumpAllocatorSize);
 
     // ---- Lua metadata
     std::vector<size_t> luaOffsetPos;
@@ -1790,7 +1856,6 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     if (!options.dryRun) s.save(fs::path(outPath).replace_extension(".spu"));
     res.stats.spuFileBytes = s.pos();
 
-    ExportStats& st = res.stats;
     const VramSettings& vs = options.vram;
     st.framebufferBytes = size_t(vs.resolutionX) * size_t(vs.resolutionY) * 2 * (vs.dualBuffering ? 2 : 1);
     for (const Atlas& a : vram.atlases) {

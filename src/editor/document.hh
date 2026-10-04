@@ -101,6 +101,8 @@ public:
     // non-empty `mergeKey` on the same object merge into one undo step until
     // endMerge() is called; a drag passes a key and calls endMerge() on release.
     bool edit(const ObjectPath& path, const std::function<void(splash::Object&)>& fn, const std::string& mergeKey = {});
+    // Same for the scene's own settings (fog, render buffers, ...).
+    void editSettings(const std::function<void(splash::SceneSettings&)>& fn, const std::string& mergeKey = {});
     // Closes the open merge, so the next edit starts a new undo step.
     void endMerge() { m_mergeOpen = false; }
     // Inserts `obj` so that it ends up at `path`, and selects it.
@@ -128,6 +130,7 @@ public:
     // For commands: mutable access, and the bookkeeping around structural
     // changes. Everything else edits through the history.
     splash::Object* objectMut(const ObjectPath& path);
+    splash::SceneSettings& settingsMut() { return m_scene.settings; }
     // Children of the object at `parentPath`, or the top level for the empty path.
     std::vector<splash::Object>* childrenMut(const ObjectPath& parentPath);
     // Keeps selection and tree expansion on the same objects when a sibling

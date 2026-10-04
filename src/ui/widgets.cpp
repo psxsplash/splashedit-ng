@@ -785,7 +785,7 @@ void slider(const char* id, ImRect r, float t, const char* value) {
          color::text, value);
 }
 
-float problemCard(const char* id, ImVec2 pos, float width, const char* title, const char* body, const char* fixLabel) {
+float problemCard(const char* id, ImVec2 pos, float width, const char* title, const char* body, const char* fixLabel, bool* fixed) {
     Fonts& f = fonts();
     ImDrawList* dl = ImGui::GetWindowDrawList();
     float pad = space::md;
@@ -799,7 +799,8 @@ float problemCard(const char* id, ImVec2 pos, float width, const char* title, co
     float x = r.Min.x + pad + 24;
     text(dl, ImVec2(x, r.Min.y + pad), f.semibold, type::body, color::text, title);
     dl->AddText(f.regular, type::label, ImVec2(x, r.Min.y + pad + 18 + space::xs), color::textDim, body, nullptr, textW);
-    button(id, ImVec2(x, r.Max.y - pad - size::field - 6), icon::wand, fixLabel, ButtonKind::Secondary);
+    bool hit = button(id, ImVec2(x, r.Max.y - pad - size::field - 6), icon::wand, fixLabel, ButtonKind::Secondary);
+    if (fixed) *fixed = hit;
     return h;
 }
 
