@@ -1087,6 +1087,8 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
         size_t exporter;
         std::vector<BakedClip> clips;
         size_t boneCount;
+        std::vector<std::array<int16_t, 3>> bind;
+        std::vector<std::string> names;
     };
     std::vector<SkinOut> skins;
     for (size_t i = 0; i < exporters.size(); i++) {
@@ -1116,7 +1118,7 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
             res.errors.push_back(where + "more than 16 skinned meshes in the scene");
             continue;
         }
-        SkinOut so{i, {}, sk.joints.size()};
+        SkinOut so{i, {}, sk.joints.size(), {}, {}};
         bool clamped = false;
         std::vector<std::string> names;
         for (const std::string& path : sc.clips) {
@@ -1142,6 +1144,12 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
         if (clamped)
             res.warnings.push_back(where + "bone values outside the 4.12 range were clamped (bone moves more than " +
                                    std::to_string(int(8 * gte)) + " units from its bind position?)");
+        {
+            std::vector<std::string> errs;
+            so.bind = bindPositions(sk, e.flat->lossyScale, gte, errs, clamped);
+            for (auto& m : errs) res.errors.push_back(where + m);
+            for (const Joint& j : sk.joints) so.names.push_back(truncateUtf16(j.name, 24));
+        }
         e.vertexBone = dominantJoints(sk);
         skins.push_back(std::move(so));
     }
@@ -1392,7 +1400,7 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     bool hasLights = !runtimeLights.empty();
     w.u8('S');
     w.u8('P');
-    w.u16(25);
+    w.u16(26);
     w.u16(uint16_t(luaFiles.size()));
     w.u16(uint16_t(exporters.size()));
     w.u16(uint16_t(vram.atlases.size()));
@@ -1756,6 +1764,15 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
                 w.u16(uint16_t(c.frameCount));
                 for (const BoneMatrix& m : c.frames)
                     for (int16_t v : m) w.i16(v);
+            }
+            // v26: bind joint positions, then joint names.
+            if (w.pos() & 1) w.u8(0);
+            for (const auto& p : so.bind)
+                for (int16_t v : p) w.i16(v);
+            for (const std::string& n : so.names) {
+                w.u8(uint8_t(n.size()));
+                w.bytes(n);
+                w.u8(0);
             }
             w.patchU32(namePos[i], uint32_t(w.pos()));
             w.bytes(truncateUtf16(e.obj->name, 24));

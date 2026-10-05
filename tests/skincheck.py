@@ -71,8 +71,19 @@ def read(d):
             frames = [[struct.unpack_from('<12h', d, p + (f * bones + b) * 24) for b in range(bones)] for f in range(fc)]
             p += fc * bones * 24
             clips.append(dict(name=name, loop=flags & 1, fps=fps, frames=frames))
+        bind, joints = [], []
+        if version >= 26:
+            p = (p + 1) & ~1
+            bind = [struct.unpack_from('<3h', d, p + b * 6) for b in range(bones)]
+            p += bones * 6
+            for b in range(bones):
+                jl = d[p]
+                joints.append(d[p + 1:p + 1 + jl].decode())
+                p += 1 + jl + 1
+            check('joint names end where the object name starts', p == noff, (p, noff))
         objname = d[noff:d.index(b'\0', noff)].decode()
-        skins.append(dict(go=go, bones=bones, idx=idx, clips=clips, name=objname, nlen=nlen))
+        skins.append(dict(go=go, bones=bones, idx=idx, clips=clips, name=objname, nlen=nlen, bind=bind,
+                          joints=joints, version=version))
     return gos, skins
 
 
@@ -159,6 +170,15 @@ for v in top2:
     scene = (v[0] / 4096 * GTE / S[0], -v[1] / 4096 * GTE / S[1], v[2] / 4096 * GTE / S[2])
     ok = ok and close(apply(frame[1], v), psx(elbow_pose(deg, scene), S))
 check('non-uniform scale: bent vertices stay on the scaled arm', ok)
+check('non-uniform scale: bind positions carry the scale', close(skins2[0]['bind'][1], psx((0, 1, 0), S)),
+      skins2[0]['bind'])
+
+# ---- v26 tail: joint bind positions in the vertices' space, then joint names
+check('version 26', sk['version'] == 26, sk['version'])
+check('joint names', sk['joints'] == ['shoulder', 'elbow'], sk['joints'])
+check('bind positions: shoulder at the origin, elbow at y = 1',
+      len(sk['bind']) == 2 and close(sk['bind'][0], psx((0, 0, 0))) and close(sk['bind'][1], psx((0, 1, 0))),
+      sk['bind'])
 
 # ---- no skin component: nothing written, flag clear (control for the reads above)
 r, d = export(lambda s: s['objects'][0]['components'].pop(1))

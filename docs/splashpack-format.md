@@ -97,7 +97,7 @@ Field table (writer order = reader struct order; `writer.Write('S')` writes the 
 | 148 | 4 | u32 | orderingTableSize | v25+; ordering table buckets, 0 = engine default |
 | 152 | 4 | u32 | bumpAllocatorSize | v25+; bump allocator bytes per frame, 0 = engine default |
 
-Reader gating (R:splashpack.cpp): agentCount only used if `version>=22`; skin table `version>=18`; memcard `>=21`; sprite/sceneHash `>=22`; tilemap `>=23`; lights `>=24`; render buffer sizes `>=25`; stream table `>=21`; per-cutscene/animation skin events `>=19`. The writer emits v25, so all gates are satisfied.
+Reader gating (R:splashpack.cpp): agentCount only used if `version>=22`; skin table `version>=18`; memcard `>=21`; sprite/sceneHash `>=22`; tilemap `>=23`; lights `>=24`; render buffer sizes `>=25`; skin bind positions and joint names `>=26`; stream table `>=21`; per-cutscene/animation skin events `>=19`. The writer emits v26, so all gates are satisfied.
 
 ---
 
@@ -267,6 +267,8 @@ them.
 BakedBoneMatrix (24 B): `i16 r00,r01,r02,r10,r11,r12,r20,r21,r22 (4.12); i16 tx,ty,tz`. Reader: `animSet.boneIndices = skinPtr; skinPtr += polyCount * 3;` with `polyCount = setup.objects[gameObjectIndex]->polyCount`; aligns to 4; per clip aligns to 2 before frameCount. Frame count = `CeilToInt(clip.length * fps) + 1`, sample time = `frame/(frameCount-1) * clip.length`. Matrix = `objectInverse * bone.localToWorldMatrix * bindPose` (computed once before sampling), Y-flipped as `R_psx = F R F` with F=diag(1,-1,1): negate m01, m10, m12, m21; translation `tx = m03*uniformScale/gte*4096`, `ty = -m13*...`, `tz = m23*...` (uniformScale = `transform.lossyScale.x`).
 
 This exporter writes the same layout with these differences: a looping clip has `round(length*fps)` frames over `[0, length)` (no repeated end frame); the bone matrix is `S M S^-1` with S the object's lossy scale, so non-uniform scale is exact (2.4.0 used `lossyScale.x` for translation only); clip names over 24 characters fail the export instead of being cut, since Lua could not play them.
+
+From v26 each skin block carries a tail between the last clip and the object name: `[pad 1 byte if position odd]`, then `boneCount x {i16 x, y, z}`, each joint's bind-pose position in the vertices' space (lossy scale applied, Y negated, `/gte*4096`, the same conversion as a vertex), then `boneCount x {u8 nameLen; joint name (24 UTF-16 units max); 0x00}`. Older engines reach skin blocks by offset and never read it. psxsplash uses it for `SkinnedAnim.GetBone`.
 
 ### 2.18 UI (header uiTableOffset; if canvases or fonts exist) - `AlignToFourBytes` first
 Order: font descriptors, canvas descriptors, then for each canvas with elements (each `AlignToFourBytes`) its element array followed by that canvas's strings, then all canvas-name strings.

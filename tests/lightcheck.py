@@ -84,7 +84,7 @@ def read(d):
 r, d = export()
 check('export', r.returncode == 0, r.stderr)
 version, table, objs, lights = read(d)
-check('version 25', version == 25, version)
+check('version 26', version == 26, version)
 check('light table offset set and aligned', table != 0 and table % 4 == 0, table)
 check('disabled runtime light still exported', [l['name'] for l in lights] == ['Red', 'Spare'], lights)
 red = lights[0]
