@@ -45,7 +45,7 @@ if sources:
     check('a changed source does not match', got is not None and got != want, err)
 
 bad = os.path.join(tmp, 'bad.lua')
-open(bad, 'w').write('local x = 010\n')
+open(bad, 'w').write('local x = 1.5\n')
 got, err = compile_lua(bad)
 check('syntax error is reported', got is None and 'malformed number' in err, err)
 
