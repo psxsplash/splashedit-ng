@@ -225,4 +225,33 @@ BakedClip bakeClip(const MeshSkin& skin, const AnimClip& clip, int fps, Vec3 sca
     return out;
 }
 
+std::vector<std::array<int16_t, 3>> bindPositions(const MeshSkin& skin, Vec3 scale, float gteScaling,
+                                                  std::vector<std::string>& errors, bool& clamped) {
+    const size_t nj = skin.joints.size();
+    std::vector<std::array<int16_t, 3>> out(nj, {0, 0, 0});
+    std::vector<Aff> restWorld(nj);
+    double s[3] = {scale.x, scale.y, scale.z};
+    for (size_t j = 0; j < nj; j++) {
+        Aff local = toAff(restOf(skin.joints[j]));
+        int p = skin.joints[j].parent;
+        restWorld[j] = p < 0 ? local : mul(restWorld[size_t(p)], local);
+        Aff bind = restWorld[j];
+        if (!skin.inverseBind.empty()) {
+            Aff inv;
+            const auto& a = skin.inverseBind[j];
+            for (int r = 0; r < 3; r++)
+                for (int c = 0; c < 4; c++) inv.m[r][c] = a[size_t(r * 4 + c)];
+            if (!inverse(inv, bind)) {
+                errors.push_back("joint '" + skin.joints[j].name + "' has a singular inverse bind matrix");
+                continue;
+            }
+        }
+        for (int r = 0; r < 3; r++) {
+            double v = s[r] * bind.m[r][3] / gteScaling * 4096.0;
+            out[j][size_t(r)] = clamp16(r == 1 ? -v : v, clamped);
+        }
+    }
+    return out;
+}
+
 }  // namespace splash

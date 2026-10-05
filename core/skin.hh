@@ -37,4 +37,9 @@ std::vector<int> dominantJoints(const MeshSkin& skin);
 BakedClip bakeClip(const MeshSkin& skin, const AnimClip& clip, int fps, Vec3 scale, float gteScaling,
                    std::vector<std::string>& errors, bool& clamped);
 
+// Each joint's bind-pose position in the vertices' space: scaled, Y flipped,
+// 4.12 GTE units. A baked bone matrix maps it to the joint's posed position.
+std::vector<std::array<int16_t, 3>> bindPositions(const MeshSkin& skin, Vec3 scale, float gteScaling,
+                                                  std::vector<std::string>& errors, bool& clamped);
+
 }  // namespace splash
