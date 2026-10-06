@@ -28,8 +28,8 @@ FetchContent_Declare(recastnavigation
 # Fetch only (src has no CMakeLists.txt); core/CMakeLists.txt builds it.
 # Pin to the commit psxsplash's nugget uses.
 FetchContent_Declare(psxlua
-    GIT_REPOSITORY https://github.com/grumpycoders/psxlua.git
-    GIT_TAG abed030e686b4e34987851bd0a028c93b1f73967
+    GIT_REPOSITORY https://github.com/rixnobis/psxlua.git
+    GIT_TAG 4401a3354e1ffe5f38b028c4d5cedf7c077638bd
     SOURCE_SUBDIR src)
 # libpsxav's SPU-ADPCM encoder (the one psxavenc uses), and dr_wav to read WAV.
 FetchContent_Declare(psxavenc

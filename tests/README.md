@@ -116,7 +116,7 @@ that a changed source gives different bytes and that a syntax error is reported.
     python3 luacheck.py <splashpack-cli>
     splashpack-cli luac in.lua -o out.luac
 
-The files cover constant folding with 32-bit overflow, division and modulo by negative constants, hex and
+The files cover constant folding with 32-bit overflow, division and modulo by negative constants, hex, leading-zero and
 oversized literals, strings with escapes and zero bytes, long strings, more than 256 constants,
 closures, varargs, goto, methods, loops and a table constructor large enough to need an extra
 SETLIST argument.
@@ -127,9 +127,6 @@ base. It writes `__done__` containing `OK` when it has finished.
 
     pcsx-redux -testmode -stdout -safe -bios openbios.bin -loadexe luac_psx.ps-exe -run \
         -pcdrv -pcdrvbase <dir>
-
-Two psxlua quirks the host build reproduces: `a ^ b` gives a to the power b + 1, and a decimal
-numeral with a leading zero (`010`, `0.5`) is a "malformed number".
 
 ## Audio
 

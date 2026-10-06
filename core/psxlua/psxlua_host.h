@@ -36,14 +36,8 @@
 #undef LUAI_UACNUMBER
 #define LUAI_UACNUMBER int32_t
 
-/*
-** psxlua parses numerals with luaA_strtol (llibc.c). For a decimal numeral
-** with a leading zero other than "0" itself ("010", "0.5") it returns
-** without setting endptr, and the PS1 build then reports "malformed number".
-** Starting endptr at s gives that same error deterministically.
-*/
+/* luaA_strtol works in a host long; keep the low 32 bits like the PS1. */
 static inline int32_t psxlua_str2number(const char *s, char **p, int base) {
-  *p = (char *)s;
   return (int32_t)luaA_strtol(s, p, base);
 }
 #undef lua_str2number
@@ -64,17 +58,18 @@ static inline int32_t psxlua_mod(int32_t a, int32_t b) {
   return a % b;
 }
 
-/*
-** psxlua's luai_numpowimpl: r = a, then r *= a once per iteration of
-** `for (unsigned i = 0; i < b; i++)`. So a^b yields a^(b+1), and b is
-** compared as unsigned. Same result, without the loop.
-*/
+/* psxlua's luai_numpowimpl in 32 bits: a negative exponent gives 0 unless |a| is 1. */
 static inline int32_t psxlua_pow(int32_t a, int32_t b) {
-  uint32_t base = (uint32_t)a, n = (uint32_t)b, r = (uint32_t)a;
-  while (n) {
-    if (n & 1u) r *= base;
+  uint32_t base = (uint32_t)a, r = 1;
+  if (b < 0) {
+    if (a == 1) return 1;
+    if (a == -1) return (b & 1) ? -1 : 1;
+    return 0;
+  }
+  while (b) {
+    if (b & 1) r *= base;
     base *= base;
-    n >>= 1;
+    b >>= 1;
   }
   return PSXLUA_I32(r);
 }
