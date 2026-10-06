@@ -11,6 +11,7 @@
 #include "unitymath.hh"
 #include "editor/live_export.hh"
 #include "editor/play.hh"
+#include "editor/project.hh"
 #include "emulator.h"
 #include "game_view.h"
 
@@ -97,6 +98,20 @@ struct State {
     float followAt[3] = {};
     // A hierarchy double-click asks the viewport to frame the selection.
     bool frameRequest = false;
+    // Object > Align with View, done where the viewport has the camera.
+    bool alignRequest = false;
+
+    // The title-bar menu that is open (index into File..Help), or -1.
+    int menuOpen = -1;
+    // Recently opened scenes (File menu), and an action held behind the
+    // unsaved-changes prompt until the user saves, discards or cancels.
+    editor::RecentScenes recent;
+    enum class Pending { None, New, Open, Recent, Quit };
+    Pending pending = Pending::None;
+    std::filesystem::path pendingPath;  // the scene for Pending::Recent
+    bool openUnsaved = false;
+    bool unsavedShown = false;   // the prompt is up; document shortcuts wait
+    bool quitRequested = false;  // window close: asks first when there are changes
 
     // Gizmo drag in progress, for the tool in `tool`. Move: handle 0..2 =
     // X/Y/Z arrow, 3 = XZ plane. Rotate: 0..2 = X/Y/Z ring. Scale: 0..2 =

@@ -419,6 +419,20 @@ std::optional<std::string> Document::save() {
     return std::nullopt;
 }
 
+std::optional<std::string> Document::saveAs(const fs::path& scene) {
+    const fs::path oldFile = m_sceneFile;
+    const std::string oldStem = m_stem;
+    m_sceneFile = scene;
+    m_stem = scene.stem().string();
+    if (m_stem.empty()) m_stem = "untitled";
+    if (auto err = save()) {
+        m_sceneFile = oldFile;
+        m_stem = oldStem;
+        return err;
+    }
+    return std::nullopt;
+}
+
 bool Document::selectByName(const std::string& name) {
     ObjectPath p;
     if (!findByName(m_scene.objects, name, p)) return false;

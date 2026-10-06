@@ -79,7 +79,7 @@ static void windowControls(State& st, ImDrawList* dl, ImRect bar) {
                 else
                     SDL_MaximizeWindow(win);
             }
-            if (i == 2) st.quit = true;
+            if (i == 2) st.quitRequested = true;
         }
         if (h.hover > 0) dl->AddRectFilled(r.Min, r.Max, i == 2 ? rgb(0xe0475a, (int)(255 * h.hover)) : rgb(0x2a2f39, (int)(255 * h.hover)));
         ImVec2 c = r.GetCenter();
@@ -174,7 +174,8 @@ static std::string utf8(const std::filesystem::path& p) {
 
 static float buttonWidth(const char* ic, const char* label) {
     Fonts& f = fonts();
-    return space::md * 2 + measure(f.medium, type::icon, ic).x + space::sm - 2 + measure(f.medium, type::body, label).x;
+    const float iconW = ic ? measure(f.medium, type::icon, ic).x + space::sm - 2 : 0;
+    return space::md * 2 + iconW + measure(f.medium, type::body, label).x;
 }
 
 static void pushPopupStyle() {
@@ -282,6 +283,12 @@ static void playSetup(State& st, const editor::Document& doc, ImVec2 size) {
     ImGui::EndPopup();
 }
 
+// Title-bar menu labels this frame, for placing the open menu under its label.
+static ImRect g_menuRects[6];
+// A press outside an open menu closes it; when that press lands on the same
+// label, its release must not open the menu again.
+static int g_menuIgnoreClick = -1;
+
 static ImRect titleBar(State& st, ImDrawList* dl, ImVec2 size, editor::Document& doc) {
     Fonts& f = fonts();
     ImRect bar(ImVec2(0, 0), ImVec2(size.x, size::titleBar));
@@ -291,22 +298,30 @@ static ImRect titleBar(State& st, ImDrawList* dl, ImVec2 size, editor::Document&
     const float logoH = bar.GetHeight() - 12;
     float x = space::sm + brand::drawLogo(dl, ImVec2(space::sm, bar.Min.y + 6), logoH) + space::xs;
     const char* menus[] = {"File", "Edit", "Object", "Build", "View", "Help"};
-    for (const char* m : menus) {
+    for (int i = 0; i < 6; ++i) {
+        const char* m = menus[i];
         ImVec2 s = measure(f.medium, type::body, m);
         ImRect r(ImVec2(x, bar.Min.y + 7), ImVec2(x + s.x + space::md * 2 - 4, bar.Max.y - 7));
+        g_menuRects[i] = r;
         Hit h = interact(m, r);
-        if (h.hover > 0) dl->AddRectFilled(r.Min, r.Max, rgb(0x2a2f39, (int)(255 * h.hover)), radius::button);
-        textCentered(dl, r, f.medium, type::body, h.hover > 0.5f ? color::text : color::textDim, m);
+        const bool open = st.menuOpen == i;
+        if (h.clicked) st.menuOpen = open || g_menuIgnoreClick == i ? -1 : i;
+        else if (st.menuOpen >= 0 && h.hovered) st.menuOpen = i;
+        if (open) dl->AddRectFilled(r.Min, r.Max, color::hover, radius::button);
+        else if (h.hover > 0) dl->AddRectFilled(r.Min, r.Max, rgb(0x2a2f39, (int)(255 * h.hover)), radius::button);
+        textCentered(dl, r, f.medium, type::body, open || h.hover > 0.5f ? color::text : color::textDim, m);
         x = r.Max.x;
     }
+    if (!ImGui::IsMouseDown(ImGuiMouseButton_Left) && !ImGui::IsMouseReleased(ImGuiMouseButton_Left)) g_menuIgnoreClick = -1;
 
     // Project / scene breadcrumb.
     x += space::lg;
     dl->AddLine(ImVec2(x, bar.Min.y + 12), ImVec2(x, bar.Max.y - 12), color::borderStrong);
     x += space::lg;
     float ty = bar.Min.y + (bar.GetHeight() - measure(f.regular, type::body, "Ag").y) * 0.5f;
-    text(dl, ImVec2(x, ty), f.regular, type::body, color::textDim, "Courtyard Demo");
-    x += measure(f.regular, type::body, "Courtyard Demo").x + space::sm;
+    const std::string project = doc.projectRoot().empty() ? std::string("No project") : utf8(doc.projectRoot().filename());
+    text(dl, ImVec2(x, ty), f.regular, type::body, color::textDim, project.c_str());
+    x += measure(f.regular, type::body, project.c_str()).x + space::sm;
     text(dl, ImVec2(x, ty), f.regular, type::body, color::textFaint, "/");
     x += 12;
     const char* stem = doc.sceneStem().c_str();
@@ -512,6 +527,390 @@ static void notify(State& st, std::string msg, bool bad) {
     st.notice = std::move(msg);
     st.noticeBad = bad;
     st.noticeUntil = ImGui::GetTime() + 8;
+}
+
+// ---- File menu: projects, scenes, and the unsaved-changes prompt ----
+
+static float centerY(ImFont* font, float size, float y0, float y1) {
+    return std::floor(y0 + (y1 - y0 - measure(font, size, "Ag").y) * 0.5f);
+}
+
+// File dialogs answer on their own thread; the result is picked up next frame.
+enum class FileAsk { None, NewFolder, Open, SaveAs };
+static std::mutex g_fileMutex;
+static FileAsk g_fileAsk = FileAsk::None;
+static std::string g_filePath;
+
+static void SDLCALL onFilePicked(void* kind, const char* const* files, int) {
+    if (!files || !files[0]) return;
+    std::lock_guard<std::mutex> lock(g_fileMutex);
+    g_fileAsk = static_cast<FileAsk>(reinterpret_cast<intptr_t>(kind));
+    g_filePath = files[0];
+}
+
+static const SDL_DialogFileFilter kSceneFilter[] = {{"psxsplash scene", "scene"}};
+
+static std::filesystem::path fromUtf8(const std::string& s) { return std::filesystem::path(std::u8string(s.begin(), s.end())); }
+
+// Opens `file` as the document. The scene is parsed first, so a file that does
+// not load leaves the open document as it was.
+static bool openScene(State& st, editor::Document& doc, const std::filesystem::path& file) {
+    std::error_code ec;
+    std::filesystem::path abs = std::filesystem::absolute(file, ec);
+    if (ec) abs = file;
+    const std::string name = utf8(abs.filename());
+    try {
+        (void)splash::loadScene(abs);
+    } catch (const std::exception& e) {
+        notify(st, "Could not open " + name + ": " + e.what(), true);
+        st.recent.remove(abs);
+        return false;
+    }
+    st.play.emu.stop();
+    st.play.showGame = false;
+    if (auto err = doc.load(abs.parent_path(), abs.filename())) {
+        notify(st, "Could not open " + name + ": " + *err, true);
+        return false;
+    }
+    st.recent.add(abs);
+    st.saveError.clear();
+    notify(st, "Opened " + utf8(abs.parent_path().filename()) + " / " + name, false);
+    return true;
+}
+
+static bool saveDoc(State& st, editor::Document& doc) {
+    auto err = doc.save();
+    st.saveError = err ? "Save failed: " + *err : std::string();
+    if (err) {
+        std::fprintf(stderr, "save failed: %s\n", err->c_str());
+        return false;
+    }
+    st.recent.add(doc.scenePath());
+    return true;
+}
+
+static void saveDocAs(editor::Document& doc) {
+    const std::string loc = utf8(doc.projectRoot() / doc.scenePath().filename());
+    SDL_ShowSaveFileDialog(onFilePicked, reinterpret_cast<void*>(static_cast<intptr_t>(FileAsk::SaveAs)), nullptr, kSceneFilter, 1,
+                           doc.projectRoot().empty() ? nullptr : loc.c_str());
+}
+
+static void perform(State& st, editor::Document& doc, State::Pending what, const std::filesystem::path& path) {
+    switch (what) {
+        case State::Pending::New:
+            SDL_ShowOpenFolderDialog(onFilePicked, reinterpret_cast<void*>(static_cast<intptr_t>(FileAsk::NewFolder)), nullptr, nullptr,
+                                     false);
+            break;
+        case State::Pending::Open: {
+            const std::string loc = utf8(doc.projectRoot());
+            SDL_ShowOpenFileDialog(onFilePicked, reinterpret_cast<void*>(static_cast<intptr_t>(FileAsk::Open)), nullptr, kSceneFilter, 1,
+                                   loc.empty() ? nullptr : loc.c_str(), false);
+            break;
+        }
+        case State::Pending::Recent:
+            openScene(st, doc, path);
+            break;
+        case State::Pending::Quit:
+            st.quit = true;
+            break;
+        case State::Pending::None:
+            break;
+    }
+}
+
+// Runs `what` now, or after the unsaved-changes prompt when there are changes.
+static void request(State& st, editor::Document& doc, State::Pending what, const std::filesystem::path& path = {}) {
+    if (!doc.dirty()) {
+        perform(st, doc, what, path);
+        return;
+    }
+    st.pending = what;
+    st.pendingPath = path;
+    st.openUnsaved = true;
+}
+
+// Answers from the file dialogs, applied on the UI thread.
+static void filesPending(State& st, editor::Document& doc) {
+    FileAsk ask;
+    std::string picked;
+    {
+        std::lock_guard<std::mutex> lock(g_fileMutex);
+        ask = g_fileAsk;
+        picked = std::move(g_filePath);
+        g_fileAsk = FileAsk::None;
+    }
+    if (ask == FileAsk::None) return;
+    const std::filesystem::path path = fromUtf8(picked);
+    if (ask == FileAsk::Open) {
+        openScene(st, doc, path);
+    } else if (ask == FileAsk::NewFolder) {
+        if (std::filesystem::path existing = editor::firstScene(path); !existing.empty()) {
+            if (openScene(st, doc, path / existing))
+                notify(st, utf8(path.filename()) + " already holds a scene, so it was opened rather than replaced", false);
+            return;
+        }
+        editor::NewProject made = editor::createProject(path);
+        if (!made.error.empty()) {
+            notify(st, "Could not create the project: " + made.error, true);
+            return;
+        }
+        if (openScene(st, doc, path / made.scene)) notify(st, "Created project " + utf8(path.filename()), false);
+    } else if (ask == FileAsk::SaveAs) {
+        std::optional<std::filesystem::path> rel = editor::sceneInProject(doc.projectRoot(), path);
+        if (!rel) {
+            notify(st, "Save the scene inside the project folder " + utf8(doc.projectRoot().filename()) +
+                           ": its models, textures and scripts are found relative to it",
+                   true);
+            return;
+        }
+        if (auto err = doc.saveAs(*rel)) {
+            st.saveError = "Save failed: " + *err;
+            return;
+        }
+        st.saveError.clear();
+        st.recent.add(doc.scenePath());
+        notify(st, "Saved as " + utf8(*rel), false);
+    }
+}
+
+// "Save changes to X?" before New, Open, a recent scene or quitting.
+static void unsavedPrompt(State& st, editor::Document& doc, ImVec2 size) {
+    const char* id = "##unsaved";
+    if (st.openUnsaved) {
+        st.openUnsaved = false;
+        ImGui::OpenPopup(id);
+    }
+    const float w = 440;
+    ImGui::SetNextWindowPos(ImVec2(size.x * 0.5f, size.y * 0.42f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(w, 0));
+    pushPopupStyle();
+    const bool open = ImGui::BeginPopupModal(id, nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoMove);
+    ImGui::PopStyleVar(4);
+    ImGui::PopStyleColor(2);
+    st.unsavedShown = open;
+    if (!open) return;
+    Fonts& f = fonts();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 o = ImGui::GetCursorScreenPos();
+    const float inner = w - space::lg * 2;
+    float y = o.y;
+    const std::string title = "Save changes to " + doc.sceneStem() + "?";
+    text(dl, ImVec2(o.x, y), f.semibold, type::title, color::text, title.c_str());
+    y += 26;
+    text(dl, ImVec2(o.x, y), f.regular, type::label, color::textDim, "Your changes are lost if you don't save them.");
+    y += 34;
+    const float sw = buttonWidth(nullptr, "Save"), dw = buttonWidth(nullptr, "Don't save"), cw = buttonWidth(nullptr, "Cancel");
+    float bx = o.x + inner - sw;
+    State::Pending go = State::Pending::None;
+    bool close = false;
+    if (button("save", ImVec2(bx, y), nullptr, "Save", ButtonKind::Primary) || ImGui::IsKeyPressed(ImGuiKey_Enter, false)) {
+        if (saveDoc(st, doc)) go = st.pending;
+        close = true;
+    }
+    bx -= space::sm + dw;
+    if (button("discard", ImVec2(bx, y), nullptr, "Don't save", ButtonKind::Secondary)) {
+        go = st.pending;
+        close = true;
+    }
+    if (button("cancel", ImVec2(o.x, y), nullptr, "Cancel", ButtonKind::Ghost) || ImGui::IsKeyPressed(ImGuiKey_Escape, false)) close = true;
+    (void)cw;
+    y += size::field + 6;
+    ImGui::SetCursorScreenPos(o);
+    ImGui::Dummy(ImVec2(inner, y - o.y));
+    if (close) {
+        ImGui::CloseCurrentPopup();
+        st.unsavedShown = false;
+        const std::filesystem::path path = st.pendingPath;
+        st.pending = State::Pending::None;
+        st.pendingPath.clear();
+        if (go != State::Pending::None) perform(st, doc, go, path);
+    }
+    ImGui::EndPopup();
+}
+
+// ---- Title-bar menus ----
+
+struct MenuEntry {
+    enum Kind { Item, Separator, Heading } kind = Item;
+    std::string label, shortcut;
+    bool enabled = true, checked = false;
+    std::function<void()> run;
+};
+
+static MenuEntry item(std::string label, std::string shortcut, bool enabled, std::function<void()> run, bool checked = false) {
+    MenuEntry e;
+    e.label = std::move(label);
+    e.shortcut = std::move(shortcut);
+    e.enabled = enabled;
+    e.checked = checked;
+    e.run = std::move(run);
+    return e;
+}
+static MenuEntry separator() {
+    MenuEntry e;
+    e.kind = MenuEntry::Separator;
+    return e;
+}
+static MenuEntry heading(std::string label) {
+    MenuEntry e;
+    e.kind = MenuEntry::Heading;
+    e.label = std::move(label);
+    return e;
+}
+
+static std::vector<MenuEntry> menuEntries(int which, State& st, editor::Document& doc, viewport::Ps1View& view) {
+    const std::optional<editor::ObjectPath> sel = doc.selection();
+    const bool hasSel = sel.has_value();
+    std::vector<MenuEntry> m;
+    switch (which) {
+        case 0:  // File
+            m.push_back(item("New Project...", "Ctrl+N", true, [&] { request(st, doc, State::Pending::New); }));
+            m.push_back(item("Open...", "Ctrl+O", true, [&] { request(st, doc, State::Pending::Open); }));
+            m.push_back(separator());
+            m.push_back(heading("Recent"));
+            if (st.recent.items().empty()) m.push_back(item("No recent scenes", "", false, nullptr));
+            for (const std::filesystem::path& p : st.recent.items()) {
+                std::filesystem::path scene = p;
+                m.push_back(item(utf8(p.parent_path().filename()) + " / " + utf8(p.filename()), "", true,
+                                 [&st, &doc, scene] { request(st, doc, State::Pending::Recent, scene); }));
+            }
+            m.push_back(separator());
+            m.push_back(item("Save", "Ctrl+S", !doc.projectRoot().empty(), [&] { saveDoc(st, doc); }));
+            m.push_back(item("Save As...", "Ctrl+Shift+S", !doc.projectRoot().empty(), [&] { saveDocAs(doc); }));
+            m.push_back(separator());
+            m.push_back(item("Quit", "Ctrl+Q", true, [&] { request(st, doc, State::Pending::Quit); }));
+            break;
+        case 1:  // Edit
+            m.push_back(item("Undo", "Ctrl+Z", doc.canUndo(), [&] { doc.undo(); }));
+            m.push_back(item("Redo", "Ctrl+Y", doc.canRedo(), [&] { doc.redo(); }));
+            m.push_back(separator());
+            m.push_back(item("Rename", "F2", hasSel, [&st, sel] {
+                st.renaming = true;
+                st.renameStart = true;
+                st.renamePath = *sel;
+            }));
+            m.push_back(item("Duplicate", "Ctrl+D", hasSel, [&doc, sel] { doc.duplicateObject(*sel); }));
+            m.push_back(item("Delete", "Del", hasSel, [&doc, sel] { doc.removeObject(*sel); }));
+            m.push_back(separator());
+            m.push_back(item("Select None", "", hasSel, [&] { doc.select(std::nullopt); }));
+            break;
+        case 2:  // Object
+            m.push_back(item("Add Object...", "Ctrl+A", true, [&] { st.openAddObject = true; }));
+            m.push_back(item("Add Component...", "", hasSel, [&] { st.openAddComponent = true; }));
+            m.push_back(separator());
+            m.push_back(item("Frame Selection", "F", hasSel, [&] { st.frameRequest = true; }));
+            m.push_back(item("Align with View", "Ctrl+Shift+F", hasSel, [&] { st.alignRequest = true; }));
+            break;
+        case 3:  // Build
+            m.push_back(item(st.play.emu.running() ? "Stop" : "Play", "F5", !st.play.build.valid(), [&] { togglePlay(st, doc); }));
+            break;
+        case 4:  // View
+            m.push_back(item("Hand", "Q", true, [&] { st.tool = 0; }, st.tool == 0));
+            m.push_back(item("Move", "W", true, [&] { st.tool = 1; }, st.tool == 1));
+            m.push_back(item("Rotate", "E", true, [&] { st.tool = 2; }, st.tool == 2));
+            m.push_back(item("Scale", "R", true, [&] { st.tool = 3; }, st.tool == 3));
+            m.push_back(separator());
+            m.push_back(item("PS1 Look", "", true, [&] { st.viewMode = 0; }, st.viewMode == 0));
+            m.push_back(item("Clean Look", "", true, [&] { st.viewMode = 1; }, st.viewMode == 1));
+            m.push_back(separator());
+            m.push_back(item("Snap", "", true, [&] { st.snap = !st.snap; }, st.snap));
+            m.push_back(item("Orthographic", "", true, [&] { view.setOrtho(!view.ortho()); }, view.ortho()));
+            break;
+        case 5:  // Help
+            m.push_back(item("Documentation", "", true, [] { SDL_OpenURL("https://github.com/psxsplash/splashedit-ng#readme"); }));
+            m.push_back(item("Report a Problem", "", true, [] { SDL_OpenURL("https://github.com/psxsplash/splashedit-ng/issues/new"); }));
+            break;
+    }
+    return m;
+}
+
+// The open title-bar menu, under its label.
+static void menus(State& st, editor::Document& doc, viewport::Ps1View& view) {
+    static const char* ids[6] = {"##m_file", "##m_edit", "##m_object", "##m_build", "##m_view", "##m_help"};
+    static int shown = -1;  // the menu whose popup was open last frame
+    if (shown >= 0 && !ImGui::IsPopupOpen(ids[shown])) {
+        // Closed by a press elsewhere: that press must not reopen it from its own label.
+        if (st.menuOpen == shown && ImGui::IsMouseDown(ImGuiMouseButton_Left)) g_menuIgnoreClick = shown;
+        if (st.menuOpen == shown) st.menuOpen = -1;
+        shown = -1;
+    }
+    // The open popup takes the hover from the title bar, so moving to another
+    // label is checked against the label rects directly.
+    if (shown >= 0 && st.menuOpen == shown)
+        for (int j = 0; j < 6; ++j)
+            if (j != shown && g_menuRects[j].Contains(ImGui::GetIO().MousePos)) st.menuOpen = j;
+    if (st.menuOpen != shown) {
+        // Opening a popup at the same level replaces the one that was open.
+        if (st.menuOpen >= 0) ImGui::OpenPopup(ids[st.menuOpen]);
+        shown = st.menuOpen;
+    }
+    if (shown < 0) return;
+
+    Fonts& f = fonts();
+    std::vector<MenuEntry> entries = menuEntries(shown, st, doc, view);
+    const float pad = space::xs, rowH = size::field + 4, sepH = 9, headH = 24;
+    float w = 220, h = pad * 2;
+    for (const MenuEntry& e : entries) {
+        if (e.kind == MenuEntry::Separator) h += sepH;
+        else if (e.kind == MenuEntry::Heading) h += headH;
+        else {
+            h += rowH;
+            w = std::max(w, 36 + measure(f.regular, type::body, e.label.c_str()).x + space::xl +
+                                measure(f.regular, type::label, e.shortcut.c_str()).x + space::md);
+        }
+    }
+    const ImRect anchor = g_menuRects[shown];
+    ImGui::SetNextWindowPos(ImVec2(anchor.Min.x, anchor.Max.y + space::xs));
+    ImGui::SetNextWindowSize(ImVec2(w, h));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_PopupBorderSize, 0.0f);
+    const bool open = ImGui::BeginPopup(ids[shown], ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
+                                                        ImGuiWindowFlags_NoSavedSettings);
+    ImGui::PopStyleVar(2);
+    if (!open) return;
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImRect box(ImGui::GetWindowPos(), ImGui::GetWindowPos() + ImVec2(w, h));
+    dl->AddRectFilled(box.Min + ImVec2(0, 2), box.Max + ImVec2(0, 6), rgb(0x000000, 80), radius::card);
+    dl->AddRectFilled(box.Min, box.Max, color::raised, radius::card);
+    dl->AddRect(box.Min, box.Max, color::borderStrong, radius::card);
+    float y = box.Min.y + pad;
+    std::function<void()> run;
+    int i = 0;
+    for (const MenuEntry& e : entries) {
+        ImGui::PushID(i++);
+        if (e.kind == MenuEntry::Separator) {
+            dl->AddLine(ImVec2(box.Min.x + space::sm, y + sepH * 0.5f), ImVec2(box.Max.x - space::sm, y + sepH * 0.5f), color::border);
+            y += sepH;
+        } else if (e.kind == MenuEntry::Heading) {
+            text(dl, ImVec2(box.Min.x + space::md, centerY(f.medium, type::label, y, y + headH)), f.medium, type::label, color::textFaint,
+                 e.label.c_str());
+            y += headH;
+        } else {
+            ImRect ir(ImVec2(box.Min.x + pad, y), ImVec2(box.Max.x - pad, y + rowH));
+            Hit hit = interact("item", ir);
+            const bool on = e.enabled && hit.hover > 0;
+            if (on) dl->AddRectFilled(ir.Min, ir.Max, lerpColor(rgb(0x2a2f39, 0), color::hover, hit.hover), radius::field);
+            if (e.checked) dl->AddCircleFilled(ImVec2(ir.Min.x + space::md, ir.GetCenter().y), 3.5f, color::accent, 12);
+            const ImU32 tc = !e.enabled ? color::textFaint : on && hit.hover > 0.5f ? color::text : color::textDim;
+            text(dl, ImVec2(ir.Min.x + 28, centerY(f.regular, type::body, ir.Min.y, ir.Max.y)), f.regular, type::body, tc, e.label.c_str());
+            if (!e.shortcut.empty()) {
+                ImVec2 ss = measure(f.regular, type::label, e.shortcut.c_str());
+                text(dl, ImVec2(ir.Max.x - space::sm - ss.x, centerY(f.regular, type::label, ir.Min.y, ir.Max.y)), f.regular, type::label,
+                     color::textFaint, e.shortcut.c_str());
+            }
+            if (hit.clicked && e.enabled && e.run) run = e.run;
+            y += rowH;
+        }
+        ImGui::PopID();
+    }
+    if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) st.menuOpen = -1;
+    if (run) st.menuOpen = -1;
+    if (st.menuOpen < 0) {
+        ImGui::CloseCurrentPopup();
+        shown = -1;
+    }
+    ImGui::EndPopup();
+    if (run) run();
 }
 
 // Imports a model file into the project. With `into` naming an object that
@@ -1532,7 +1931,8 @@ static void viewportInput(State& st, ImRect r, editor::Document& doc, viewport::
     }
 
     const bool keys = !io.WantTextInput && !(st.play.showGame && st.play.game.attached());
-    if (keys && io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_F, false)) alignWithView(doc, view, flats);
+    if ((keys && io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_F, false)) || st.alignRequest) alignWithView(doc, view, flats);
+    st.alignRequest = false;
     if ((keys && !io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_F, false)) || st.frameRequest) {
         frameSelection(doc, view, flats);
         st.follow = keys && io.KeyShift && !st.frameRequest && haveSel;
@@ -2500,7 +2900,7 @@ static void statusBar(ImDrawList* dl, ImVec2 size, const editor::Document& doc, 
 // Document-wide shortcuts. Skipped while a text field has the keyboard.
 static void shortcuts(State& st, editor::Document& doc) {
     ImGuiIO& io = ImGui::GetIO();
-    if (io.WantTextInput) return;
+    if (io.WantTextInput || st.unsavedShown || st.menuOpen >= 0) return;
     auto pressed = [](ImGuiKey k) { return ImGui::IsKeyPressed(k, false); };
     auto repeat = [](ImGuiKey k) { return ImGui::IsKeyPressed(k, true); };
     const bool ctrl = io.KeyCtrl, shift = io.KeyShift;
@@ -2530,14 +2930,15 @@ static void shortcuts(State& st, editor::Document& doc) {
     }
     if (ctrl && !shift && pressed(ImGuiKey_A)) st.openAddObject = true;
     if (!ctrl && pressed(ImGuiKey_F5)) togglePlay(st, doc);
-    if (ctrl && pressed(ImGuiKey_S)) {
-        auto err = doc.save();
-        st.saveError = err ? "Save failed: " + *err : std::string();
-        if (err) std::fprintf(stderr, "save failed: %s\n", err->c_str());
-    }
+    if (ctrl && !shift && pressed(ImGuiKey_S)) saveDoc(st, doc);
+    if (ctrl && shift && pressed(ImGuiKey_S) && !doc.projectRoot().empty()) saveDocAs(doc);
+    if (ctrl && !shift && pressed(ImGuiKey_N)) request(st, doc, State::Pending::New);
+    if (ctrl && !shift && pressed(ImGuiKey_O)) request(st, doc, State::Pending::Open);
+    if (ctrl && !shift && pressed(ImGuiKey_Q)) request(st, doc, State::Pending::Quit);
 }
 
 ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view, ImVec2 size) {
+    filesPending(st, doc);
     shortcuts(st, doc);
     st.live.update(doc, ImGui::GetTime());
     updatePlay(st);
@@ -2574,6 +2975,12 @@ ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view,
     importPending(st, doc, view);
     statusBar(dl, size, doc, st);
     playSetup(st, doc, size);
+    menus(st, doc, view);
+    if (st.quitRequested) {
+        st.quitRequested = false;
+        request(st, doc, State::Pending::Quit);
+    }
+    unsavedPrompt(st, doc, size);
     ImGui::End();
     return bar;
 }

@@ -1,5 +1,6 @@
 // Headless tests for the editor's document model: the undo history and the
 // viewport's ray picker and gizmo maths. No SDL, no GL. Run through CTest (`ctest`).
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
@@ -15,6 +16,7 @@
 #include "editor/live_export.hh"
 #include "editor/pick.hh"
 #include "editor/play.hh"
+#include "editor/project.hh"
 #include "budget.hh"
 #include "splashpack.hh"
 
@@ -726,6 +728,72 @@ void testPlay() {
     CHECK(cmd.size() == want.size() + 2 && cmd[5] == "-bios" && cmd[6] == "/x/openbios.bin");
 }
 
+// File menu: a new project on disk, Save As inside it, and the recent list.
+void testProject() {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    fs::path dir = g_outDir / "project";
+    fs::remove_all(dir, ec);
+    fs::path proj = dir / "My Game";
+
+    editor::NewProject made = editor::createProject(proj);
+    CHECK(made.error.empty());
+    CHECK(made.scene == fs::path("My Game.scene"));
+    CHECK(fs::is_directory(proj / "meshes") && fs::is_directory(proj / "textures") && fs::is_directory(proj / "scripts"));
+    CHECK(fs::is_regular_file(proj / made.scene));
+    CHECK(editor::firstScene(proj) == made.scene);
+
+    // The new scene loads, empty, and is not dirty.
+    editor::Document doc;
+    CHECK(!doc.load(proj, made.scene));
+    CHECK(doc.objectCount() == 0 && !doc.dirty());
+
+    // A folder that already holds a scene is never overwritten.
+    CHECK(doc.insertObject({0}, named("Crate")));
+    CHECK(!doc.save());
+    editor::NewProject again = editor::createProject(proj);
+    CHECK(!again.error.empty() && again.scene.empty());
+    editor::Document reread;
+    CHECK(!reread.load(proj, made.scene) && reread.objectCount() == 1);
+
+    // Save As: inside the project only, with .scene added when missing.
+    CHECK(editor::sceneInProject(proj, proj / "level2") == fs::path("level2.scene"));
+    CHECK(editor::sceneInProject(proj, proj / "levels" / "a.scene") == fs::path("levels") / "a.scene");
+    CHECK(!editor::sceneInProject(proj, dir / "outside.scene"));
+    CHECK(!editor::sceneInProject(proj, proj / ".." / "escape.scene"));
+    CHECK(!editor::sceneInProject({}, proj / "a.scene"));
+    CHECK(!doc.saveAs("level2.scene"));
+    CHECK(doc.sceneStem() == "level2" && doc.scenePath() == proj / "level2.scene" && !doc.dirty());
+    CHECK(fs::is_regular_file(proj / "level2.scene"));
+    editor::Document level2;
+    CHECK(!level2.load(proj, "level2.scene") && level2.objectCount() == 1);
+    // A failed Save As keeps the document on its old file.
+    fs::create_directories(proj / "blocked.scene", ec);
+    CHECK(doc.saveAs("blocked.scene").has_value());
+    CHECK(doc.sceneStem() == "level2");
+
+    // Recent scenes: newest first, no duplicates, capped, persisted.
+    fs::path cfg = dir / "recent.cfg";
+    {
+        editor::RecentScenes r(cfg);
+        r.load();
+        CHECK(r.items().empty());
+        for (int i = 0; i < 10; ++i) r.add(proj / ("s" + std::to_string(i) + ".scene"));
+        CHECK(r.items().size() == editor::RecentScenes::kMax);
+        CHECK(r.items().front() == proj / "s9.scene");
+        r.add(proj / "s5.scene");
+        CHECK(r.items().front() == proj / "s5.scene" && r.items().size() == editor::RecentScenes::kMax);
+        CHECK(std::count(r.items().begin(), r.items().end(), proj / "s5.scene") == 1);
+        CHECK(r.items().back() == proj / "s2.scene");
+        r.remove(proj / "s9.scene");
+        CHECK(r.items().size() == editor::RecentScenes::kMax - 1);
+    }
+    editor::RecentScenes back(cfg);
+    back.load();
+    CHECK(back.items().size() == editor::RecentScenes::kMax - 1 && back.items().front() == proj / "s5.scene");
+    CHECK(std::find(back.items().begin(), back.items().end(), proj / "s9.scene") == back.items().end());
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -747,6 +815,7 @@ int main(int argc, char** argv) {
     testScriptWithoutMesh();
     testLiveExport();
     testPlay();
+    testProject();
     if (g_failures) {
         std::fprintf(stderr, "editor_tests: %d of %d checks failed\n", g_failures, g_checks);
         return 1;

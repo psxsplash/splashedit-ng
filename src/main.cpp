@@ -291,15 +291,6 @@ Args parse(int argc, char** argv) {
 }
 
 // First *.scene directly inside `project`, by name, or empty if none.
-std::filesystem::path firstScene(const std::filesystem::path& project) {
-    std::filesystem::path best;
-    std::error_code ec;
-    for (std::filesystem::directory_iterator it(project, ec), end; !ec && it != end; it.increment(ec))
-        if (it->path().extension() == ".scene" && (best.empty() || it->path().filename() < best))
-            best = it->path().filename();
-    return best;
-}
-
 // The directory holding the executable. A packaged editor ships assets/,
 // examples/, redux/ and engine/ next to itself.
 std::filesystem::path baseDir() {
@@ -325,7 +316,7 @@ std::string resourceDir(const char* rel, const char* compiled) {
 void openDocument(editor::Document& doc, const Args& args) {
     bool bundled = !args.project;
     std::filesystem::path project = bundled ? std::filesystem::path(reinterpret_cast<const char8_t*>(resourceDir("examples/courtyard", SPLASHEDIT_EXAMPLE_DIR).c_str())) : std::filesystem::path(args.project);
-    std::filesystem::path scene = args.scene ? std::filesystem::path(args.scene) : firstScene(project);
+    std::filesystem::path scene = args.scene ? std::filesystem::path(args.scene) : editor::firstScene(project);
     if (scene.empty()) {
         std::fprintf(stderr, "no .scene file in %s; opening an empty scene\n", project.string().c_str());
         doc.load(project, "untitled.scene");
@@ -401,13 +392,19 @@ int main(int argc, char** argv) {
     // Play's tool paths persist per user; screenshot runs read only the environment.
     if (!args.screenshot) {
         if (char* pref = SDL_GetPrefPath("psxsplash", "splashedit")) {
-            state.play.settingsFile = std::filesystem::path(reinterpret_cast<const char8_t*>(pref)) / "play.cfg";
+            const std::filesystem::path prefDir(reinterpret_cast<const char8_t*>(pref));
             SDL_free(pref);
+            state.play.settingsFile = prefDir / "play.cfg";
             state.play.tools = editor::loadPlayTools(state.play.settingsFile);
+            state.recent = editor::RecentScenes(prefDir / "recent.cfg");
+            state.recent.load();
         }
     }
     editor::Document doc;
     openDocument(doc, args);
+    // A project named on the command line joins File > Recent like one opened from the menu.
+    if (args.project && !args.screenshot && std::filesystem::is_regular_file(doc.scenePath()))
+        state.recent.add(std::filesystem::absolute(doc.scenePath()));
     view.setDocument(doc);
 
     // Scripted input timeline (screenshot mode).
@@ -429,7 +426,11 @@ int main(int argc, char** argv) {
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
             ImGui_ImplSDL3_ProcessEvent(&e);
-            if (e.type == SDL_EVENT_QUIT || e.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED) running = false;
+            // Closing the window asks about unsaved changes first; screenshot runs just stop.
+            if (e.type == SDL_EVENT_QUIT || e.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED) {
+                if (args.screenshot) running = false;
+                else state.quitRequested = true;
+            }
             // Files dragged in from the desktop: hover feedback, then import where released.
             if (e.type == SDL_EVENT_DROP_BEGIN) state.drop.hovering = true;
             if (e.type == SDL_EVENT_DROP_POSITION) state.drop.pos = ImVec2(e.drop.x, e.drop.y);
