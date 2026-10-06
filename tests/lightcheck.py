@@ -109,6 +109,14 @@ check('lit mesh: runtime light not baked', objs['Lit']['colours'] == objs_none['
 check('lit mesh: baked light changes colours (control)', objs_baked['Lit']['colours'] != objs_none['Lit']['colours'])
 check('off mesh: runtime light still baked', objs['Unlit']['colours'] == objs_baked['Unlit']['colours'])
 
+# Start active: bit 0 of the object flags. Off keeps the object in the pack
+# with the bit clear; the default sets it.
+_, d_sa = export(lambda s: obj(s, 'Unlit').update(startActive=False))
+objs_sa = read(d_sa)[2]
+check('start active by default -> flag bit 0', all(o['flags'] & 1 for o in objs.values()), {k: hex(o['flags']) for k, o in objs.items()})
+check('startActive off -> exported, bit 0 clear', 'Unlit' in objs_sa and objs_sa['Unlit']['flags'] & 1 == 0, hex(objs_sa.get('Unlit', {}).get('flags', -1)))
+check('startActive off leaves other flags', objs_sa['Unlit']['flags'] | 1 == objs['Unlit']['flags'] and objs_sa['Lit']['flags'] == objs['Lit']['flags'])
+
 # No runtime lights -> no light table.
 _, d23 = export(lambda s: [comp(s, n).update(runtime=False) for n in ('Red', 'Spare')])
 v, t, o23, l23 = read(d23)

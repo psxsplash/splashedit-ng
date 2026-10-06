@@ -1922,7 +1922,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
     text(dl, ImVec2(ic.Max.x + space::md, y + 22), f.regular, type::caption, color::textFaint, where.c_str());
     if (toggle("objactive", ImRect(ImVec2(x1 - 30, y + 12), ImVec2(x1, y + 28)), o->active))
         doc.edit(path, [](splash::Object& ob) { ob.active = !ob.active; });
-    tooltip("Inactive objects start switched off in the game. Scripts and cutscenes can switch them on.");
+    tooltip("Off leaves the object out of the game entirely. To have it in the game but switched off, turn off Start active.");
     y += 40 + space::lg;
 
     const float lw = 96, rowH = 32;
@@ -1945,6 +1945,16 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
         if (st == editor::AssetStatus::Missing) card(id, "File not found", path.empty() ? "No file is set." : path, "Locate file");
         else card(id, "File could not be read", error, "Locate file");
     };
+
+    // Start active: the object is in the game either way; off loads it hidden,
+    // with no collision, until a script or cutscene switches it on.
+    if (o->active) {
+        ImRect v = row("lstartactive", "Start active",
+                       "Off loads the object hidden and without collision. Scripts (Entity.SetActive) and cutscenes can switch it on.");
+        if (toggle("startactive", ImRect(ImVec2(v.Min.x, v.GetCenter().y - 8), ImVec2(v.Min.x + 30, v.GetCenter().y + 8)), o->startActive))
+            doc.edit(path, [](splash::Object& ob) { ob.startActive = !ob.startActive; });
+        y += space::md;
+    }
 
     // Transform.
     const splash::Transform& t = o->transform;

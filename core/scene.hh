@@ -159,7 +159,8 @@ struct Transform {
 
 struct Object {
     std::string name;
-    bool active = true;
+    bool active = true;       // exported at all; off leaves the object out of the pack
+    bool startActive = true;  // exported objects only: shown and colliding when the scene loads
     Transform transform;
     std::optional<MeshComponent> mesh;
     std::optional<ColliderComponent> collider;

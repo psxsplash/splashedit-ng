@@ -24,7 +24,7 @@ scene = {
     'format': 'splashedit-ng/scene', 'version': 1, 'futureRoot': [1, 2],
     'settings': {'gteScaling': 50, 'futureSetting': 'x', 'fog': {'enabled': True, 'futureFog': 3}},
     'objects': [{
-        'name': 'A', 'futureObject': {'k': True},
+        'name': 'A', 'futureObject': {'k': True}, 'startActive': False,
         'components': [
             {'type': 'mesh', 'mesh': 'a.mesh', 'futureMesh': 1,
              'materials': [{'texture': None, 'futureMaterial': 2}]},
@@ -45,6 +45,8 @@ if rc == 0:
     check('unknown settings key', out['settings'].get('futureSetting') == 'x')
     check('unknown fog key', out['settings']['fog'].get('futureFog') == 3)
     check('unknown object key', o.get('futureObject') == {'k': True})
+    check('startActive false kept', o.get('startActive') is False)
+    check('startActive true not written', 'startActive' not in o['children'][0])
     check('unknown mesh key', comps['mesh'].get('futureMesh') == 1)
     check('unknown material key', comps['mesh']['materials'][0].get('futureMaterial') == 2)
     check('unknown light key', comps['light'].get('futureLight') == 4)

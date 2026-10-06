@@ -1503,7 +1503,7 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
         writeRotation(w, e.flat->worldRotation);
         w.u16(uint16_t(e.tris.size()));
         w.i16(e.obj->script ? luaIndex(e.obj->script->lua) : int16_t(-1));
-        w.u32((e.obj->active ? 1u : 0u) | (e.obj->skin ? 0x10u : 0u) | (hasLights && e.dynamicLit ? 0x10000u : 0u) |
+        w.u32((e.obj->startActive ? 1u : 0u) | (e.obj->skin ? 0x10u : 0u) | (hasLights && e.dynamicLit ? 0x10000u : 0u) |
               (hasLights && e.dynamicLitSmooth ? 0x20000u : 0u));
         {
             auto it = std::find_if(interactables.begin(), interactables.end(),
