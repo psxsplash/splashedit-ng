@@ -1419,7 +1419,8 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     w.u16(uint16_t(toPsxCoord(playerHeight, gte)));
     w.i16(scene.settings.script.empty() ? int16_t(-1) : luaIndex(scene.settings.script));
     w.u16(uint16_t(std::min<size_t>(bvh.nodes.size(), 65535)));
-    w.u16(uint16_t(std::min<size_t>(bvh.refs.size(), 65535)));
+    res.stats.bvhTriangleRefs = uint32_t(std::min<size_t>(bvh.refs.size(), 65535));
+    w.u16(uint16_t(res.stats.bvhTriangleRefs));
     w.u16(uint16_t(scene.settings.sceneType));
     w.u16(uint16_t(triggers.size()));
     w.u16(0);  // world collision mesh count (removed)
