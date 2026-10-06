@@ -215,6 +215,7 @@ Object readObject(const json& j) {
     Object o;
     o.name = j.at("name").get<std::string>();
     o.active = j.value("active", true);
+    o.startActive = j.value("startActive", true);
     if (j.contains("transform")) {
         const json& t = j["transform"];
         if (t.contains("position")) o.transform.position = vec3(t["position"]);
@@ -333,7 +334,7 @@ Object readObject(const json& j) {
         }
     }
     for (const json& cj : j.value("children", json::array())) o.children.push_back(readObject(cj));
-    o.extra = extrasOf(j, json{{"name", 0}, {"active", 0}, {"transform", 0}, {"components", 0}, {"children", 0}});
+    o.extra = extrasOf(j, json{{"name", 0}, {"active", 0}, {"startActive", 0}, {"transform", 0}, {"components", 0}, {"children", 0}});
     return o;
 }
 
@@ -341,6 +342,7 @@ json writeObject(const Object& o) {
     json j;
     j["name"] = o.name;
     j["active"] = o.active;
+    if (!o.startActive) j["startActive"] = false;
     j["transform"] = {{"position", vec3(o.transform.position)},
                       {"rotation", json::array({o.transform.rotation.x, o.transform.rotation.y,
                                                 o.transform.rotation.z, o.transform.rotation.w})},
