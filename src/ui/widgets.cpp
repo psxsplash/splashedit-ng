@@ -68,7 +68,9 @@ Hit interact(const char* id, ImRect r) {
 void tooltip(const char* t) {
     if (!ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal | ImGuiHoveredFlags_NoSharedDelay)) return;
     Fonts& f = fonts();
-    ImVec2 s = measure(f.regular, type::label, t);
+    // Long tips wrap instead of running off the screen.
+    const float wrap = 360;
+    ImVec2 s = f.regular->CalcTextSizeA(type::label, FLT_MAX, wrap, t);
     ImVec2 m = ImGui::GetIO().MousePos;
     ImRect r(ImVec2(m.x + 14, m.y + 18), ImVec2(m.x + 14 + s.x + space::md * 2, m.y + 18 + s.y + space::sm * 2));
     // Keep it on screen near the right and bottom edges.
@@ -80,7 +82,8 @@ void tooltip(const char* t) {
     dl->AddRectFilled(r.Min + ImVec2(0, 2), r.Max + ImVec2(0, 4), rgb(0x000000, 70), radius::card);
     dl->AddRectFilled(r.Min, r.Max, color::active, radius::card);
     dl->AddRect(r.Min, r.Max, color::borderStrong, radius::card);
-    text(dl, r.Min + ImVec2(space::md, space::sm), f.regular, type::label, color::text, t);
+    ImVec2 tp = r.Min + ImVec2(space::md, space::sm);
+    dl->AddText(f.regular, type::label, ImVec2(std::floor(tp.x), std::floor(tp.y)), color::text, t, nullptr, wrap);
 }
 
 bool button(const char* id, ImVec2 pos, const char* ic, const char* label, ButtonKind kind, float* outWidth, const char* tip) {
