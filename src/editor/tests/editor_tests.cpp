@@ -547,8 +547,21 @@ void testExportStats() {
     CHECK(clips == 2);
     CHECK(d.stats.spuEnd == end);
     CHECK(splash::spuBudget(d.stats).used == end);
-    CHECK(splash::ramBudget(d.stats).used ==
-          d.stats.rendererBytes() + std::max({d.stats.splashpackBytes, d.stats.vramFileBytes, d.stats.spuFileBytes}));
+    // The visible-triangle list is sized from the header's bvhTriangleRefCount
+    // (u16 at offset 34), read back from the written file.
+    {
+        std::ifstream f(dir / "scene.splashpack", std::ios::binary);
+        unsigned char h[36] = {};
+        f.read(reinterpret_cast<char*>(h), sizeof h);
+        CHECK(f.good());
+        uint32_t refs = h[34] | h[35] << 8;
+        CHECK(refs > 0);
+        CHECK(d.stats.bvhTriangleRefs == refs);
+        CHECK(d.stats.visibleListBytes() == 4 * size_t(refs));
+    }
+    CHECK(splash::ramBudget(d.stats).used == d.stats.rendererBytes() + d.stats.visibleListBytes() +
+                                                 std::max({d.stats.splashpackBytes, d.stats.vramFileBytes,
+                                                           d.stats.spuFileBytes}));
 
     // Overrides replace the estimate in the pack and in the RAM meter; an
     // ordering table below the minimum is raised to it.
@@ -561,8 +574,10 @@ void testExportStats() {
     CHECK(o.stats.bumpAllocatorSize == 4004);
     CHECK(o.stats.orderingTableNeed == d.stats.orderingTableNeed);
     CHECK(o.stats.rendererBytes() == 2 * (splash::kOtMin + 1) * 4 + 2 * 4004);
-    CHECK(splash::ramBudget(o.stats).used == o.stats.rendererBytes() + std::max({o.stats.splashpackBytes, o.stats.vramFileBytes,
-                                                                                  o.stats.spuFileBytes}));
+    CHECK(o.stats.bvhTriangleRefs == d.stats.bvhTriangleRefs);
+    CHECK(splash::ramBudget(o.stats).used == o.stats.rendererBytes() + o.stats.visibleListBytes() +
+                                                 std::max({o.stats.splashpackBytes, o.stats.vramFileBytes,
+                                                           o.stats.spuFileBytes}));
 }
 
 // A script on an object with no mesh (the courtyard's Game Logic) ships as a

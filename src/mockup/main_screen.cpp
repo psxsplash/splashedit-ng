@@ -2326,7 +2326,8 @@ static void statusBar(ImDrawList* dl, ImVec2 size, const editor::Document& doc, 
                    "Sound samples, placed the way psxsplash uploads them.") +
              space::xl;
         x += meter("m_ram", ImVec2(x, bar.Min.y), icon::hardDrive, "RAM", r.fraction(), rs.c_str(),
-                   "Scene data and the renderer's buffers in psxsplash's heap, at the peak of loading. "
+                   "Scene data, the renderer's buffers and its visible-triangle list in psxsplash's heap, at "
+                   "the peak of loading. "
                    "Lua's own allocations are not counted.") +
              space::xl;
         x += meter("m_tris", ImVec2(x, bar.Min.y), icon::box, "Triangles", -1, ts,

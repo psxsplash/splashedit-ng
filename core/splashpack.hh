@@ -46,6 +46,11 @@ struct ExportStats {
     // Bytes psxsplash allocates for them: two ordering tables of size + 1
     // four-byte entries and two bump allocators.
     size_t rendererBytes() const { return 2 * (size_t(orderingTableSize) + 1) * 4 + 2 * size_t(bumpAllocatorSize); }
+    // Triangle references in the BVH, as the header carries them. psxsplash
+    // sizes its frustum culling output to this, one four-byte TriangleRef each
+    // (Renderer::ReserveVisibleTriangles).
+    uint32_t bvhTriangleRefs = 0;
+    size_t visibleListBytes() const { return 4 * size_t(bvhTriangleRefs); }
 };
 
 struct ExportResult {
