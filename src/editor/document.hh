@@ -141,6 +141,11 @@ public:
     // Cached on load; nullptr when the path is empty.
     const MeshInfo* mesh(const std::string& projectPath) const;
     const TextureInfo* texture(const std::string& projectPath) const;
+    // Re-reads these files after something rewrote them on disk (a model
+    // import), and bumps revision() and assetsId() so views reload them.
+    void refreshAssets(const std::vector<std::string>& projectPaths);
+    // Bumped by refreshAssets: cached file contents may be out of date.
+    unsigned assetsId() const { return m_assetsId; }
     // True if the lua file exists on disk.
     bool fileExists(const std::string& projectPath) const;
 
@@ -165,6 +170,7 @@ private:
     int m_projectFiles = 0;
     unsigned m_revision = 0;
     unsigned m_loadId = 0;
+    unsigned m_assetsId = 0;
     std::optional<ObjectPath> m_selection;
     std::set<ObjectPath> m_collapsed;
     std::map<std::string, MeshInfo> m_meshes;

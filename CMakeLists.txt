@@ -40,7 +40,12 @@ FetchContent_Declare(dr_libs
     GIT_REPOSITORY https://github.com/mackron/dr_libs.git
     GIT_TAG dfe8377631000664666519fdb83da193fd8037f4
     SOURCE_SUBDIR none)
-FetchContent_MakeAvailable(stb nlohmann_json recastnavigation psxlua psxavenc dr_libs)
+# cgltf reads glTF 2.0 for model import.
+FetchContent_Declare(cgltf
+    GIT_REPOSITORY https://github.com/jkuhlmann/cgltf.git
+    GIT_TAG 360db1a95480fe102ae9c69b27c5d101167ff5ba
+    SOURCE_SUBDIR none)
+FetchContent_MakeAvailable(stb nlohmann_json recastnavigation psxlua psxavenc dr_libs cgltf)
 
 option(SPLASHEDIT_BUILD_EDITOR "Build the editor (needs SDL3, FreeType, OpenGL)" ON)
 

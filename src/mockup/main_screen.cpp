@@ -16,6 +16,7 @@
 #include <string>
 
 #include "budget.hh"
+#include "import.hh"
 #include "editor/catalog.hh"
 #include "editor/document.hh"
 #include "editor/gizmo.hh"
@@ -495,6 +496,89 @@ static void addObjectPicker(State& st, editor::Document& doc, const viewport::Ps
     obj.transform.position = spawnPoint(view, doc, parentPath);
     if (!doc.expanded(parentPath)) doc.toggleExpanded(parentPath);
     doc.insertObject(at, std::move(obj));
+}
+
+// The Model field's file dialog, answered on its own thread and picked up next frame.
+static std::string g_modelPicked;
+static editor::ObjectPath g_modelTarget;
+
+static void SDLCALL onModelPicked(void*, const char* const* files, int) {
+    if (!files || !files[0]) return;
+    std::lock_guard<std::mutex> lock(g_pickMutex);
+    g_modelPicked = files[0];
+}
+
+static void notify(State& st, std::string msg, bool bad) {
+    st.notice = std::move(msg);
+    st.noticeBad = bad;
+    st.noticeUntil = ImGui::GetTime() + 8;
+}
+
+// Imports a model file into the project. With `into` naming an object that
+// has a mesh, its model and materials are replaced; otherwise a new object
+// named after the file is added where the Add object picker would put it.
+static void importModelFile(State& st, editor::Document& doc, const viewport::Ps1View& view, const std::string& file,
+                            const std::optional<editor::ObjectPath>& into) {
+    const std::filesystem::path src(std::u8string(file.begin(), file.end()));
+    splash::ImportedModel m;
+    try {
+        m = splash::importModel(src, doc.projectRoot());
+    } catch (const std::exception& e) {
+        notify(st, std::string("Import failed: ") + e.what(), true);
+        return;
+    }
+    std::vector<std::string> written = m.textures;
+    written.push_back(m.mesh);
+    doc.refreshAssets(written);
+    const splash::Object* target = into ? doc.object(*into) : nullptr;
+    if (target && target->mesh) {
+        doc.edit(*into, [&](splash::Object& o) {
+            o.mesh->mesh = m.mesh;
+            o.mesh->materials = m.materials;
+        });
+        doc.endMerge();
+    } else {
+        editor::ObjectPath at;
+        if (const std::optional<editor::ObjectPath>& sel = doc.selection(); sel && doc.object(*sel)) {
+            at = *sel;
+            at.back() += 1;
+        } else {
+            at = {static_cast<int>(doc.scene().objects.size())};
+        }
+        const editor::ObjectPath parentPath(at.begin(), at.end() - 1);
+        const splash::Object* parent = doc.object(parentPath);
+        splash::Object obj;
+        obj.name = editor::uniqueName(utf8(src.stem()), parent ? parent->children : doc.scene().objects);
+        obj.transform.position = spawnPoint(view, doc, parentPath);
+        obj.mesh.emplace();
+        obj.mesh->mesh = m.mesh;
+        obj.mesh->materials = m.materials;
+        if (!doc.expanded(parentPath)) doc.toggleExpanded(parentPath);
+        doc.insertObject(at, std::move(obj));
+    }
+    std::string msg = "Imported " + utf8(src.filename()) + ", " + std::to_string(m.triangles) +
+                      (m.triangles == 1 ? " triangle" : " triangles");
+    if (!m.warnings.empty()) msg += ". Note: " + m.warnings.front();
+    notify(st, msg, false);
+}
+
+// Files released over the window and files picked in the Model field's
+// dialog, once this frame's inspector has placed the field.
+static void importPending(State& st, editor::Document& doc, const viewport::Ps1View& view) {
+    std::string picked;
+    editor::ObjectPath pickedFor;
+    {
+        std::lock_guard<std::mutex> lock(g_pickMutex);
+        picked.swap(g_modelPicked);
+        pickedFor = g_modelTarget;
+    }
+    if (!picked.empty()) importModelFile(st, doc, view, picked, pickedFor);
+    std::vector<std::pair<std::string, ImVec2>> files;
+    files.swap(st.drop.files);
+    for (const auto& [file, pos] : files) {
+        const bool onField = st.modelField.GetWidth() > 0 && st.modelField.Contains(pos);
+        importModelFile(st, doc, view, file, onField ? std::optional<editor::ObjectPath>(st.modelFieldPath) : std::nullopt);
+    }
 }
 
 static void sceneTree(State& st, ImDrawList* dl, ImRect r, editor::Document& doc, const viewport::Ps1View& view) {
@@ -2008,9 +2092,21 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
         section("s_mesh", ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), icon::box, kind::mesh, "Mesh", true, true, true,
                 removeFlag(editor::ComponentKind::Mesh));
         y += 34 + space::xs;
-        assetField("model", row("lmodel", "Model", "The 3D model to draw. Drop a .glb, .gltf, .obj or .fbx here."), icon::box,
-                   meshSt == editor::AssetStatus::Ok ? kind::mesh : color::warn, modelName.c_str(),
-                   tris.empty() ? nullptr : tris.c_str());
+        const ImRect modelRow = row("lmodel", "Model", "The 3D model to draw. Click to pick a .glb or .gltf file, or drop one here.");
+        if (assetField("model", modelRow, icon::box, meshSt == editor::AssetStatus::Ok ? kind::mesh : color::warn, modelName.c_str(),
+                       tris.empty() ? nullptr : tris.c_str())) {
+            {
+                std::lock_guard<std::mutex> lock(g_pickMutex);
+                g_modelTarget = path;
+            }
+            static const SDL_DialogFileFilter modelFilter[] = {{"glTF models", "glb;gltf"}};
+            SDL_ShowOpenFileDialog(onModelPicked, nullptr, nullptr, modelFilter, 1, nullptr, false);
+        }
+        st.modelField = modelRow;
+        st.modelField.ClipWith(r);
+        st.modelFieldPath = path;
+        if (st.drop.hovering && st.modelField.Contains(st.drop.pos))
+            dl->AddRect(modelRow.Min - ImVec2(1, 1), modelRow.Max + ImVec2(1, 1), color::accent, radius::field + 1, 0, 2.0f);
         fileCard("fixmesh", meshSt, m.mesh, mi ? mi->error : std::string());
         assetField("texture", row("ltex", "Texture", "Image painted on the model. Converted to PS1 colours on export."), icon::grid,
                    texSt != editor::AssetStatus::Ok || to4 ? color::warn : color::textDim, texName.c_str(), texMeta.c_str());
@@ -2343,11 +2439,15 @@ static void statusBar(ImDrawList* dl, ImVec2 size, const editor::Document& doc, 
     playStatus(dl, bar, x, st);
 
     // Right side: problems and save state.
-    const char* saved = !st.saveError.empty() ? st.saveError.c_str() : doc.dirty() ? "Unsaved changes" : "All changes saved";
+    const bool showNotice = st.saveError.empty() && !st.notice.empty() && ImGui::GetTime() < st.noticeUntil;
+    const char* saved = !st.saveError.empty() ? st.saveError.c_str()
+                        : showNotice          ? st.notice.c_str()
+                        : doc.dirty()         ? "Unsaved changes"
+                                              : "All changes saved";
     ImVec2 s = measure(f.regular, type::caption, saved);
     float rx = size.x - space::md - s.x;
     text(dl, ImVec2(rx, bar.Min.y + (size::statusBar - s.y) * 0.5f), f.regular, type::caption,
-         st.saveError.empty() ? color::textFaint : color::bad, saved);
+         !st.saveError.empty() || (showNotice && st.noticeBad) ? color::bad : showNotice ? color::text : color::textFaint, saved);
     if (!res) return;
     const size_t nErr = res->errors.size(), nWarn = res->warnings.size();
     std::string prob = nErr ? std::to_string(nErr) + (nErr == 1 ? " error" : " errors")
@@ -2457,7 +2557,21 @@ ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view,
     ImRect mid(ImVec2(left.Max.x + g, top), ImVec2(right.Min.x - g, bottom));
     sceneTree(st, dl, left, doc, view);
     viewportPanel(st, dl, mid, doc, view);
+    st.modelField = ImRect();
     inspector(st, dl, right, doc);
+    if (st.drop.hovering && !st.modelField.Contains(st.drop.pos)) {
+        // Anywhere but the Model field, a dropped model becomes a new object.
+        dl->AddRect(mid.Min, mid.Max, color::accent, radius::card, 0, 2.0f);
+        Fonts& f = fonts();
+        const char* hint = "Drop to add the model to the scene";
+        ImVec2 hs = measure(f.medium, type::body, hint);
+        ImRect pill(ImVec2((mid.Min.x + mid.Max.x - hs.x) * 0.5f - space::md, mid.Max.y - 56),
+                    ImVec2((mid.Min.x + mid.Max.x + hs.x) * 0.5f + space::md, mid.Max.y - 24));
+        dl->AddRectFilled(pill.Min, pill.Max, color::raised, radius::pill);
+        dl->AddRect(pill.Min, pill.Max, color::accent, radius::pill);
+        textCentered(dl, pill, f.medium, type::body, color::text, hint);
+    }
+    importPending(st, doc, view);
     statusBar(dl, size, doc, st);
     playSetup(st, doc, size);
     ImGui::End();

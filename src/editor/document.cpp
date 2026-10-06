@@ -135,6 +135,15 @@ void Document::reset(splash::Scene scene, const fs::path& project, const std::st
     for (const splash::Object& o : m_scene.objects) cacheAssets(o);
 }
 
+void Document::refreshAssets(const std::vector<std::string>& projectPaths) {
+    for (const std::string& p : projectPaths) {
+        if (fs::path(p).extension() == ".mesh") m_meshes[p] = analyseMesh(resolve(p));
+        else m_textures[p] = analyseTexture(resolve(p));
+    }
+    ++m_assetsId;
+    ++m_revision;
+}
+
 void Document::recount() { m_objectCount = countObjects(m_scene.objects); }
 
 void Document::cacheAssets(const splash::Object& o) {

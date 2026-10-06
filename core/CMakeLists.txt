@@ -75,9 +75,10 @@ add_library(splashcore STATIC
     navregion.cpp
     splashpack.cpp
     luacompile.cpp
+    import.cpp
     stb_impl.cpp)
 target_include_directories(splashcore PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_include_directories(splashcore SYSTEM PRIVATE ${stb_SOURCE_DIR} ${dr_libs_SOURCE_DIR})
+target_include_directories(splashcore SYSTEM PRIVATE ${stb_SOURCE_DIR} ${dr_libs_SOURCE_DIR} ${cgltf_SOURCE_DIR})
 target_link_libraries(splashcore PUBLIC nlohmann_json::nlohmann_json PRIVATE recast psxlua psxav)
 # The writer reproduces SplashEdit 2.4's float results bit for bit: no FMA
 # contraction, no fast-math.

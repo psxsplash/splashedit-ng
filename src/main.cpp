@@ -82,6 +82,11 @@ struct Args {
     const char* select = nullptr;   // object name to select at startup
     std::vector<Action> actions;
     int padButton = -1;  // SDL_GamepadButton held on a virtual gamepad for the whole run
+    // --drop <file>@x,y releases a file there after the scripted input;
+    // --drag-over x,y holds a dragged file there for the whole run.
+    std::string dropFile;
+    float dropX = -1, dropY = -1;
+    float dragX = -1, dragY = -1;
 };
 
 // "ctrl+shift+z", "delete", "f2", "w", "enter", "escape", "up", "down".
@@ -209,6 +214,16 @@ Args parse(int argc, char** argv) {
         if (!std::strcmp(argv[i], "--screenshot")) a.screenshot = next();
         else if (!std::strcmp(argv[i], "--size")) std::sscanf(next(), "%dx%d", &a.width, &a.height);
         else if (!std::strcmp(argv[i], "--mouse")) std::sscanf(next(), "%f,%f", &a.mouseX, &a.mouseY);
+        else if (!std::strcmp(argv[i], "--drag-over")) std::sscanf(next(), "%f,%f", &a.dragX, &a.dragY);
+        else if (!std::strcmp(argv[i], "--drop")) {
+            std::string v = next();
+            size_t at = v.rfind('@');
+            if (at == std::string::npos || std::sscanf(v.c_str() + at + 1, "%f,%f", &a.dropX, &a.dropY) != 2) {
+                std::fprintf(stderr, "--drop wants <file>@x,y\n");
+                std::exit(2);
+            }
+            a.dropFile = v.substr(0, at);
+        }
         else if (!std::strcmp(argv[i], "--frames")) a.frames = std::atoi(next());
         else if (!std::strcmp(argv[i], "--clean")) a.viewMode = 1;
         else if (!std::strcmp(argv[i], "--project")) a.project = next();
@@ -415,6 +430,12 @@ int main(int argc, char** argv) {
         while (SDL_PollEvent(&e)) {
             ImGui_ImplSDL3_ProcessEvent(&e);
             if (e.type == SDL_EVENT_QUIT || e.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED) running = false;
+            // Files dragged in from the desktop: hover feedback, then import where released.
+            if (e.type == SDL_EVENT_DROP_BEGIN) state.drop.hovering = true;
+            if (e.type == SDL_EVENT_DROP_POSITION) state.drop.pos = ImVec2(e.drop.x, e.drop.y);
+            if (e.type == SDL_EVENT_DROP_FILE && e.drop.data)
+                state.drop.files.push_back({e.drop.data, ImVec2(e.drop.x, e.drop.y)});
+            if (e.type == SDL_EVENT_DROP_COMPLETE) state.drop.hovering = false;
         }
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplSDL3_NewFrame();
@@ -429,6 +450,11 @@ int main(int argc, char** argv) {
                 if (frame >= actionStart[i] && frame < actionStart[i] + actionFrames(a)) playAction(io, a, frame - actionStart[i]);
             }
             if (args.mouseX >= 0 && frame >= timelineEnd) io.AddMousePosEvent(args.mouseX, args.mouseY);
+            if (args.dragX >= 0) {
+                state.drop.hovering = true;
+                state.drop.pos = ImVec2(args.dragX, args.dragY);
+            }
+            if (!args.dropFile.empty() && frame == timelineEnd) state.drop.files.push_back({args.dropFile, ImVec2(args.dropX, args.dropY)});
         }
         ImGui::NewFrame();
         ui::interactiveRects().clear();

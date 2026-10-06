@@ -14,6 +14,7 @@
 #include "luacompile.hh"
 #include "audio.hh"
 #include "font.hh"
+#include "import.hh"
 #include "splashpack.hh"
 #include "texture.hh"
 
@@ -49,6 +50,8 @@ static int usage() {
                  "    [--pcm <src.wav>] [--decoded <out.wav>]\n"
                  "  encodes one clip the way export does and prints its SNR against the source;\n"
                  "  --pcm writes the 16-bit mono WAV the encoder starts from, before resampling\n"
+                 "usage: splashpack-cli import <model.glb|model.gltf> --project <dir>\n"
+                 "  writes models/<name>.mesh and its textures into the project, as the editor does\n"
                  "usage: splashpack-cli resave <in.scene|in.mesh> <out>\n"
                  "  loads and saves a scene or mesh file\n"
                  "usage: splashpack-cli luac <in.lua> -o <out.luac>\n"
@@ -176,6 +179,24 @@ static int resave(int argc, char** argv) {
     }
 }
 
+static int importCmd(int argc, char** argv) {
+    if (argc != 5 || std::strcmp(argv[3], "--project") != 0) return usage();
+    try {
+        splash::ImportedModel m = splash::importModel(argv[2], argv[4]);
+        std::printf("mesh %s (%d triangles)\n", m.mesh.c_str(), m.triangles);
+        for (size_t i = 0; i < m.materials.size(); i++) {
+            const splash::Material& mat = m.materials[i];
+            std::printf("material %zu texture %s colour %g %g %g %g\n", i, mat.texture.empty() ? "-" : mat.texture.c_str(),
+                        mat.color[0], mat.color[1], mat.color[2], mat.color[3]);
+        }
+        for (const std::string& w : m.warnings) std::printf("warning: %s\n", w.c_str());
+        return 0;
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "error: %s\n", e.what());
+        return 1;
+    }
+}
+
 static int luac(int argc, char** argv) {
     if (argc != 5 || std::strcmp(argv[3], "-o") != 0) return usage();
     try {
@@ -235,6 +256,7 @@ static int font(int argc, char** argv) {
 int main(int argc, char** argv) {
     if (argc >= 2 && std::strcmp(argv[1], "font") == 0) return font(argc, argv);
     if (argc >= 2 && std::strcmp(argv[1], "texstats") == 0) return texstats(argc, argv);
+    if (argc >= 2 && std::strcmp(argv[1], "import") == 0) return importCmd(argc, argv);
     if (argc >= 2 && std::strcmp(argv[1], "resave") == 0) return resave(argc, argv);
     if (argc >= 2 && std::strcmp(argv[1], "audio") == 0) return audio(argc, argv);
     if (argc >= 2 && std::strcmp(argv[1], "luac") == 0) return luac(argc, argv);

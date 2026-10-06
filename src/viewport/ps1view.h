@@ -110,6 +110,7 @@ class Ps1View {
     editor::PickMesh m_pick;  // drawn triangles in Unity world space, by object
     std::map<std::string, splash::Mesh> m_meshCache;  // by project path, for the current load
     unsigned m_meshCacheLoad = ~0u;
+    unsigned m_meshCacheAssets = 0;
     unsigned m_framedLoad = ~0u;
     bool m_haveSceneBounds = false;
     splash::Bounds m_sceneBounds;  // GL space, geometry only
