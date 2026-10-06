@@ -28,6 +28,17 @@ NewProject createProject(const std::filesystem::path& dir);
 // project (with a .scene extension added if missing), or nullopt outside it.
 std::optional<std::filesystem::path> sceneInProject(const std::filesystem::path& project, const std::filesystem::path& file);
 
+// A file picked for an asset field, as the project-relative path the scene
+// stores. A file already inside `project` is used where it is; one outside is
+// copied into `project`/`folder`, reusing an identical file of the same name
+// and numbering the copy ("rock_2.png") when a different one is there.
+struct AdoptedAsset {
+    std::string path;   // project-relative, '/'-separated; empty on failure
+    bool copied = false;
+    std::string error;  // empty on success
+};
+AdoptedAsset adoptAsset(const std::filesystem::path& project, const std::filesystem::path& file, const std::string& folder);
+
 // Recently opened scenes, newest first, as absolute paths. Stored one per line.
 class RecentScenes {
   public:

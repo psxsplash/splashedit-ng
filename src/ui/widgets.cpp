@@ -760,7 +760,7 @@ bool toggle(const char* id, ImRect r, bool on) {
     return h.clicked;
 }
 
-void colorField(const char* id, ImRect r, ImU32 col, const char* hex) {
+bool colorField(const char* id, ImRect r, ImU32 col, const char* hex) {
     Fonts& f = fonts();
     Hit h = interact(id, r);
     ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -768,6 +768,7 @@ void colorField(const char* id, ImRect r, ImU32 col, const char* hex) {
     ImRect sw(r.Min + ImVec2(3, 3), ImVec2(r.Min.x + 34, r.Max.y - 3));
     dl->AddRectFilled(sw.Min, sw.Max, col, radius::field - 1);
     text(dl, ImVec2(sw.Max.x + space::sm, centerY(f.regular, type::body, r.Min.y, r.Max.y)), f.regular, type::body, color::text, hex);
+    return h.clicked;
 }
 
 void slider(const char* id, ImRect r, float t, const char* value) {

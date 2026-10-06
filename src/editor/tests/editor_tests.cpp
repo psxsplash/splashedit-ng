@@ -794,6 +794,71 @@ void testProject() {
     CHECK(std::find(back.items().begin(), back.items().end(), proj / "s9.scene") == back.items().end());
 }
 
+void testAdoptAsset() {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    fs::path dir = g_outDir / "adopt";
+    fs::remove_all(dir, ec);
+    fs::path proj = dir / "game", outside = dir / "elsewhere";
+    fs::create_directories(proj / "textures", ec);
+    fs::create_directories(outside, ec);
+    auto write = [](const fs::path& p, const std::string& bytes) { std::ofstream(p, std::ios::binary) << bytes; };
+    auto read = [](const fs::path& p) {
+        std::ifstream in(p, std::ios::binary);
+        return std::string((std::istreambuf_iterator<char>(in)), {});
+    };
+
+    // Inside the project: used where it is, never copied.
+    write(proj / "textures" / "rock.png", "rock");
+    editor::AdoptedAsset in = editor::adoptAsset(proj, proj / "textures" / "rock.png", "textures");
+    CHECK(in.error.empty() && in.path == "textures/rock.png" && !in.copied);
+
+    // Outside: copied into the folder, created if missing.
+    write(outside / "door.lua", "print(1)");
+    editor::AdoptedAsset lua = editor::adoptAsset(proj, outside / "door.lua", "scripts");
+    CHECK(lua.error.empty() && lua.path == "scripts/door.lua" && lua.copied);
+    CHECK(read(proj / "scripts" / "door.lua") == "print(1)");
+    // The same file again reuses the copy.
+    editor::AdoptedAsset again = editor::adoptAsset(proj, outside / "door.lua", "scripts");
+    CHECK(again.path == "scripts/door.lua" && !again.copied);
+    // A different file of the same name is numbered, never overwrites.
+    fs::create_directories(outside / "b", ec);
+    write(outside / "b" / "door.lua", "print(2)");
+    editor::AdoptedAsset other = editor::adoptAsset(proj, outside / "b" / "door.lua", "scripts");
+    CHECK(other.path == "scripts/door_2.lua" && other.copied);
+    CHECK(read(proj / "scripts" / "door.lua") == "print(1)" && read(proj / "scripts" / "door_2.lua") == "print(2)");
+
+    // Failures carry a reason and no path.
+    editor::AdoptedAsset missing = editor::adoptAsset(proj, outside / "nope.wav", "audio");
+    CHECK(!missing.error.empty() && missing.path.empty());
+    editor::AdoptedAsset noProject = editor::adoptAsset({}, outside / "door.lua", "scripts");
+    CHECK(!noProject.error.empty() && noProject.path.empty());
+
+    // Every file field is checked on disk: script, trigger script, audio clip,
+    // skin clips. Picking a file refreshes its entry.
+    write(proj / "scripts" / "zone.lua", "");
+    fs::create_directories(proj / "audio", ec);
+    write(proj / "audio" / "bell.wav", "RIFF");
+    splash::Scene sc;
+    splash::Object ob = named("Thing");
+    ob.trigger.emplace();
+    ob.trigger->lua = "scripts/zone.lua";
+    ob.audio.emplace();
+    ob.audio->clip = "audio/bell.wav";
+    ob.skin.emplace();
+    ob.skin->clips = {"anims/walk.anim"};
+    sc.objects.push_back(ob);
+    editor::Document doc;
+    doc.reset(sc, proj, "game");
+    CHECK(doc.fileExists("scripts/zone.lua") && doc.fileExists("audio/bell.wav"));
+    CHECK(!doc.fileExists("anims/walk.anim") && !doc.fileExists("scripts/new.lua"));
+    fs::create_directories(proj / "anims", ec);
+    write(proj / "anims" / "walk.anim", "x");
+    write(proj / "scripts" / "new.lua", "");
+    doc.refreshAssets({"anims/walk.anim", "scripts/new.lua"});
+    CHECK(doc.fileExists("anims/walk.anim") && doc.fileExists("scripts/new.lua"));
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -816,6 +881,7 @@ int main(int argc, char** argv) {
     testLiveExport();
     testPlay();
     testProject();
+    testAdoptAsset();
     if (g_failures) {
         std::fprintf(stderr, "editor_tests: %d of %d checks failed\n", g_failures, g_checks);
         return 1;

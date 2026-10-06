@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <exception>
 #include <fstream>
+#include <iterator>
 #include <system_error>
 
 #include "scene.hh"
@@ -68,6 +69,61 @@ std::optional<fs::path> sceneInProject(const fs::path& project, const fs::path& 
     if (rel.empty() || rel == "." || *rel.begin() == "..") return std::nullopt;
     if (rel.extension() != ".scene") rel += ".scene";
     return rel;
+}
+
+static bool sameBytes(const fs::path& a, const fs::path& b) {
+    std::error_code ec;
+    if (fs::file_size(a, ec) != fs::file_size(b, ec) || ec) return false;
+    std::ifstream fa(a, std::ios::binary), fb(b, std::ios::binary);
+    if (!fa || !fb) return false;
+    return std::equal(std::istreambuf_iterator<char>(fa), {}, std::istreambuf_iterator<char>(fb), {});
+}
+static std::string genericUtf8(const fs::path& p) {
+    std::u8string u = p.generic_u8string();
+    return std::string(u.begin(), u.end());
+}
+
+AdoptedAsset adoptAsset(const fs::path& project, const fs::path& file, const std::string& folder) {
+    AdoptedAsset r;
+    std::error_code ec;
+    if (project.empty() || file.empty()) {
+        r.error = "no project is open";
+        return r;
+    }
+    if (!fs::is_regular_file(file, ec)) {
+        r.error = utf8(file) + " is not a file";
+        return r;
+    }
+    fs::path root = fs::weakly_canonical(project, ec);
+    fs::path src = fs::weakly_canonical(file, ec);
+    if (ec) {
+        r.error = ec.message();
+        return r;
+    }
+    fs::path rel = src.lexically_relative(root);
+    if (!rel.empty() && rel != "." && *rel.begin() != "..") {
+        r.path = genericUtf8(rel);
+        return r;
+    }
+    fs::path dir = root / fromUtf8(folder);
+    fs::create_directories(dir, ec);
+    if (ec) {
+        r.error = "could not create " + utf8(dir) + ": " + ec.message();
+        return r;
+    }
+    const std::string stem = utf8(src.stem()), ext = utf8(src.extension());
+    fs::path dest = dir / src.filename();
+    for (int n = 2; fs::exists(dest, ec) && !sameBytes(src, dest); ++n) dest = dir / fromUtf8(stem + "_" + std::to_string(n) + ext);
+    if (!fs::exists(dest, ec)) {
+        fs::copy_file(src, dest, ec);
+        if (ec) {
+            r.error = "could not copy " + utf8(src.filename()) + ": " + ec.message();
+            return r;
+        }
+        r.copied = true;
+    }
+    r.path = genericUtf8(dest.lexically_relative(root));
+    return r;
 }
 
 void RecentScenes::load() {
