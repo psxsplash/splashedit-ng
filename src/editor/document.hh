@@ -92,6 +92,13 @@ public:
     // Every node starts expanded; the empty path is the scene root row.
     bool expanded(const ObjectPath& path) const { return !m_collapsed.count(path); }
     void toggleExpanded(const ObjectPath& path);
+    // Expands or collapses every object that has children (the root row stays as it is).
+    void setAllExpanded(bool expanded);
+
+    // The inspector's pinned object: shown instead of the selection while set.
+    // Follows the object through inserts and removes; cleared when it goes.
+    const std::optional<ObjectPath>& pinned() const { return m_pinned; }
+    void pin(std::optional<ObjectPath> path) { m_pinned = std::move(path); }
 
     // Editing. Every change goes through the history: it bumps revision() and
     // marks the document dirty.
@@ -112,6 +119,12 @@ public:
     // Inserts a copy right after the original, named the way Unity names
     // duplicates ("Crate (2)"), and selects it. Returns the copy's path.
     std::optional<ObjectPath> duplicateObject(const ObjectPath& path);
+    // Moves the object at `from`, with its children, to be child `index` of
+    // `toParent` (empty = the scene root), keeping where it is in the world.
+    // `index` counts the new parent's children as they are now, before the
+    // move. Refused (nullopt) when `toParent` is the object itself or inside
+    // it. Selects the object and returns its new path.
+    std::optional<ObjectPath> moveObject(const ObjectPath& from, const ObjectPath& toParent, int index);
     // Applies `cmd` and pushes it, dropping anything that could be redone.
     // With `mergeable`, it may fold into the previous command (see Command::merge).
     void execute(std::unique_ptr<Command> cmd, bool mergeable = false);
@@ -176,6 +189,7 @@ private:
     unsigned m_assetsId = 0;
     std::optional<ObjectPath> m_selection;
     std::set<ObjectPath> m_collapsed;
+    std::optional<ObjectPath> m_pinned;
     std::map<std::string, MeshInfo> m_meshes;
     std::map<std::string, TextureInfo> m_textures;
     std::map<std::string, bool> m_files;

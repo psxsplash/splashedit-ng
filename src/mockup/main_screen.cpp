@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <iterator>
+#include <cctype>
 #include <cfloat>
 #include <cmath>
 #include <cstdio>
@@ -411,7 +412,65 @@ struct TreeCtx {
     ImRect panel;
     float y;
     bool renameShown = false;
+    std::string filter{};  // lower case; empty = every object
+    int shown = 0;       // object rows drawn
+    // Where a dragged row would land: as child `dropIndex` of `dropParent`,
+    // shown as a box around a row (into it) or a line between rows.
+    bool hasDrop = false;
+    editor::ObjectPath dropParent{};
+    int dropIndex = 0;
+    bool dropInto = false;
+    ImRect dropMark{};
 };
+
+static std::string lower(std::string s) {
+    for (char& ch : s) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    return s;
+}
+
+// The object or something under it has `filter` (lower case) in its name.
+static bool treeMatches(const splash::Object& o, const std::string& filter) {
+    if (lower(o.name).find(filter) != std::string::npos) return true;
+    for (const splash::Object& c : o.children)
+        if (treeMatches(c, filter)) return true;
+    return false;
+}
+
+static bool isUnder(const editor::ObjectPath& p, const editor::ObjectPath& ancestor) {
+    return p.size() >= ancestor.size() && std::equal(ancestor.begin(), ancestor.end(), p.begin());
+}
+
+// While a row is dragged: the drop the mouse points at over row `rr`, which
+// shows the object at `path` (its top quarter drops before it, the bottom
+// quarter after it or, when it is open, as its first child, and the middle into it).
+static void treeDropTarget(TreeCtx& c, ImRect rr, const editor::ObjectPath& path, const splash::Object& o, bool open) {
+    const ImVec2 m = ImGui::GetIO().MousePos;
+    if (!c.st.treeDragging || m.y < rr.Min.y || m.y >= rr.Max.y || m.x < c.panel.Min.x || m.x >= c.panel.Max.x) return;
+    if (isUnder(path, c.st.treeDragPath)) return;  // onto itself or inside it
+    const float t = (m.y - rr.Min.y) / rr.GetHeight();
+    const float indent = rr.Min.x + space::xs + static_cast<float>(path.size()) * 16.0f + 16;
+    const editor::ObjectPath parent(path.begin(), path.end() - 1);
+    c.hasDrop = true;
+    c.dropInto = false;
+    if (t < 0.25f) {
+        c.dropParent = parent;
+        c.dropIndex = path.back();
+        c.dropMark = ImRect(ImVec2(indent, rr.Min.y - 1), ImVec2(rr.Max.x, rr.Min.y + 1));
+    } else if (t >= 0.75f && open && !o.children.empty()) {
+        c.dropParent = path;
+        c.dropIndex = 0;
+        c.dropMark = ImRect(ImVec2(indent + 16, rr.Max.y - 1), ImVec2(rr.Max.x, rr.Max.y + 1));
+    } else if (t >= 0.75f) {
+        c.dropParent = parent;
+        c.dropIndex = path.back() + 1;
+        c.dropMark = ImRect(ImVec2(indent, rr.Max.y - 1), ImVec2(rr.Max.x, rr.Max.y + 1));
+    } else {
+        c.dropParent = path;
+        c.dropIndex = static_cast<int>(o.children.size());
+        c.dropInto = true;
+        c.dropMark = rr;
+    }
+}
 
 // Clicks left of the chevron's right edge toggle; anywhere else selects.
 static bool chevronClicked(ImRect rr, int depth) {
@@ -421,8 +480,10 @@ static bool chevronClicked(ImRect rr, int depth) {
 static void treeObjects(TreeCtx& c, const std::vector<splash::Object>& objs, editor::ObjectPath& path) {
     for (size_t i = 0; i < objs.size(); ++i) {
         const splash::Object& o = objs[i];
+        if (!c.filter.empty() && !treeMatches(o, c.filter)) continue;
         path.push_back(static_cast<int>(i));
-        bool open = c.doc.expanded(path);
+        // A filter shows every match with the rows above it, opened.
+        bool open = !c.filter.empty() || c.doc.expanded(path);
         ObjectLook look = lookOf(o, open);
         std::string meta;
         if (o.mesh)
@@ -443,14 +504,34 @@ static void treeObjects(TreeCtx& c, const std::vector<splash::Object>& objs, edi
         ImGui::PushID(static_cast<int>(i));
         bool flipActive = false;
         Hit h = treeRow("row", rr, row, &flipActive);
-        if (flipActive) c.doc.edit(path, [](splash::Object& ob) { ob.active = !ob.active; });
-        else if (h.clicked) {
-            if (row.hasChildren && chevronClicked(rr, row.depth)) c.doc.toggleExpanded(path);
-            else c.doc.select(path);
+        ++c.shown;
+        if (c.st.treeDragging) {
+            treeDropTarget(c, rr, path, o, open);
+        } else if (flipActive) {
+            c.doc.edit(path, [](splash::Object& ob) { ob.active = !ob.active; });
+        } else if (h.clicked) {
+            if (row.hasChildren && chevronClicked(rr, row.depth)) {
+                if (c.filter.empty()) c.doc.toggleExpanded(path);
+            } else {
+                c.doc.select(path);
+            }
         }
-        if (h.hovered && ImGui::IsMouseDoubleClicked(0) && !(row.hasChildren && chevronClicked(rr, row.depth))) {
+        if (!c.st.treeDragging && h.hovered && ImGui::IsMouseDoubleClicked(0) && !(row.hasChildren && chevronClicked(rr, row.depth))) {
             c.doc.select(path);
             c.st.frameRequest = true;
+        }
+        // Right-click: select it and open its menu.
+        if (!c.st.treeDragging && h.hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+            c.doc.select(path);
+            c.st.treeMenu = 1;
+            c.st.treeMenuPath = path;
+            c.st.treeMenuPos = ImGui::GetIO().MousePos;
+            c.st.treeMenuRight = false;
+        }
+        // Pressing a row and moving starts dragging it.
+        if (h.held && !c.st.treeDragging && !c.st.renaming && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 6)) {
+            c.st.treeDragging = true;
+            c.st.treeDragPath = path;
         }
         // F2: the label becomes a text field.
         if (c.st.renaming && c.st.renamePath == path) {
@@ -915,29 +996,9 @@ static std::vector<MenuEntry> menuEntries(int which, State& st, editor::Document
 }
 
 // The open title-bar menu, under its label.
-static void menus(State& st, editor::Document& doc, viewport::Ps1View& view) {
-    static const char* ids[6] = {"##m_file", "##m_edit", "##m_object", "##m_build", "##m_view", "##m_help"};
-    static int shown = -1;  // the menu whose popup was open last frame
-    if (shown >= 0 && !ImGui::IsPopupOpen(ids[shown])) {
-        // Closed by a press elsewhere: that press must not reopen it from its own label.
-        if (st.menuOpen == shown && ImGui::IsMouseDown(ImGuiMouseButton_Left)) g_menuIgnoreClick = shown;
-        if (st.menuOpen == shown) st.menuOpen = -1;
-        shown = -1;
-    }
-    // The open popup takes the hover from the title bar, so moving to another
-    // label is checked against the label rects directly.
-    if (shown >= 0 && st.menuOpen == shown)
-        for (int j = 0; j < 6; ++j)
-            if (j != shown && g_menuRects[j].Contains(ImGui::GetIO().MousePos)) st.menuOpen = j;
-    if (st.menuOpen != shown) {
-        // Opening a popup at the same level replaces the one that was open.
-        if (st.menuOpen >= 0) ImGui::OpenPopup(ids[st.menuOpen]);
-        shown = st.menuOpen;
-    }
-    if (shown < 0) return;
-
+// Size of a menu popup holding `entries`.
+static void menuSize(const std::vector<MenuEntry>& entries, float* outW, float* outH) {
     Fonts& f = fonts();
-    std::vector<MenuEntry> entries = menuEntries(shown, st, doc, view);
     const float pad = space::xs, rowH = size::field + 4, sepH = 9, headH = 24;
     float w = 220, h = pad * 2;
     for (const MenuEntry& e : entries) {
@@ -949,15 +1010,15 @@ static void menus(State& st, editor::Document& doc, viewport::Ps1View& view) {
                                 measure(f.regular, type::label, e.shortcut.c_str()).x + space::md);
         }
     }
-    const ImRect anchor = g_menuRects[shown];
-    ImGui::SetNextWindowPos(ImVec2(anchor.Min.x, anchor.Max.y + space::xs));
-    ImGui::SetNextWindowSize(ImVec2(w, h));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
-    ImGui::PushStyleVar(ImGuiStyleVar_PopupBorderSize, 0.0f);
-    const bool open = ImGui::BeginPopup(ids[shown], ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
-                                                        ImGuiWindowFlags_NoSavedSettings);
-    ImGui::PopStyleVar(2);
-    if (!open) return;
+    *outW = w;
+    *outH = h;
+}
+
+// Draws `entries` in the popup that is open (sized by menuSize) and returns
+// the action of the item clicked this frame, if any.
+static std::function<void()> menuRows(const std::vector<MenuEntry>& entries, float w, float h) {
+    Fonts& f = fonts();
+    const float pad = space::xs, rowH = size::field + 4, sepH = 9, headH = 24;
     ImDrawList* dl = ImGui::GetWindowDrawList();
     ImRect box(ImGui::GetWindowPos(), ImGui::GetWindowPos() + ImVec2(w, h));
     dl->AddRectFilled(box.Min + ImVec2(0, 2), box.Max + ImVec2(0, 6), rgb(0x000000, 80), radius::card);
@@ -993,6 +1054,43 @@ static void menus(State& st, editor::Document& doc, viewport::Ps1View& view) {
         }
         ImGui::PopID();
     }
+    return run;
+}
+
+static void menus(State& st, editor::Document& doc, viewport::Ps1View& view) {
+    static const char* ids[6] = {"##m_file", "##m_edit", "##m_object", "##m_build", "##m_view", "##m_help"};
+    static int shown = -1;  // the menu whose popup was open last frame
+    if (shown >= 0 && !ImGui::IsPopupOpen(ids[shown])) {
+        // Closed by a press elsewhere: that press must not reopen it from its own label.
+        if (st.menuOpen == shown && ImGui::IsMouseDown(ImGuiMouseButton_Left)) g_menuIgnoreClick = shown;
+        if (st.menuOpen == shown) st.menuOpen = -1;
+        shown = -1;
+    }
+    // The open popup takes the hover from the title bar, so moving to another
+    // label is checked against the label rects directly.
+    if (shown >= 0 && st.menuOpen == shown)
+        for (int j = 0; j < 6; ++j)
+            if (j != shown && g_menuRects[j].Contains(ImGui::GetIO().MousePos)) st.menuOpen = j;
+    if (st.menuOpen != shown) {
+        // Opening a popup at the same level replaces the one that was open.
+        if (st.menuOpen >= 0) ImGui::OpenPopup(ids[st.menuOpen]);
+        shown = st.menuOpen;
+    }
+    if (shown < 0) return;
+
+    std::vector<MenuEntry> entries = menuEntries(shown, st, doc, view);
+    float w, h;
+    menuSize(entries, &w, &h);
+    const ImRect anchor = g_menuRects[shown];
+    ImGui::SetNextWindowPos(ImVec2(anchor.Min.x, anchor.Max.y + space::xs));
+    ImGui::SetNextWindowSize(ImVec2(w, h));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_PopupBorderSize, 0.0f);
+    const bool open = ImGui::BeginPopup(ids[shown], ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
+                                                        ImGuiWindowFlags_NoSavedSettings);
+    ImGui::PopStyleVar(2);
+    if (!open) return;
+    std::function<void()> run = menuRows(entries, w, h);
     if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) st.menuOpen = -1;
     if (run) st.menuOpen = -1;
     if (st.menuOpen < 0) {
@@ -1071,6 +1169,70 @@ static void importPending(State& st, editor::Document& doc, const viewport::Ps1V
     }
 }
 
+// The menu a right-click on a row (kind 1) or the panel's ellipsis (kind 2) opens.
+static std::vector<MenuEntry> treeMenuEntries(int kind, State& st, editor::Document& doc) {
+    std::vector<MenuEntry> m;
+    if (kind == 1) {
+        const editor::ObjectPath p = st.treeMenuPath;
+        if (!doc.object(p)) return m;
+        m.push_back(item("Rename", "F2", true, [&st, p] {
+            st.renaming = true;
+            st.renameStart = true;
+            st.renamePath = p;
+        }));
+        m.push_back(item("Duplicate", "Ctrl+D", true, [&doc, p] { doc.duplicateObject(p); }));
+        m.push_back(item("Delete", "Del", true, [&doc, p] { doc.removeObject(p); }));
+        m.push_back(separator());
+        // Out of its group, to the top level right after the group it was in.
+        m.push_back(item("Move to Top Level", "", p.size() > 1, [&doc, p] { doc.moveObject(p, {}, p.front() + 1); }));
+        m.push_back(item("Frame in View", "F", true, [&st] { st.frameRequest = true; }));
+        const bool pinned = doc.pinned() && *doc.pinned() == p;
+        m.push_back(item("Pin in Inspector", "", true, [&doc, p, pinned] { doc.pin(pinned ? std::nullopt : std::optional(p)); }, pinned));
+    } else {
+        m.push_back(item("Add Object...", "Ctrl+A", true, [&st] { st.openAddObject = true; }));
+        m.push_back(separator());
+        m.push_back(item("Expand All", "", true, [&doc] { doc.setAllExpanded(true); }));
+        m.push_back(item("Collapse All", "", true, [&doc] { doc.setAllExpanded(false); }));
+        m.push_back(separator());
+        m.push_back(item("Filter...", "Ctrl+F", true, [&st] { st.focusTreeFilter = true; }));
+        m.push_back(item("Clear Filter", "", !st.treeFilter.empty(), [&st] { st.treeFilter.clear(); }));
+    }
+    return m;
+}
+
+static void treeMenu(State& st, editor::Document& doc) {
+    static const char* id = "##treemenu";
+    if (st.treeMenu) {
+        st.treeMenuShown = st.treeMenu;
+        st.treeMenu = 0;
+        ImGui::OpenPopup(id);
+    }
+    if (!ImGui::IsPopupOpen(id)) return;
+    std::vector<MenuEntry> entries = treeMenuEntries(st.treeMenuShown, st, doc);
+    float w, h;
+    menuSize(entries, &w, &h);
+    // Kept on screen, flipped up or left when it would run off.
+    const ImVec2 d = ImGui::GetIO().DisplaySize;
+    ImVec2 pos = st.treeMenuPos;
+    if (st.treeMenuRight) pos.x -= w;
+    if (pos.x + w > d.x - space::xs) pos.x = st.treeMenuPos.x - w;
+    if (pos.y + h > d.y - space::xs) pos.y -= h;
+    pos.x = std::max(pos.x, space::xs);
+    pos.y = std::max(pos.y, space::xs);
+    ImGui::SetNextWindowPos(pos);
+    ImGui::SetNextWindowSize(ImVec2(w, h));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_PopupBorderSize, 0.0f);
+    const bool open = ImGui::BeginPopup(id, ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
+                                                ImGuiWindowFlags_NoSavedSettings);
+    ImGui::PopStyleVar(2);
+    if (!open) return;
+    std::function<void()> run = menuRows(entries, w, h);
+    if (run || ImGui::IsKeyPressed(ImGuiKey_Escape, false) || entries.empty()) ImGui::CloseCurrentPopup();
+    ImGui::EndPopup();
+    if (run) run();
+}
+
 static void sceneTree(State& st, ImDrawList* dl, ImRect r, editor::Document& doc, const viewport::Ps1View& view) {
     panel(dl, r);
     std::string count = std::to_string(doc.objectCount()) + (doc.objectCount() == 1 ? " object" : " objects");
@@ -1078,27 +1240,97 @@ static void sceneTree(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
     ImRect addBtn(ImVec2(r.Max.x - 62, r.Min.y + 5), ImVec2(r.Max.x - 36, r.Min.y + 29));
     if (iconButton("addobj", addBtn, icon::plus, false, "Add object (Ctrl+A)")) st.openAddObject = true;
     addObjectPicker(st, doc, view, ImVec2(addBtn.Min.x, addBtn.Max.y + space::xs));
-    iconButton("treemenu", ImRect(ImVec2(r.Max.x - 32, r.Min.y + 5), ImVec2(r.Max.x - 6, r.Min.y + 29)), icon::ellipsis);
-    searchField("treesearch", ImRect(ImVec2(r.Min.x + space::sm, y), ImVec2(r.Max.x - space::sm, y + 28)), "Filter objects",
-                "Ctrl F");
+    ImRect menuBtn(ImVec2(r.Max.x - 32, r.Min.y + 5), ImVec2(r.Max.x - 6, r.Min.y + 29));
+    if (iconButton("treemenu", menuBtn, icon::ellipsis, false, "More")) {
+        st.treeMenu = 2;
+        st.treeMenuPos = ImVec2(menuBtn.Max.x, menuBtn.Max.y + space::xs);
+        st.treeMenuRight = true;
+    }
+    searchField("treesearch", ImRect(ImVec2(r.Min.x + space::sm, y), ImVec2(r.Max.x - space::sm, y + 28)), "Filter objects", "Ctrl F",
+                &st.treeFilter, st.focusTreeFilter);
+    st.focusTreeFilter = false;
     y += 28 + space::sm;
 
     ImRect foot(ImVec2(r.Min.x, r.Max.y - 40), r.Max);
     ImGui::PushClipRect(ImVec2(r.Min.x, y), ImVec2(r.Max.x, foot.Min.y), true);
     const editor::ObjectPath root;
-    bool rootOpen = doc.expanded(root);
+    TreeCtx ctx{st, doc, r, y + size::row};
+    ctx.filter = lower(st.treeFilter);
+    bool rootOpen = !ctx.filter.empty() || doc.expanded(root);
     TreeRow top{0, icon::layers, color::accentHover, doc.sceneStem().c_str(), nullptr, !doc.scene().objects.empty(), rootOpen};
     ImRect rr(ImVec2(r.Min.x + space::xs + 2, y), ImVec2(r.Max.x - space::xs - 2, y + size::row));
     Hit h = treeRow("root", rr, top);
-    if (h.clicked) {
-        if (top.hasChildren && chevronClicked(rr, 0)) doc.toggleExpanded(root);
-        else doc.select(std::nullopt);
+    if (h.clicked && !st.treeDragging) {
+        if (top.hasChildren && chevronClicked(rr, 0)) {
+            if (ctx.filter.empty()) doc.toggleExpanded(root);
+        } else {
+            doc.select(std::nullopt);
+        }
     }
-    TreeCtx ctx{st, doc, r, y + size::row};
+    if (!st.treeDragging && h.hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+        st.treeMenu = 2;
+        st.treeMenuPos = ImGui::GetIO().MousePos;
+        st.treeMenuRight = false;
+    }
     editor::ObjectPath path;
     if (rootOpen) treeObjects(ctx, doc.scene().objects, path);
     if (st.renaming && !ctx.renameShown) st.renaming = false;  // the row is collapsed away or gone
+    if (!ctx.filter.empty() && ctx.shown == 0) {
+        const char* none = "No objects match";
+        text(dl, ImVec2(r.Min.x + space::md + 16, centerY(fonts().regular, type::body, ctx.y, ctx.y + size::row)), fonts().regular,
+             type::body, color::textFaint, none);
+    }
+
+    // Dragging a row: the scene row or the empty space under the rows drops it at the top level, last.
+    if (st.treeDragging) {
+        const ImVec2 m = ImGui::GetIO().MousePos;
+        const bool inTree = m.x >= r.Min.x && m.x < r.Max.x && m.y >= y && m.y < foot.Min.y;
+        if (!ctx.hasDrop && inTree && (m.y < y + size::row || m.y >= ctx.y)) {
+            ctx.hasDrop = true;
+            ctx.dropParent.clear();
+            ctx.dropIndex = static_cast<int>(doc.scene().objects.size());
+            ctx.dropInto = m.y < y + size::row;
+            ctx.dropMark = ctx.dropInto ? rr : ImRect(ImVec2(rr.Min.x + space::xs + 16, ctx.y - 1), ImVec2(rr.Max.x, ctx.y + 1));
+        }
+        // A drop that leaves the object where it is shows nothing.
+        if (ctx.hasDrop) {
+            const editor::ObjectPath& from = st.treeDragPath;
+            const editor::ObjectPath fromParent(from.begin(), from.end() - 1);
+            if (ctx.dropParent == fromParent && (ctx.dropIndex == from.back() || ctx.dropIndex == from.back() + 1)) ctx.hasDrop = false;
+        }
+        if (ctx.hasDrop) {
+            if (ctx.dropInto) dl->AddRect(ctx.dropMark.Min, ctx.dropMark.Max, color::accent, radius::field, 0, 1.5f);
+            else dl->AddRectFilled(ctx.dropMark.Min, ctx.dropMark.Max, color::accent, 1);
+        }
+    }
     ImGui::PopClipRect();
+
+    if (st.treeDragging) {
+        const splash::Object* dragged = doc.object(st.treeDragPath);
+        if (dragged) {
+            // The dragged object's name follows the pointer.
+            ImDrawList* fg = ImGui::GetForegroundDrawList();
+            const ImVec2 m = ImGui::GetIO().MousePos + ImVec2(14, 4);
+            ImVec2 ts = measure(fonts().regular, type::body, dragged->name.c_str());
+            ImRect tag(m, m + ts + ImVec2(space::md * 2, space::xs * 2));
+            fg->AddRectFilled(tag.Min, tag.Max, color::raised, radius::field);
+            fg->AddRect(tag.Min, tag.Max, ctx.hasDrop ? color::accent : color::borderStrong, radius::field);
+            text(fg, tag.Min + ImVec2(space::md, space::xs), fonts().regular, type::body, color::text, dragged->name.c_str());
+        }
+        if (!dragged || ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+            st.treeDragging = false;
+        } else if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+            st.treeDragging = false;
+            if (ctx.hasDrop)
+                if (std::optional<editor::ObjectPath> to = doc.moveObject(st.treeDragPath, ctx.dropParent, ctx.dropIndex))
+                    // Open the rows above it so it stays in sight.
+                    for (size_t n = 0; n < to->size(); ++n) {
+                        const editor::ObjectPath up(to->begin(), to->begin() + static_cast<std::ptrdiff_t>(n));
+                        if (!doc.expanded(up)) doc.toggleExpanded(up);
+                    }
+        }
+    }
+    treeMenu(st, doc);
 
     // Footer: the project's folder, collapsed.
     dl->AddLine(ImVec2(foot.Min.x + 1, foot.Min.y), ImVec2(foot.Max.x - 1, foot.Min.y), color::border);
@@ -2167,7 +2399,9 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
     }
     float camW = 128;
     ImVec2 rp(r.Max.x - space::md - segW - space::sm - camW, p.y + 2);
-    dropdown("camera", ImRect(rp, rp + ImVec2(camW, 28)), icon::camera, view.ortho() ? "Orthographic" : "Perspective");
+    int cam = dropdownMenu("camera", ImRect(rp, rp + ImVec2(camW, 28)), icon::camera, view.ortho() ? "Orthographic" : "Perspective",
+                           {"Perspective", "Orthographic"}, view.ortho() ? 1 : 0);
+    if (cam >= 0) view.setOrtho(cam == 1);
     st.viewMode = segmented("viewmode", ImVec2(rp.x + camW + space::sm, p.y + 2), {"PS1", "Clean"}, st.viewMode, &w);
     axisWidget(dl, ImVec2(r.Max.x - 52, r.Min.y + 96), view);
 
@@ -2361,7 +2595,10 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
     };
 
     float top = y;
-    section("s_render", ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), icon::cpu, color::textDim, "Render buffers", true, true, false);
+    // Closed, the body runs under an empty clip rect (see the object inspector's fold).
+    const bool renderOpen = section("s_render", ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), icon::cpu, color::textDim, "Render buffers",
+                                    true, true, false);
+    if (!renderOpen) ImGui::PushClipRect(ImVec2(0, 0), ImVec2(0, 0), false);
     y += 34 + space::xs;
 
     // One buffer: an integer field showing the size the export uses, "auto"
@@ -2425,8 +2662,13 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
                 buUsed && peak->bump > buUsed ? color::warn : color::accentHover);
     if (stats) caption(kb(stats->rendererBytes()) + " KB of RAM for both, double-buffered", color::textFaint);
     else caption("Sizes appear once the scene exports.", color::textFaint);
-    dl->AddRect(ImVec2(x0, top), ImVec2(x1, y + space::sm), rgb(0xffffff, 10), radius::card);
-    y += space::sm + space::md;
+    if (!renderOpen) {
+        ImGui::PopClipRect();
+        y = top + 34 + space::md;
+    } else {
+        dl->AddRect(ImVec2(x0, top), ImVec2(x1, y + space::sm), rgb(0xffffff, 10), radius::card);
+        y += space::sm + space::md;
+    }
 
     // An override below the estimate is allowed (the estimate has margin)
     // but deserves a word.
@@ -2458,10 +2700,15 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
     Fonts& f = fonts();
     panel(dl, r);
     float y = panelHeader(dl, r, "Inspector", nullptr);
-    iconButton("lockinsp", ImRect(ImVec2(r.Max.x - 32, r.Min.y + 5), ImVec2(r.Max.x - 6, r.Min.y + 29)), icon::lock, false,
-               "Keep showing this object");
+    // The lock pins what the inspector shows; selecting other objects leaves it there.
+    const bool pinned = doc.pinned().has_value();
+    if (iconButton("lockinsp", ImRect(ImVec2(r.Max.x - 32, r.Min.y + 5), ImVec2(r.Max.x - 6, r.Min.y + 29)), icon::lock, pinned,
+                   pinned ? "Pinned: click to follow the selection again" : "Keep showing this object", color::textDim,
+                   pinned || doc.selection()))
+        doc.pin(pinned ? std::nullopt : doc.selection());
 
-    const splash::Object* o = doc.selected();
+    const std::optional<editor::ObjectPath> target = doc.pinned() ? doc.pinned() : doc.selection();
+    const splash::Object* o = target ? doc.object(*target) : nullptr;
     if (!o) {
         sceneInspector(st, dl, r, y, doc);
         return;
@@ -2471,12 +2718,12 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
     float x0 = r.Min.x + space::md, x1 = r.Max.x - space::md;
     // Object header.
     ObjectLook look = lookOf(*o, true);
-    const splash::Object* parent = doc.parent(*doc.selection());
+    const splash::Object* parent = doc.parent(*target);
     std::string where = "in " + (parent ? parent->name : doc.sceneStem());
     ImRect ic(ImVec2(x0, y), ImVec2(x0 + 40, y + 40));
     dl->AddRectFilled(ic.Min, ic.Max, (look.color & 0x00ffffffu) | (34u << IM_COL32_A_SHIFT), radius::card);
     textCentered(dl, ic, f.medium, type::icon + 3, look.color, look.icon);
-    const editor::ObjectPath path = *doc.selection();
+    const editor::ObjectPath path = *target;
     // Name: double-click to rename.
     {
         ImVec2 np(ic.Max.x + space::md, y + 2);
@@ -2506,7 +2753,20 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
         y += rowH;
         return property(id, rr, lw, label, tip);
     };
+    // A closed section's body still runs, under an empty clip rect: nothing
+    // in it draws or takes input, and sectionEnd puts y back under the header.
+    bool folded = false;
+    auto fold = [&](bool open) {
+        folded = !open;
+        if (folded) ImGui::PushClipRect(ImVec2(0, 0), ImVec2(0, 0), false);
+    };
     auto sectionEnd = [&](float top) {
+        if (folded) {
+            ImGui::PopClipRect();
+            folded = false;
+            y = top + 34 + space::md;
+            return;
+        }
         dl->AddRect(ImVec2(x0, top), ImVec2(x1, y + space::sm), rgb(0xffffff, 10), radius::card);
         y += space::sm + space::md;
     };
@@ -2539,7 +2799,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
     const splash::Transform& t = o->transform;
     splash::Vec3 e = eulerDegrees(t.rotation);
     float top = y;
-    section("s_transform", ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), icon::move, color::textDim, "Transform", true, true, false);
+    fold(section("s_transform", ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), icon::move, color::textDim, "Transform", true, true, false));
     y += 34 + space::xs;
     // Edits go through the history; a scrub merges into one step per field
     // until it is released (FieldEdit::done).
@@ -2584,13 +2844,13 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
             texMeta = std::to_string(ti->width) + " x " + std::to_string(ti->height) + "  \xc2\xb7  " + texMeta;
 
         top = y;
-        section("s_mesh", ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), icon::box, kind::mesh, "Mesh", true, true, true,
-                removeFlag(editor::ComponentKind::Mesh));
+        fold(section("s_mesh", ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), icon::box, kind::mesh, "Mesh", true, true, true,
+                     removeFlag(editor::ComponentKind::Mesh)));
         y += 34 + space::xs;
         const ImRect modelRow = row("lmodel", "Model", "The 3D model to draw. Click to pick a .glb or .gltf file, or drop one here.");
         bool pickModel = assetField("model", modelRow, icon::box, meshSt == editor::AssetStatus::Ok ? kind::mesh : color::warn,
                                     modelName.c_str(), tris.empty() ? nullptr : tris.c_str());
-        st.modelField = modelRow;
+        st.modelField = folded ? ImRect() : modelRow;
         st.modelField.ClipWith(r);
         st.modelFieldPath = path;
         if (st.drop.hovering && st.modelField.Contains(st.drop.pos))
@@ -2630,8 +2890,8 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
     // Collider.
     if (o->collider) {
         top = y;
-        section("s_col", ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), icon::square, kind::collider, "Collider", true, true, true,
-                removeFlag(editor::ComponentKind::Collider));
+        fold(section("s_col", ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), icon::square, kind::collider, "Collider", true, true, true,
+                     removeFlag(editor::ComponentKind::Collider)));
         y += 34 + space::xs;
         // Menu order follows the tooltip: Static, Dynamic, None.
         const splash::ColliderKind kinds[3] = {splash::ColliderKind::Static, splash::ColliderKind::Dynamic, splash::ColliderKind::None};
@@ -2647,8 +2907,8 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
         const splash::LightComponent& l = *o->light;
         top = y;
         bool flipLight = false;
-        section("s_light", ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), icon::lightbulb, kind::light, "Light", true, l.enabled, true,
-                removeFlag(editor::ComponentKind::Light), &flipLight);
+        fold(section("s_light", ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), icon::lightbulb, kind::light, "Light", true, l.enabled, true,
+                     removeFlag(editor::ComponentKind::Light), &flipLight));
         if (flipLight) doc.edit(path, [](splash::Object& ob) { ob.light->enabled = !ob.light->enabled; });
         y += 34 + space::xs;
         // Menu order follows the tooltip: Point, Spot, Directional.
@@ -2696,8 +2956,8 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
     if (o->script) {
         const std::string& lua = o->script->lua;
         top = y;
-        section("s_script", ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), icon::script, kind::script, "Script", true, true, true,
-                removeFlag(editor::ComponentKind::Script));
+        fold(section("s_script", ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), icon::script, kind::script, "Script", true, true, true,
+                     removeFlag(editor::ComponentKind::Script)));
         y += 34 + space::xs;
         bool found = doc.fileExists(lua);
         if (assetField("lua", row("llua", "File", "The Lua file that runs for this object. Click to pick one."), icon::fileCode,
@@ -2710,7 +2970,8 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
     // Components the inspector shows a few fields of.
     auto compSection = [&](const char* id, editor::ComponentKind k) {
         ObjectLook lk = lookOf(k);
-        section(id, ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), lk.icon, lk.color, editor::info(k).label, true, true, true, removeFlag(k));
+        fold(section(id, ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), lk.icon, lk.color, editor::info(k).label, true, true, true,
+                     removeFlag(k)));
         y += 34 + space::xs;
     };
     auto number = [&](const char* id, const char* label, const char* tip, float v, const char* unit, const char* key, float lo, float hi,
@@ -3053,6 +3314,7 @@ static void shortcuts(State& st, editor::Document& doc) {
         }
     }
     if (ctrl && !shift && pressed(ImGuiKey_A)) st.openAddObject = true;
+    if (ctrl && !shift && pressed(ImGuiKey_F)) st.focusTreeFilter = true;
     if (!ctrl && pressed(ImGuiKey_F5)) togglePlay(st, doc);
     if (ctrl && !shift && pressed(ImGuiKey_S)) saveDoc(st, doc);
     if (ctrl && shift && pressed(ImGuiKey_S) && !doc.projectRoot().empty()) saveDocAs(doc);

@@ -1,6 +1,7 @@
 #include "editor/document.hh"
 
 #include <algorithm>
+#include <cmath>
 #include <exception>
 #include <functional>
 #include <system_error>
@@ -93,6 +94,7 @@ std::optional<std::string> Document::load(const fs::path& project, const fs::pat
     clearHistory();
     ++m_loadId;
     m_selection.reset();
+    m_pinned.reset();
     m_collapsed.clear();
     m_meshes.clear();
     m_textures.clear();
@@ -126,6 +128,7 @@ void Document::reset(splash::Scene scene, const fs::path& project, const std::st
     ++m_loadId;
     ++m_revision;
     m_selection.reset();
+    m_pinned.reset();
     m_collapsed.clear();
     m_meshes.clear();
     m_textures.clear();
@@ -305,11 +308,94 @@ private:
     bool m_insert;
 };
 
+// Moves one object with its subtree from `from` to `to` (a path in the tree
+// as it is once the object has been taken out), swapping its transform.
+class MoveCommand : public Command {
+public:
+    MoveCommand(ObjectPath from, ObjectPath to, splash::Transform before, splash::Transform after)
+        : m_from(std::move(from)), m_to(std::move(to)), m_before(before), m_after(after) {}
+    void apply(Document& doc) override { move(doc, m_from, m_to, m_after); }
+    void revert(Document& doc) override { move(doc, m_to, m_from, m_before); }
+
+private:
+    static void move(Document& doc, const ObjectPath& a, const ObjectPath& b, const splash::Transform& t) {
+        std::vector<splash::Object>* src = doc.childrenMut(ObjectPath(a.begin(), a.end() - 1));
+        if (!src || static_cast<size_t>(a.back()) >= src->size()) return;
+        const bool pinned = doc.pinned() && *doc.pinned() == a;
+        splash::Object obj = std::move((*src)[a.back()]);
+        src->erase(src->begin() + a.back());
+        doc.shiftPaths(a, -1);
+        std::vector<splash::Object>* dst = doc.childrenMut(ObjectPath(b.begin(), b.end() - 1));
+        if (!dst) return;
+        obj.transform = t;
+        size_t i = std::min(static_cast<size_t>(b.back()), dst->size());
+        dst->insert(dst->begin() + static_cast<std::ptrdiff_t>(i), std::move(obj));
+        doc.shiftPaths(b, +1);
+        doc.select(b);
+        if (pinned) doc.pin(b);
+    }
+    ObjectPath m_from, m_to;
+    splash::Transform m_before, m_after;
+};
+
+splash::Quat mulQ(splash::Quat a, splash::Quat b) {
+    return {a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y, a.w * b.y + a.y * b.w + a.z * b.x - a.x * b.z,
+            a.w * b.z + a.z * b.w + a.x * b.y - a.y * b.x, a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z};
+}
+
+// World position, rotation and lossy scale composed the way splash::flatten does.
+struct World {
+    splash::Vec3 pos;
+    splash::Quat rot;
+    splash::Vec3 scale{1, 1, 1};
+    splash::Mat34 m = splash::Mat34::trs({}, {}, {1, 1, 1});
+};
+
+World worldOf(const Document& doc, const ObjectPath& path) {
+    World w;
+    for (size_t n = 1; n <= path.size(); ++n) {
+        const splash::Transform& t = doc.object(ObjectPath(path.begin(), path.begin() + n))->transform;
+        if (n == 1) {
+            w.pos = t.position;
+            w.rot = t.rotation;
+            w.scale = t.scale;
+        } else {
+            w.pos = w.m.point(t.position);
+            w.rot = mulQ(w.rot, t.rotation);
+            w.scale = splash::scale(w.scale, t.scale);
+        }
+        w.m = splash::Mat34::trs(w.pos, w.rot, w.scale);
+    }
+    return w;
+}
+
+// The local transform that puts an object at `w` under a parent at `p`.
+splash::Transform localUnder(const World& p, const World& w) {
+    splash::Transform t;
+    const float(*m)[4] = p.m.m;
+    splash::Vec3 d = w.pos - p.m.position();
+    float a = m[0][0], b = m[0][1], c = m[0][2], e = m[1][0], f = m[1][1], g = m[1][2], h = m[2][0], i = m[2][1], k = m[2][2];
+    float det = a * (f * k - g * i) - b * (e * k - g * h) + c * (e * i - f * h);
+    if (std::fabs(det) < 1e-12f) {
+        t.position = d;
+    } else {
+        float inv = 1.0f / det;
+        t.position = {((f * k - g * i) * d.x + (c * i - b * k) * d.y + (b * g - c * f) * d.z) * inv,
+                      ((g * h - e * k) * d.x + (a * k - c * h) * d.y + (c * e - a * g) * d.z) * inv,
+                      ((e * i - f * h) * d.x + (b * h - a * i) * d.y + (a * f - b * e) * d.z) * inv};
+    }
+    t.rotation = mulQ({-p.rot.x, -p.rot.y, -p.rot.z, p.rot.w}, w.rot);
+    auto div = [](float x, float y) { return y != 0 ? x / y : x; };
+    t.scale = {div(w.scale.x, p.scale.x), div(w.scale.y, p.scale.y), div(w.scale.z, p.scale.z)};
+    return t;
+}
+
 }  // namespace
 
 void Document::shiftPaths(const ObjectPath& at, int delta) {
     if (at.empty()) return;
     if (m_selection) m_selection = shifted(*m_selection, at, delta);
+    if (m_pinned) m_pinned = shifted(*m_pinned, at, delta);
     std::set<ObjectPath> collapsed;
     for (const ObjectPath& p : m_collapsed)
         if (p.empty()) collapsed.insert(p);
@@ -401,6 +487,34 @@ std::optional<ObjectPath> Document::duplicateObject(const ObjectPath& path) {
     return at;
 }
 
+std::optional<ObjectPath> Document::moveObject(const ObjectPath& from, const ObjectPath& toParent, int index) {
+    const splash::Object* o = object(from);
+    if (!o || index < 0) return std::nullopt;
+    if (!toParent.empty() && !object(toParent)) return std::nullopt;
+    // Into itself or its own subtree.
+    if (toParent.size() >= from.size() && std::equal(from.begin(), from.end(), toParent.begin())) return std::nullopt;
+    const std::vector<splash::Object>& kids = toParent.empty() ? m_scene.objects : object(toParent)->children;
+    index = std::min(index, static_cast<int>(kids.size()));
+    const ObjectPath fromParent(from.begin(), from.end() - 1);
+    // Where the object lands once it has been taken out.
+    ObjectPath to = *shifted(toParent, from, -1);
+    if (fromParent == toParent && from.back() < index) --index;
+    to.push_back(index);
+    if (to == from) return std::nullopt;
+    const splash::Transform before = o->transform;
+    splash::Transform after;
+    const World w = worldOf(*this, from);
+    if (toParent.empty()) {
+        after.position = w.pos;
+        after.rotation = w.rot;
+        after.scale = w.scale;
+    } else {
+        after = localUnder(worldOf(*this, toParent), w);
+    }
+    execute(std::make_unique<MoveCommand>(from, to, before, after));
+    return to;
+}
+
 bool Document::undo() {
     if (!canUndo()) return false;
     m_mergeOpen = false;
@@ -451,6 +565,15 @@ bool Document::selectByName(const std::string& name) {
 
 void Document::toggleExpanded(const ObjectPath& path) {
     if (!m_collapsed.erase(path)) m_collapsed.insert(path);
+}
+
+void Document::setAllExpanded(bool expanded) {
+    const bool rootCollapsed = m_collapsed.count(ObjectPath{}) != 0;
+    m_collapsed.clear();
+    if (rootCollapsed) m_collapsed.insert(ObjectPath{});
+    if (expanded) return;
+    for (const ObjectPath& p : flatPaths())
+        if (!object(p)->children.empty()) m_collapsed.insert(p);
 }
 
 const MeshInfo* Document::mesh(const std::string& projectPath) const {

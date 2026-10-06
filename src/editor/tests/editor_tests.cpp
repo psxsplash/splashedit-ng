@@ -861,6 +861,90 @@ void testAdoptAsset() {
 
 }  // namespace
 
+// Reparenting keeps the object where it is in the world, follows the paths
+// of everything else, and undoes in one step.
+void testMove() {
+    auto worldOf = [](const editor::Document& d, const std::string& name) {
+        for (const splash::FlatObject& fo : splash::flatten(d.scene()))
+            if (fo.object->name == name) return fo;
+        return splash::FlatObject{};
+    };
+    auto same = [](splash::Vec3 a, splash::Vec3 b) { return near(a.x, b.x) && near(a.y, b.y) && near(a.z, b.z); };
+    editor::Document d;
+    splash::Scene s = sample();
+    // B: moved, turned 90 degrees around Y and scaled 2; C sits elsewhere.
+    s.objects[1].transform.position = {10, 0, 0};
+    s.objects[1].transform.rotation = {0, 0.70710678f, 0, 0.70710678f};
+    s.objects[1].transform.scale = {2, 2, 2};
+    s.objects[1].children[0].transform.position = {1, 2, 3};
+    s.objects[2].transform.position = {5, 1, -2};
+    d.reset(s);
+    const splash::FlatObject c0 = worldOf(d, "C");
+    const splash::FlatObject b10 = worldOf(d, "B1");
+
+    // C into B: becomes B's second child, same world position.
+    d.select(editor::ObjectPath{0});
+    d.pin(editor::ObjectPath{0});
+    auto to = d.moveObject({2}, {1}, 1);
+    CHECK(to && *to == editor::ObjectPath({1, 1}));
+    CHECK(d.scene().objects.size() == 2 && d.object({1, 1}) && d.object({1, 1})->name == "C");
+    CHECK(same(worldOf(d, "C").worldPosition, c0.worldPosition));
+    CHECK(same(worldOf(d, "C").lossyScale, c0.lossyScale));
+    {
+        // Same rotation (q and -q are the same turn).
+        splash::Quat a = worldOf(d, "C").worldRotation, b = c0.worldRotation;
+        CHECK(near(std::fabs(a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w), 1));
+    }
+    CHECK(d.object({1, 1})->transform.scale == splash::Vec3({0.5f, 0.5f, 0.5f}));
+    CHECK(d.selected() && d.selected()->name == "C");
+    CHECK(d.pinned() && d.object(*d.pinned())->name == "A");  // the pin stays on A
+    CHECK(d.undo());
+    CHECK(d.object({2}) && d.object({2})->name == "C" && d.object({1})->children.size() == 1);
+    CHECK(d.object({2})->transform.position == splash::Vec3({5, 1, -2}));
+    CHECK(d.redo());
+    CHECK(d.object({1, 1})->name == "C");
+    CHECK(d.undo());
+
+    // B1 out to the root, before A: world position kept, B loses its child.
+    auto out = d.moveObject({1, 0}, {}, 0);
+    CHECK(out && *out == editor::ObjectPath({0}));
+    CHECK(d.object({0})->name == "B1" && d.object({2})->name == "B" && d.object({2})->children.empty());
+    CHECK(same(worldOf(d, "B1").worldPosition, b10.worldPosition));
+    CHECK(same(d.object({0})->transform.position, b10.worldPosition));
+    CHECK(d.pinned() && d.object(*d.pinned())->name == "A");  // A moved to index 1, the pin followed
+    CHECK(d.undo());
+    CHECK(d.object({1, 0}) && d.object({1, 0})->name == "B1");
+    CHECK(d.object({1, 0})->transform.position == splash::Vec3({1, 2, 3}));
+
+    // Reorder among siblings: A after C (index counts A still in place).
+    auto re = d.moveObject({0}, {}, 3);
+    CHECK(re && *re == editor::ObjectPath({2}));
+    CHECK(d.object({0})->name == "B" && d.object({2})->name == "A");
+    CHECK(d.pinned() && *d.pinned() == editor::ObjectPath({2}));  // the pinned object itself moved
+    CHECK(d.undo());
+
+    // Refused: into itself, into its own child, no-op, bad paths.
+    size_t steps = d.historySize();
+    CHECK(!d.moveObject({1}, {1}, 0));
+    CHECK(!d.moveObject({1}, {1, 0}, 0));
+    CHECK(!d.moveObject({1}, {}, 1));
+    CHECK(!d.moveObject({1}, {}, 2));  // after itself = where it is
+    CHECK(!d.moveObject({9}, {}, 0));
+    CHECK(!d.moveObject({0}, {7}, 0));
+    CHECK(d.historySize() == steps);
+
+    // Expand / collapse all.
+    d.setAllExpanded(false);
+    CHECK(!d.expanded({1}) && d.expanded({0}) && d.expanded({}));
+    d.setAllExpanded(true);
+    CHECK(d.expanded({1}));
+
+    // Removing the pinned object clears the pin.
+    d.pin(editor::ObjectPath{1});
+    CHECK(d.removeObject({1}));
+    CHECK(!d.pinned());
+}
+
 int main(int argc, char** argv) {
     std::error_code ec;
     std::filesystem::path exe = argc > 0 ? std::filesystem::absolute(argv[0], ec) : std::filesystem::path();
@@ -871,6 +955,7 @@ int main(int argc, char** argv) {
     testRenderPeak();
     testDirtyAndSave();
     testStructure();
+    testMove();
     testPick();
     testGizmoMath();
     testScaleClamp();
