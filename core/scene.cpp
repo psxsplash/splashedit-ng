@@ -194,7 +194,8 @@ json writeInteractable(const InteractableComponent& it) {
     json j = {{"type", "interactable"},       {"radius", it.radius},
               {"button", it.button},           {"repeatable", it.repeatable},
               {"cooldownFrames", it.cooldownFrames}, {"showPrompt", it.showPrompt},
-              {"promptCanvas", it.promptCanvas}, {"lineOfSight", it.lineOfSight}};
+              {"promptCanvas", it.promptCanvas}, {"lineOfSight", it.lineOfSight},
+              {"facingAngle", it.facingAngle}};
     putExtras(j, it.extra);
     return j;
 }
@@ -309,6 +310,9 @@ Object readObject(const json& j) {
             it.showPrompt = c.value("showPrompt", it.showPrompt);
             it.promptCanvas = c.value("promptCanvas", it.promptCanvas);
             it.lineOfSight = c.value("lineOfSight", it.lineOfSight);
+            it.facingAngle = c.value("facingAngle", it.facingAngle);
+            if (!(it.facingAngle >= 0 && it.facingAngle <= 180))
+                fail("object '" + o.name + "': interactable facingAngle must be 0..180");
             it.extra = extrasOf(c, writeInteractable(it));
             o.interactable = it;
         } else if (type == "audio") {

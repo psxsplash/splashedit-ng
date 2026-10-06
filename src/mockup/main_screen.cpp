@@ -2147,6 +2147,17 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
         compSection("s_interact", editor::ComponentKind::Interactable);
         number("iradius", "Radius", "How close the player has to be.", in.radius, "m", "iradius", 0, 1000,
                [](splash::Object& ob, float v) { ob.interactable->radius = v; });
+        ImRect fv = row("lifacing", "Require facing", "The player has to be looking toward the object to use it.");
+        if (toggle("ifacing", ImRect(ImVec2(fv.Min.x, fv.GetCenter().y - 8), ImVec2(fv.Min.x + 30, fv.GetCenter().y + 8)), in.lineOfSight))
+            doc.edit(path, [](splash::Object& ob) { ob.interactable->lineOfSight = !ob.interactable->lineOfSight; });
+        // Facing angle only matters with Require facing on; it stays editable
+        // when off, dimmed, so it can be set up front.
+        float angleTop = y;
+        number("iangle", "Facing angle",
+               in.lineOfSight ? "How far to either side of straight ahead the object can be and still count as faced. 90 is anywhere in front, 180 is any direction."
+                              : "Not used: turn on Require facing first. How far to either side of straight ahead the object can be and still count as faced.",
+               in.facingAngle, "deg", "iangle", 0, 180, [](splash::Object& ob, float v) { ob.interactable->facingAngle = v; });
+        if (!in.lineOfSight) dl->AddRectFilled(ImVec2(x0 + space::sm, angleTop), ImVec2(x1 - space::sm, y), rgb(0x1b1e24, 150));
         sectionEnd(top);
     }
     if (o->audio) {

@@ -97,7 +97,7 @@ Field table (writer order = reader struct order; `writer.Write('S')` writes the 
 | 148 | 4 | u32 | orderingTableSize | v25+; ordering table buckets, 0 = engine default |
 | 152 | 4 | u32 | bumpAllocatorSize | v25+; bump allocator bytes per frame, 0 = engine default |
 
-Reader gating (R:splashpack.cpp): agentCount only used if `version>=22`; skin table `version>=18`; memcard `>=21`; sprite/sceneHash `>=22`; tilemap `>=23`; lights `>=24`; render buffer sizes `>=25`; skin bind positions and joint names `>=26`; stream table `>=21`; per-cutscene/animation skin events `>=19`. The writer emits v26, so all gates are satisfied.
+Reader gating (R:splashpack.cpp): agentCount only used if `version>=22`; skin table `version>=18`; memcard `>=21`; sprite/sceneHash `>=22`; tilemap `>=23`; lights `>=24`; render buffer sizes `>=25`; skin bind positions and joint names `>=26`; interactable facing cosine (32-byte records) `>=27`; stream table `>=21`; per-cutscene/animation skin events `>=19`. The writer emits v27, so all gates are satisfied.
 
 ---
 
@@ -139,8 +139,8 @@ Node: `{ i32 minX, minY, minZ, maxX, maxY, maxZ (same PS1-space convention, Y ne
 Reader: `BVHNode` 32 B, `TriangleRef` 4 B; only read `if (header->bvhNodeCount > 0)`. Reader does not align, relying on all previous record sizes being multiples of 4 (they are).
 Builder facts needed for determinism (W:BVH.cs): max 64 tris/leaf, max depth 16, min 8 tris to split, 8-bin SAH on centroids, traversal/intersect cost 1.0; nodes numbered by BFS (queue), left before right; each leaf's refs are sorted with `List<T>.Sort` by `objectIndex` only (introsort, **unstable**) and appended in node order. Triangle source: `mesh.triangles` in index order of every **active** exporter with a mesh; `triangleIndex = i/3`. Vertices transformed with `localToWorldMatrix.MultiplyPoint3x4`. Triangle indices are indices into `mesh.triangles` (all submeshes concatenated), which equals the Tri order in the pack because `PSXMesh` iterates submeshes in order (but see sec. 7, item 9).
 
-### 2.6 Interactables (cursor) - `AlignToFourBytes` first; 28 bytes each
-`{ i32 radiusSquared = fp12(radius^2 / (gte*gte)); u8 interactButton; u8 flags (bit0 repeatable, bit1 showPrompt, bit2 requireLineOfSight); u16 cooldownFrames; u16 currentCooldown=0; u16 gameObjectIndex (0xFFFF if not found); char promptCanvasName[16] }`. Name: bytes `(byte)canvasName[i]` for i < min(len,15), rest zero. Reader `Interactable`, `static_assert == 28`.
+### 2.6 Interactables (cursor) - `AlignToFourBytes` first; 32 bytes each (28 before v27)
+`{ i32 radiusSquared = fp12(radius^2 / (gte*gte)); u8 interactButton; u8 flags (bit0 repeatable, bit1 showPrompt, bit2 requireLineOfSight); u16 cooldownFrames; u16 currentCooldown=0; u16 gameObjectIndex (0xFFFF if not found); char promptCanvasName[16]; i16 facingCosine = round(cos(facingAngle) * 4096); u16 reserved = 0 }`. Name: bytes `(byte)canvasName[i]` for i < min(len,15), rest zero. `facingCosine` (v27) is the cosine of the widest angle between the player's forward direction and the object that still passes requireLineOfSight; 0 is 90 degrees, and the reader fills 0 into records from older packs. Reader `Interactable`, `static_assert == 32`, `kInteractableSizeV26 = 28`.
 
 ### 2.7 Agents (cursor) - 28 bytes each, then packed waypoints
 Pass 1: `agentCount` x `SPLASHPACKAgentV2` (28 B):

@@ -59,6 +59,7 @@ jobs:
           "$py" tests/skincheck.py "$cli"
           "$py" tests/animcheck.py "$cli"
           "$py" tests/lightcheck.py "$cli"
+          "$py" tests/interactcheck.py "$cli"
       - name: Editor tests
         run: ctest --test-dir build -C Release --output-on-failure
       # One download: the editor with its assets, the example project, the

@@ -1400,7 +1400,7 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     bool hasLights = !runtimeLights.empty();
     w.u8('S');
     w.u8('P');
-    w.u16(26);
+    w.u16(27);
     w.u16(uint16_t(luaFiles.size()));
     w.u16(uint16_t(exporters.size()));
     w.u16(uint16_t(vram.atlases.size()));
@@ -1568,7 +1568,7 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
         w.u16(r.triangleIndex);
     }
 
-    // ---- interactables (28 bytes)
+    // ---- interactables (32 bytes)
     w.align4();
     for (const FlatObject* fo : interactables) {
         const InteractableComponent& it = *fo->object->interactable;
@@ -1585,6 +1585,10 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
         char name[16] = {};
         std::memcpy(name, it.promptCanvas.data(), std::min<size_t>(it.promptCanvas.size(), 15));
         for (char ch : name) w.u8(uint8_t(ch));
+        // v27: fp12 cosine of the facing half-angle, then 2 reserved bytes.
+        float facing = clampv(it.facingAngle, 0.0f, 180.0f) * 3.14159265358979f / 180.0f;
+        w.i16(int16_t(roundToInt(std::cos(facing) * 4096.0f)));
+        w.u16(0);
     }
 
     // ---- nav regions
