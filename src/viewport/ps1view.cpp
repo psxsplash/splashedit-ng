@@ -294,9 +294,15 @@ void Ps1View::rebuild() {
     // Collect geometry into per-texture buckets.
     std::map<unsigned, std::vector<Vertex>> buckets;
     std::map<std::string, splash::Mesh>& meshCache = m_meshCache;
-    if (m_doc->loadId() != m_meshCacheLoad) {
+    if (m_doc->loadId() != m_meshCacheLoad || m_doc->assetsId() != m_meshCacheAssets) {
         meshCache.clear();
+        // An import may have rewritten a texture under the same name.
+        if (m_doc->assetsId() != m_meshCacheAssets)
+            for (auto& [path, id] : m_texCache)
+                if (id != m_white && id != m_fallback) glDeleteTextures(1, &id);
+        if (m_doc->assetsId() != m_meshCacheAssets) m_texCache.clear();
         m_meshCacheLoad = m_doc->loadId();
+        m_meshCacheAssets = m_doc->assetsId();
     }
     auto meshCacheKey = [](const std::string& p) { return p; };
     m_pick.clear();

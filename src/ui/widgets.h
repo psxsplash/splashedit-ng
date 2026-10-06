@@ -119,7 +119,8 @@ struct PickerItem {
 };
 int picker(const char* id, ImVec2 pos, float width, const char* placeholder, std::string* query, const std::vector<PickerItem>& items);
 
-void assetField(const char* id, ImRect r, const char* icon, ImU32 iconColor, const char* name, const char* meta);
+// Returns true when clicked.
+bool assetField(const char* id, ImRect r, const char* icon, ImU32 iconColor, const char* name, const char* meta);
 // Returns true on the frame the switch is clicked.
 bool toggle(const char* id, ImRect r, bool on);
 void colorField(const char* id, ImRect r, ImU32 col, const char* hex);

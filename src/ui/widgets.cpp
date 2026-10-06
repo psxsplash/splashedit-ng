@@ -725,7 +725,7 @@ int picker(const char* id, ImVec2 pos, float width, const char* placeholder, std
     return picked;
 }
 
-void assetField(const char* id, ImRect r, const char* ic, ImU32 iconColor, const char* name, const char* meta) {
+bool assetField(const char* id, ImRect r, const char* ic, ImU32 iconColor, const char* name, const char* meta) {
     Fonts& f = fonts();
     Hit h = interact(id, r);
     ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -740,6 +740,7 @@ void assetField(const char* id, ImRect r, const char* ic, ImU32 iconColor, const
         text(dl, ImVec2(r.Max.x - space::sm - s.x, centerY(f.regular, type::caption, r.Min.y, r.Max.y)), f.regular, type::caption,
              color::textFaint, meta);
     }
+    return h.clicked;
 }
 
 static void drawToggle(ImDrawList* dl, const char* id, ImRect r, bool on, float hover) {

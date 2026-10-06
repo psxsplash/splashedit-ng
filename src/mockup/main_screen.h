@@ -29,6 +29,21 @@ struct State {
     bool maximized = false;
     bool quit = false;   // the close button was pressed
     std::string saveError;  // last Ctrl+S failure, shown in the status bar; empty after a good save
+    // A file dragged over the window: where the pointer is while it hovers,
+    // and files released but not imported yet, each with where it landed.
+    struct Drop {
+        bool hovering = false;
+        ImVec2 pos{-1, -1};
+        std::vector<std::pair<std::string, ImVec2>> files;
+    } drop;
+    // The inspector's Model field this frame (a drop on it replaces that
+    // object's model), clipped to the panel; empty when not shown.
+    ImRect modelField;
+    std::vector<int> modelFieldPath;
+    // Outcome of the last model import, in the status bar until noticeUntil (ImGui time).
+    std::string notice;
+    bool noticeBad = false;
+    double noticeUntil = 0;
     // Add object (+ / Ctrl+A) and Add component pickers: open next frame, and the shared search text.
     bool openAddObject = false;
     bool openAddComponent = false;

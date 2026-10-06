@@ -106,6 +106,16 @@ and unknown keys survive. Bad versions and malformed mesh arrays must fail to lo
 
     python3 roundtrip.py <splashpack-cli>
 
+## Model import
+
+`importcheck.py` builds small glTF files (a .glb with an embedded texture, a .gltf with a data-URI
+buffer, an external texture, no normals and a mirrored node), imports them with
+`splashpack-cli import` and checks the .mesh: X mirrored, winding reversed to match the courtyard
+meshes, V flipped, node transforms baked, colours read, textures kept top row first and scaled to
+256 when larger. A scene using the imports must export.
+
+    python3 importcheck.py <splashpack-cli>
+
 ## Lua compiler
 
 `luacheck.py` compiles every `lua/*.lua` with `splashpack-cli luac` and compares the result with

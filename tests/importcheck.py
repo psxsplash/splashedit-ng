@@ -1,0 +1,226 @@
+# Builds small glTF files here (a .glb with an embedded texture, a .gltf with
+# a data-URI buffer, an external texture, no normals and a mirrored node),
+# imports them with `splashpack-cli import` and checks the .mesh against the
+# conversion worked out independently: X mirrored, winding reversed so every
+# triangle's cross product points along its normal (as in the bundled
+# courtyard meshes), V flipped, node transforms baked, colours read, textures
+# written unflipped, large textures scaled to 256. Then exports a scene that
+# uses the import.
+# usage: python3 importcheck.py <splashpack-cli>
+import json, math, os, struct, subprocess, sys, tempfile, zlib, base64
+
+cli = sys.argv[1]
+here = os.path.dirname(os.path.abspath(__file__))
+tmp = tempfile.mkdtemp()
+fails = checks = 0
+
+
+def check(name, ok, detail=''):
+    global fails, checks
+    checks += 1
+    fails += not ok
+    print(('ok   ' if ok else 'FAIL ') + name + ('' if ok else ': ' + str(detail)))
+
+
+def png(w, h, px):  # px: rows top-down of (r, g, b, a)
+    raw = b''.join(b'\0' + bytes(c for p in row for c in p) for row in px)
+    chunk = lambda t, d: struct.pack('>I', len(d)) + t + d + struct.pack('>I', zlib.crc32(t + d))
+    return (b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, 8, 6, 0, 0, 0)) +
+            chunk(b'IDAT', zlib.compress(raw)) + chunk(b'IEND', b''))
+
+
+def readpng(path):  # 8-bit RGBA only, which is what the importer writes
+    d = open(path, 'rb').read()
+    p, idat, w = 8, b'', 0
+    while p < len(d):
+        n, = struct.unpack_from('>I', d, p)
+        t = d[p + 4:p + 8]
+        if t == b'IHDR':
+            w, h, depth, ctype = struct.unpack_from('>IIBB', d, p + 8)
+            assert depth == 8 and ctype == 6, (depth, ctype)
+        if t == b'IDAT':
+            idat += d[p + 8:p + 8 + n]
+        p += 12 + n
+    raw, stride, rows, prev = zlib.decompress(idat), w * 4, [], bytearray(w * 4)
+    for y in range(h):
+        f, line = raw[y * (stride + 1)], bytearray(raw[y * (stride + 1) + 1:(y + 1) * (stride + 1)])
+        for i in range(stride):
+            a = line[i - 4] if i >= 4 else 0
+            b, c = prev[i], prev[i - 4] if i >= 4 else 0
+            if f == 1: line[i] = (line[i] + a) & 255
+            elif f == 2: line[i] = (line[i] + b) & 255
+            elif f == 3: line[i] = (line[i] + (a + b) // 2) & 255
+            elif f == 4:
+                pa, pb, pc = abs(b - c), abs(a - c), abs(a + b - 2 * c)
+                line[i] = (line[i] + (a if pa <= pb and pa <= pc else b if pb <= pc else c)) & 255
+        rows.append([tuple(line[x * 4:x * 4 + 4]) for x in range(w)])
+        prev = line
+    return w, h, rows
+
+
+class Gltf:
+    def __init__(self):
+        self.bin = bytearray()
+        self.j = dict(asset={'version': '2.0'}, buffers=[], bufferViews=[], accessors=[], meshes=[], nodes=[],
+                      scenes=[{'nodes': []}], scene=0, materials=[], textures=[], images=[])
+
+    def view(self, data):
+        while len(self.bin) % 4: self.bin += b'\0'
+        self.j['bufferViews'].append({'buffer': 0, 'byteOffset': len(self.bin), 'byteLength': len(data)})
+        self.bin += data
+        return len(self.j['bufferViews']) - 1
+
+    def acc(self, fmt, ctype, typ, values, normalized=False):
+        flat = [x for v in values for x in (v if isinstance(v, (list, tuple)) else [v])]
+        a = {'bufferView': self.view(struct.pack('<%d%s' % (len(flat), fmt), *flat)), 'componentType': ctype,
+             'count': len(values), 'type': typ}
+        if normalized: a['normalized'] = True
+        if typ == 'VEC3' and ctype == 5126:
+            a['min'] = [min(v[k] for v in values) for k in range(3)]
+            a['max'] = [max(v[k] for v in values) for k in range(3)]
+        self.j['accessors'].append(a)
+        return len(self.j['accessors']) - 1
+
+    def mesh(self, prims):
+        self.j['meshes'].append({'primitives': prims})
+        return len(self.j['meshes']) - 1
+
+    def node(self, **kw):
+        self.j['nodes'].append(kw)
+        self.j['scenes'][0]['nodes'].append(len(self.j['nodes']) - 1)
+
+    def glb(self, path):
+        self.j['buffers'] = [{'byteLength': len(self.bin)}]
+        js = json.dumps(self.j).encode()
+        js += b' ' * (-len(js) % 4)
+        b = bytes(self.bin) + b'\0' * (-len(self.bin) % 4)
+        out = struct.pack('<III', 0x46546C67, 2, 12 + 8 + len(js) + 8 + len(b))
+        out += struct.pack('<II', len(js), 0x4E4F534A) + js + struct.pack('<II', len(b), 0x004E4942) + b
+        open(path, 'wb').write(out)
+
+    def gltf(self, path):
+        self.j['buffers'] = [{'byteLength': len(self.bin),
+                              'uri': 'data:application/octet-stream;base64,' + base64.b64encode(bytes(self.bin)).decode()}]
+        json.dump(self.j, open(path, 'w'))
+
+
+def run(*args):
+    return subprocess.run([cli, *args], capture_output=True, text=True)
+
+
+def crossdot(m, tri):
+    P = lambda i: m['positions'][3 * i:3 * i + 3]
+    a, b, c = (P(i) for i in tri)
+    u = [b[k] - a[k] for k in range(3)]
+    v = [c[k] - a[k] for k in range(3)]
+    cr = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]]
+    n = m['normals'][3 * tri[0]:3 * tri[0] + 3]
+    return sum(cr[k] * n[k] for k in range(3))
+
+
+# The convention every bundled mesh follows, measured rather than assumed.
+crate = json.load(open(os.path.join(here, '..', 'examples', 'courtyard', 'meshes', 'crate.mesh')))
+ctris = [crate['submeshes'][0][t:t + 3] for t in range(0, len(crate['submeshes'][0]), 3)]
+check('courtyard crate: cross(b-a, c-a) points along the normal', all(crossdot(crate, t) > 0 for t in ctris))
+
+# 1. .glb: a quad facing +Z (glTF front), node translated and scaled, normals,
+# UVs, byte colours, a textured material with a colour factor.
+tex = [[(255, 0, 0, 255), (0, 255, 0, 255), (0, 0, 255, 255), (255, 255, 255, 255)],
+       [(10, 20, 30, 255), (40, 50, 60, 255), (70, 80, 90, 128), (0, 0, 0, 0)]]
+g = Gltf()
+quad = [(-1, -1, 0), (1, -1, 0), (1, 1, 0), (-1, 1, 0)]
+uvs = [(0, 1), (1, 1), (1, 0), (0, 0)]
+cols = [(255, 0, 0, 255), (0, 255, 0, 255), (0, 0, 255, 255), (255, 255, 255, 51)]
+img = g.view(png(4, 2, tex))
+g.j['images'].append({'bufferView': img, 'mimeType': 'image/png'})
+g.j['textures'].append({'source': 0})
+g.j['materials'].append({'pbrMetallicRoughness': {'baseColorFactor': [0.5, 0.25, 1, 1], 'baseColorTexture': {'index': 0}}})
+g.mesh([{'attributes': {'POSITION': g.acc('f', 5126, 'VEC3', quad), 'NORMAL': g.acc('f', 5126, 'VEC3', [(0, 0, 1)] * 4),
+                        'TEXCOORD_0': g.acc('f', 5126, 'VEC2', uvs), 'COLOR_0': g.acc('B', 5121, 'VEC4', cols, True)},
+         'indices': g.acc('H', 5123, 'SCALAR', [0, 1, 2, 0, 2, 3]), 'material': 0}])
+g.node(mesh=0, translation=[1, 2, 3], scale=[2, 2, 2])
+proj = os.path.join(tmp, 'proj')
+os.makedirs(proj)
+g.glb(os.path.join(tmp, 'Sign Post.glb'))
+r = run('import', os.path.join(tmp, 'Sign Post.glb'), '--project', proj)
+check('glb import exits 0', r.returncode == 0, r.stderr)
+check('mesh lands in models/ with a safe name', 'mesh models/Sign_Post.mesh (2 triangles)' in r.stdout, r.stdout)
+m = json.load(open(os.path.join(proj, 'models', 'Sign_Post.mesh')))
+want = [(-(2 * x + 1), 2 * y + 2, 2 * z + 3) for x, y, z in quad]
+got = [tuple(m['positions'][i:i + 3]) for i in range(0, len(m['positions']), 3)]
+check('positions: node transform baked, X mirrored', got == want, got)
+check('normals: X mirrored, still +Z', all(m['normals'][i:i + 3] == [0, 0, 1] for i in range(0, 12, 3)), m['normals'])
+check('UVs: V flipped to a bottom-left origin', [tuple(m['uv'][i:i + 2]) for i in range(0, 8, 2)] == [(u, 1 - v) for u, v in uvs], m['uv'])
+gc = [tuple(round(c * 255) for c in m['colors'][i:i + 4]) for i in range(0, 16, 4)]
+check('vertex colours read from normalized bytes', gc == cols, gc)
+tris = [m['submeshes'][0][t:t + 3] for t in range(0, 6, 3)]
+check('winding matches the courtyard meshes', all(crossdot(m, t) > 0 for t in tris), tris)
+check('material colour and texture', 'material 0 texture models/Sign_Post.png colour 0.5 0.25 1 1' in r.stdout, r.stdout)
+w, h, rows = readpng(os.path.join(proj, 'models', 'Sign_Post.png'))
+check('texture written top row first, pixels kept', (w, h, rows) == (4, 2, tex), (w, h, rows))
+
+# 2. .gltf: data-URI buffer, external PNG, no normals, two materials (one
+# untextured, one with no material at all), a node mirrored by negative scale.
+g = Gltf()
+tri = [(0, 0, 0), (1, 0, 0), (0, 1, 0)]
+open(os.path.join(tmp, 'wood grain.png'), 'wb').write(png(2, 2, [[(1, 2, 3, 255)] * 2] * 2))
+g.j['images'].append({'uri': 'wood%20grain.png'})
+g.j['textures'].append({'source': 0})
+g.j['materials'] += [{'pbrMetallicRoughness': {'baseColorTexture': {'index': 0}}},
+                     {'pbrMetallicRoughness': {'baseColorFactor': [0, 1, 0, 1]}}]
+pos = g.acc('f', 5126, 'VEC3', tri)
+g.mesh([{'attributes': {'POSITION': pos}, 'material': 0}, {'attributes': {'POSITION': pos}, 'material': 1},
+        {'attributes': {'POSITION': pos}}])
+g.node(mesh=0)
+g.node(mesh=0, scale=[-1, 1, 1])
+g.gltf(os.path.join(tmp, 'pieces.gltf'))
+r = run('import', os.path.join(tmp, 'pieces.gltf'), '--project', proj)
+check('gltf import exits 0', r.returncode == 0, r.stderr)
+m = json.load(open(os.path.join(proj, 'models', 'pieces.mesh')))
+check('one submesh per material, triangles grouped', [len(s) for s in m['submeshes']] == [6, 6, 6], m['submeshes'])
+allt = [s[t:t + 3] for s in m['submeshes'] for t in range(0, len(s), 3)]
+check('flat normals are unit and face outward, mirrored node included',
+      all(crossdot(m, t) > 0 and abs(sum(x * x for x in m['normals'][3 * t[0]:3 * t[0] + 3]) - 1) < 1e-5 for t in allt),
+      [crossdot(m, t) for t in allt])
+# The triangle faces +Z (counter-clockwise seen from +Z); a mirror in X keeps
+# that, so every flat normal must come out +Z, which ties winding to geometry.
+check('flat normals face +Z, mirrored node included',
+      all(m['normals'][i:i + 3] == [0, 0, 1] for i in range(0, len(m['normals']), 3)), m['normals'])
+check('external texture (URI decoded) and colour factor',
+      'material 0 texture models/pieces.png colour 1 1 1 1' in r.stdout and 'material 1 texture - colour 0 1 0 1' in r.stdout and
+      'material 2 texture - colour 1 1 1 1' in r.stdout, r.stdout)
+check('no UV or colour arrays when the file has none', 'uv' not in m and 'colors' not in m, list(m))
+
+# 3. A texture too large for the PS1 is scaled to fit.
+g = Gltf()
+big = g.view(png(512, 300, [[(x % 256, y % 256, 0, 255) for x in range(512)] for y in range(300)]))
+g.j['images'].append({'bufferView': big, 'mimeType': 'image/png'})
+g.j['textures'].append({'source': 0})
+g.j['materials'].append({'pbrMetallicRoughness': {'baseColorTexture': {'index': 0}}})
+g.mesh([{'attributes': {'POSITION': g.acc('f', 5126, 'VEC3', tri)}, 'material': 0}])
+g.node(mesh=0)
+g.glb(os.path.join(tmp, 'big.glb'))
+r = run('import', os.path.join(tmp, 'big.glb'), '--project', proj)
+w, h, _ = readpng(os.path.join(proj, 'models', 'big.png'))
+check('512x300 texture scaled to 256x150 with a warning', (w, h) == (256, 150) and 'scaled down to 256 x 150' in r.stdout, (w, h, r.stdout))
+
+# 4. Refusals carry a message.
+open(os.path.join(tmp, 'x.obj'), 'w').write('v 0 0 0\n')
+r = run('import', os.path.join(tmp, 'x.obj'), '--project', proj)
+check('.obj refused with a reason', r.returncode == 1 and 'only .glb and .gltf' in r.stderr, r.stderr)
+open(os.path.join(tmp, 'junk.glb'), 'wb').write(b'not a model at all')
+r = run('import', os.path.join(tmp, 'junk.glb'), '--project', proj)
+check('garbage refused with a reason', r.returncode == 1 and 'junk.glb:' in r.stderr, r.stderr)
+
+# 5. The import exports.
+obj = lambda name, mesh, mats: {'name': name, 'active': True, 'transform': {'position': [0, 0, 2], 'rotation': [0, 0, 0, 1], 'scale': [1, 1, 1]},
+                                'components': [{'type': 'mesh', 'mesh': mesh, 'materials': mats}], 'children': []}
+scene = {'format': 'splashedit-ng/scene', 'version': 1, 'settings': {'gteScaling': 100.0},
+         'objects': [obj('Sign', 'models/Sign_Post.mesh', [{'texture': 'models/Sign_Post.png', 'color': [0.5, 0.25, 1, 1]}]),
+                     obj('Pieces', 'models/pieces.mesh', [{'texture': 'models/pieces.png'}, {'color': [0, 1, 0, 1]}, {}])]}
+json.dump(scene, open(os.path.join(proj, 'i.scene'), 'w'))
+r = run('export', os.path.join(proj, 'i.scene'), '-o', os.path.join(tmp, 'i.splashpack'))
+check('a scene using the imports exports', r.returncode == 0, r.stderr)
+
+print('%d/%d checks passed' % (checks - fails, checks))
+sys.exit(1 if fails else 0)
