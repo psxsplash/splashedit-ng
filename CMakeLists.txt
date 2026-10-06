@@ -71,7 +71,8 @@ add_library(splasheditdoc STATIC
     src/editor/pick.cpp
     src/editor/gizmo.cpp
     src/editor/live_export.cpp
-    src/editor/play.cpp)
+    src/editor/play.cpp
+    src/editor/project.cpp)
 target_include_directories(splasheditdoc PUBLIC src)
 find_package(Threads REQUIRED)
 target_link_libraries(splasheditdoc PUBLIC splashcore Threads::Threads)

@@ -125,6 +125,9 @@ public:
     bool dirty() const { return m_cursor != m_savedCursor; }
     // Writes the scene back to the file it was loaded from. Clears dirty on success.
     std::optional<std::string> save();
+    // Saves under `scene` (relative to the project) and keeps editing that file.
+    // On failure the document still points at the old file.
+    std::optional<std::string> saveAs(const std::filesystem::path& scene);
     std::filesystem::path scenePath() const { return m_project / m_sceneFile; }
 
     // For commands: mutable access, and the bookkeeping around structural
