@@ -148,6 +148,9 @@ struct InteractableComponent {
     bool showPrompt = false;
     std::string promptCanvas;  // at most 15 bytes are stored
     bool lineOfSight = false;
+    // Half-angle in degrees, 0..180, between the player's forward direction
+    // and the object that still counts as facing it. Only used with lineOfSight.
+    float facingAngle = 90.0f;
     ExtraKeys extra;
 };
 

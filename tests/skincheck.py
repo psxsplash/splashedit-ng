@@ -174,7 +174,7 @@ check('non-uniform scale: bind positions carry the scale', close(skins2[0]['bind
       skins2[0]['bind'])
 
 # ---- v26 tail: joint bind positions in the vertices' space, then joint names
-check('version 26', sk['version'] == 26, sk['version'])
+check('version 27', sk['version'] == 27, sk['version'])
 check('joint names', sk['joints'] == ['shoulder', 'elbow'], sk['joints'])
 check('bind positions: shoulder at the origin, elbow at y = 1',
       len(sk['bind']) == 2 and close(sk['bind'][0], psx((0, 0, 0))) and close(sk['bind'][1], psx((0, 1, 0))),
