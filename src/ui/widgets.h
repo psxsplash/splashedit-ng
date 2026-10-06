@@ -123,7 +123,8 @@ int picker(const char* id, ImVec2 pos, float width, const char* placeholder, std
 bool assetField(const char* id, ImRect r, const char* icon, ImU32 iconColor, const char* name, const char* meta);
 // Returns true on the frame the switch is clicked.
 bool toggle(const char* id, ImRect r, bool on);
-void colorField(const char* id, ImRect r, ImU32 col, const char* hex);
+// Returns true when clicked.
+bool colorField(const char* id, ImRect r, ImU32 col, const char* hex);
 void slider(const char* id, ImRect r, float t, const char* value);
 
 // Problem card with an inline fix action. Returns its height.

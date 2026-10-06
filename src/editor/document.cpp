@@ -137,7 +137,9 @@ void Document::reset(splash::Scene scene, const fs::path& project, const std::st
 
 void Document::refreshAssets(const std::vector<std::string>& projectPaths) {
     for (const std::string& p : projectPaths) {
-        if (fs::path(p).extension() == ".mesh") m_meshes[p] = analyseMesh(resolve(p));
+        const fs::path ext = fs::path(p).extension();
+        if (ext == ".mesh") m_meshes[p] = analyseMesh(resolve(p));
+        else if (ext == ".lua" || ext == ".wav" || ext == ".anim") m_files[p] = isFile(resolve(p));
         else m_textures[p] = analyseTexture(resolve(p));
     }
     ++m_assetsId;
@@ -152,7 +154,14 @@ void Document::cacheAssets(const splash::Object& o) {
         for (const splash::Material& mat : o.mesh->materials)
             if (!mat.texture.empty() && !m_textures.count(mat.texture)) m_textures[mat.texture] = analyseTexture(resolve(mat.texture));
     }
-    if (o.script && !o.script->lua.empty() && !m_files.count(o.script->lua)) m_files[o.script->lua] = isFile(resolve(o.script->lua));
+    auto file = [&](const std::string& p) {
+        if (!p.empty() && !m_files.count(p)) m_files[p] = isFile(resolve(p));
+    };
+    if (o.script) file(o.script->lua);
+    if (o.trigger) file(o.trigger->lua);
+    if (o.audio) file(o.audio->clip);
+    if (o.skin)
+        for (const std::string& c : o.skin->clips) file(c);
     for (const splash::Object& c : o.children) cacheAssets(c);
 }
 

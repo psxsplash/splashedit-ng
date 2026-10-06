@@ -172,6 +172,8 @@ static std::string utf8(const std::filesystem::path& p) {
     return std::string(u.begin(), u.end());
 }
 
+static std::filesystem::path fromUtf8(const std::string& s) { return std::filesystem::path(std::u8string(s.begin(), s.end())); }
+
 static float buttonWidth(const char* ic, const char* label) {
     Fonts& f = fonts();
     const float iconW = ic ? measure(f.medium, type::icon, ic).x + space::sm - 2 : 0;
@@ -529,6 +531,96 @@ static void notify(State& st, std::string msg, bool bad) {
     st.noticeUntil = ImGui::GetTime() + 8;
 }
 
+// The other asset fields' file dialogs (texture, scripts, audio, skin clips),
+// answered on their own thread and applied next frame to the object they were
+// opened for. A file outside the project is copied into it first.
+enum class AssetSlot { Texture, Lua, TriggerLua, Clip, SkinClips };
+static AssetSlot g_assetSlot = AssetSlot::Texture;
+static editor::ObjectPath g_assetTarget;
+static std::vector<std::string> g_assetPicked;
+
+static void SDLCALL onAssetPicked(void*, const char* const* files, int) {
+    if (!files || !files[0]) return;
+    std::lock_guard<std::mutex> lock(g_pickMutex);
+    g_assetPicked.clear();
+    for (const char* const* f = files; *f; ++f) g_assetPicked.emplace_back(*f);
+}
+
+static void pickAsset(AssetSlot slot, const editor::ObjectPath& target) {
+    {
+        std::lock_guard<std::mutex> lock(g_pickMutex);
+        g_assetSlot = slot;
+        g_assetTarget = target;
+    }
+    static const SDL_DialogFileFilter images[] = {{"Images", "png;jpg;jpeg;bmp;tga;gif"}};
+    static const SDL_DialogFileFilter lua[] = {{"Lua scripts", "lua"}};
+    static const SDL_DialogFileFilter wav[] = {{"WAV audio", "wav"}};
+    static const SDL_DialogFileFilter anim[] = {{"Animation clips", "anim"}};
+    const SDL_DialogFileFilter* filter = slot == AssetSlot::Texture ? images
+                                         : slot == AssetSlot::Clip    ? wav
+                                         : slot == AssetSlot::SkinClips ? anim
+                                                                        : lua;
+    SDL_ShowOpenFileDialog(onAssetPicked, nullptr, nullptr, filter, 1, nullptr, slot == AssetSlot::SkinClips);
+}
+
+static void applyPickedAssets(State& st, editor::Document& doc) {
+    std::vector<std::string> files;
+    AssetSlot slot;
+    editor::ObjectPath target;
+    {
+        std::lock_guard<std::mutex> lock(g_pickMutex);
+        files.swap(g_assetPicked);
+        slot = g_assetSlot;
+        target = g_assetTarget;
+    }
+    if (files.empty() || !doc.object(target)) return;
+    const char* folder = slot == AssetSlot::Texture     ? "textures"
+                         : slot == AssetSlot::Clip      ? "audio"
+                         : slot == AssetSlot::SkinClips ? "anims"
+                                                        : "scripts";
+    std::vector<std::string> paths;
+    for (const std::string& file : files) {
+        editor::AdoptedAsset a = editor::adoptAsset(doc.projectRoot(), fromUtf8(file), folder);
+        if (!a.error.empty()) {
+            notify(st, "Could not use " + utf8(fromUtf8(file).filename()) + ": " + a.error, true);
+            return;
+        }
+        paths.push_back(a.path);
+    }
+    std::string note;
+    if (slot == AssetSlot::SkinClips && paths.size() > 16) {
+        note = "Kept the first 16 of " + std::to_string(paths.size()) + " clips; a skin plays at most 16.";
+        paths.resize(16);
+    }
+    const std::string& first = paths.front();
+    doc.edit(target, [&](splash::Object& o) {
+        switch (slot) {
+            case AssetSlot::Texture:
+                if (!o.mesh) return;
+                if (o.mesh->materials.empty()) o.mesh->materials.emplace_back();
+                o.mesh->materials[0].texture = first;
+                break;
+            case AssetSlot::Lua:
+                if (o.script) o.script->lua = first;
+                break;
+            case AssetSlot::TriggerLua:
+                if (o.trigger) o.trigger->lua = first;
+                break;
+            case AssetSlot::Clip:
+                if (!o.audio) return;
+                o.audio->clip = first;
+                if (o.audio->clipName.empty()) o.audio->clipName = utf8(fromUtf8(first).stem());
+                break;
+            case AssetSlot::SkinClips:
+                if (o.skin) o.skin->clips = paths;
+                break;
+        }
+    });
+    doc.endMerge();
+    doc.refreshAssets(paths);
+    if (!note.empty()) notify(st, note, false);
+}
+
 // ---- File menu: projects, scenes, and the unsaved-changes prompt ----
 
 static float centerY(ImFont* font, float size, float y0, float y1) {
@@ -549,8 +641,6 @@ static void SDLCALL onFilePicked(void* kind, const char* const* files, int) {
 }
 
 static const SDL_DialogFileFilter kSceneFilter[] = {{"psxsplash scene", "scene"}};
-
-static std::filesystem::path fromUtf8(const std::string& s) { return std::filesystem::path(std::u8string(s.begin(), s.end())); }
 
 // Opens `file` as the document. The scene is parsed first, so a file that does
 // not load leaves the open document as it was.
@@ -972,6 +1062,7 @@ static void importPending(State& st, editor::Document& doc, const viewport::Ps1V
         pickedFor = g_modelTarget;
     }
     if (!picked.empty()) importModelFile(st, doc, view, picked, pickedFor);
+    applyPickedAssets(st, doc);
     std::vector<std::pair<std::string, ImVec2>> files;
     files.swap(st.drop.files);
     for (const auto& [file, pos] : files) {
@@ -2419,15 +2510,19 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
         dl->AddRect(ImVec2(x0, top), ImVec2(x1, y + space::sm), rgb(0xffffff, 10), radius::card);
         y += space::sm + space::md;
     };
+    // Returns true on the frame its fix button is clicked.
     auto card = [&](const char* id, const char* title, const std::string& body, const char* fix) {
-        float h = problemCard(id, ImVec2(x0 + space::sm, y + space::xs), x1 - x0 - space::sm * 2, title, body.c_str(), fix);
+        bool fixed = false;
+        float h = problemCard(id, ImVec2(x0 + space::sm, y + space::xs), x1 - x0 - space::sm * 2, title, body.c_str(), fix, &fixed);
         y += h + space::sm;
+        return fixed;
     };
-    // Card for a referenced file that is missing or could not be read.
+    // Card for a referenced file that is missing or could not be read; its
+    // Locate file button reopens the field's file dialog.
     auto fileCard = [&](const char* id, editor::AssetStatus st, const std::string& path, const std::string& error) {
-        if (st == editor::AssetStatus::Ok) return;
-        if (st == editor::AssetStatus::Missing) card(id, "File not found", path.empty() ? "No file is set." : path, "Locate file");
-        else card(id, "File could not be read", error, "Locate file");
+        if (st == editor::AssetStatus::Ok) return false;
+        if (st == editor::AssetStatus::Missing) return card(id, "File not found", path.empty() ? "No file is set." : path, "Locate file");
+        return card(id, "File could not be read", error, "Locate file");
     };
 
     // Start active: the object is in the game either way; off loads it hidden,
@@ -2493,8 +2588,15 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                 removeFlag(editor::ComponentKind::Mesh));
         y += 34 + space::xs;
         const ImRect modelRow = row("lmodel", "Model", "The 3D model to draw. Click to pick a .glb or .gltf file, or drop one here.");
-        if (assetField("model", modelRow, icon::box, meshSt == editor::AssetStatus::Ok ? kind::mesh : color::warn, modelName.c_str(),
-                       tris.empty() ? nullptr : tris.c_str())) {
+        bool pickModel = assetField("model", modelRow, icon::box, meshSt == editor::AssetStatus::Ok ? kind::mesh : color::warn,
+                                    modelName.c_str(), tris.empty() ? nullptr : tris.c_str());
+        st.modelField = modelRow;
+        st.modelField.ClipWith(r);
+        st.modelFieldPath = path;
+        if (st.drop.hovering && st.modelField.Contains(st.drop.pos))
+            dl->AddRect(modelRow.Min - ImVec2(1, 1), modelRow.Max + ImVec2(1, 1), color::accent, radius::field + 1, 0, 2.0f);
+        if (fileCard("fixmesh", meshSt, m.mesh, mi ? mi->error : std::string())) pickModel = true;
+        if (pickModel) {
             {
                 std::lock_guard<std::mutex> lock(g_pickMutex);
                 g_modelTarget = path;
@@ -2502,24 +2604,26 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
             static const SDL_DialogFileFilter modelFilter[] = {{"glTF models", "glb;gltf"}};
             SDL_ShowOpenFileDialog(onModelPicked, nullptr, nullptr, modelFilter, 1, nullptr, false);
         }
-        st.modelField = modelRow;
-        st.modelField.ClipWith(r);
-        st.modelFieldPath = path;
-        if (st.drop.hovering && st.modelField.Contains(st.drop.pos))
-            dl->AddRect(modelRow.Min - ImVec2(1, 1), modelRow.Max + ImVec2(1, 1), color::accent, radius::field + 1, 0, 2.0f);
-        fileCard("fixmesh", meshSt, m.mesh, mi ? mi->error : std::string());
-        assetField("texture", row("ltex", "Texture", "Image painted on the model. Converted to PS1 colours on export."), icon::grid,
-                   texSt != editor::AssetStatus::Ok || to4 ? color::warn : color::textDim, texName.c_str(), texMeta.c_str());
-        fileCard("fixtex", texSt, texPath, ti ? ti->error : std::string());
+        if (assetField("texture", row("ltex", "Texture", "Image painted on the model. Click to pick an image. Converted to PS1 colours on export."),
+                       icon::grid, texSt != editor::AssetStatus::Ok || to4 ? color::warn : color::textDim, texName.c_str(), texMeta.c_str()) |
+            fileCard("fixtex", texSt, texPath, ti ? ti->error : std::string()))
+            pickAsset(AssetSlot::Texture, path);
         if (to4) {
             int cur = m.bitDepth == splash::BitDepth::Bpp8 ? ti->vramBytes8 : ti->vramBytes16;
             std::string body = texName + " has " + std::to_string(ti->colors15) + (ti->colors15 == 1 ? " colour" : " colours") +
                                " and takes " + fmtKB(cur) + " of VRAM. At 4 bpp it keeps every colour and takes " +
                                fmtKB(ti->vramBytes4) + ".";
-            card("fix4bpp", "Texture could be 4 bpp", body, "Convert to 4 bpp");
+            if (card("fix4bpp", "Texture could be 4 bpp", body, "Convert to 4 bpp"))
+                doc.edit(path, [](splash::Object& ob) { ob.mesh->bitDepth = splash::BitDepth::Bpp4; });
         }
-        dropdown("lighting", row("llight", "Lighting", "How light reaches this mesh. Baked vertex lighting costs nothing at runtime."),
-                 icon::sun, lightingLabel(m.vertexColors));
+        // Menu order follows the labels' enum: Baked vertex, Flat, Mesh colours.
+        const splash::VertexColorMode modes[3] = {splash::VertexColorMode::Baked, splash::VertexColorMode::Flat,
+                                                  splash::VertexColorMode::Mesh};
+        int curMode = (int)(std::find(std::begin(modes), std::end(modes), m.vertexColors) - std::begin(modes));
+        int pickMode = dropdownMenu("lighting", row("llight", "Lighting", "How light reaches this mesh. Baked vertex lighting costs nothing at runtime."),
+                                    icon::sun, lightingLabel(m.vertexColors), {"Baked vertex", "Flat", "Mesh colours"}, curMode);
+        if (pickMode >= 0 && modes[pickMode] != m.vertexColors)
+            doc.edit(path, [&](splash::Object& ob) { ob.mesh->vertexColors = modes[pickMode]; });
         sectionEnd(top);
     }
 
@@ -2553,7 +2657,22 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
         int pick = dropdownMenu("lkind", row("llkind", "Type", "Point shines in every direction, spot in a cone, directional from far away."),
                                 nullptr, lightKindLabel(l.kind), {"Point", "Spot", "Directional"}, cur);
         if (pick >= 0) doc.edit(path, [&](splash::Object& ob) { ob.light->kind = kinds[pick]; });
-        colorField("lcol", row("llcol", "Colour", "The colour of the light."), toColor(l.color), toHex(l.color).c_str());
+        const ImRect colRow = row("llcol", "Colour", "The colour of the light. Click to pick one.");
+        if (colorField("lcol", colRow, toColor(l.color), toHex(l.color).c_str())) ImGui::OpenPopup("##lcolpick");
+        // Right-aligned under the field, so it stays inside the inspector.
+        ImGui::SetNextWindowPos(ImVec2(colRow.Max.x, colRow.Max.y + space::xs), ImGuiCond_Always, ImVec2(1, 0));
+        pushPopupStyle();
+        if (ImGui::BeginPopup("##lcolpick")) {
+            float c[3] = {l.color[0], l.color[1], l.color[2]};
+            ImGui::SetNextItemWidth(220);
+            if (ImGui::ColorPicker3("##lcolwheel", c, ImGuiColorEditFlags_NoSidePreview | ImGuiColorEditFlags_DisplayHex |
+                                                          ImGuiColorEditFlags_NoAlpha))
+                doc.edit(path, [&](splash::Object& ob) { ob.light->color = {c[0], c[1], c[2]}; }, "lcol");
+            if (ImGui::IsItemDeactivated()) doc.endMerge();
+            ImGui::EndPopup();
+        }
+        ImGui::PopStyleVar(4);
+        ImGui::PopStyleColor(2);
         float lv = l.intensity;
         commit(numberField("lint", row("llint", "Intensity", "How bright the light is. 1 is normal."), fmtShort(l.intensity).c_str(),
                            nullptr, 0, nullptr, &lv),
@@ -2581,9 +2700,10 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                 removeFlag(editor::ComponentKind::Script));
         y += 34 + space::xs;
         bool found = doc.fileExists(lua);
-        assetField("lua", row("llua", "File", "The Lua file that runs for this object."), icon::fileCode,
-                   found ? kind::script : color::warn, lua.empty() ? "None" : fileName(lua).c_str(), nullptr);
-        fileCard("fixlua", found ? editor::AssetStatus::Ok : editor::AssetStatus::Missing, lua, std::string());
+        if (assetField("lua", row("llua", "File", "The Lua file that runs for this object. Click to pick one."), icon::fileCode,
+                       found ? kind::script : color::warn, lua.empty() ? "None" : fileName(lua).c_str(), nullptr) |
+            fileCard("fixlua", found ? editor::AssetStatus::Ok : editor::AssetStatus::Missing, lua, std::string()))
+            pickAsset(AssetSlot::Lua, path);
         sectionEnd(top);
     }
 
@@ -2633,8 +2753,9 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                          fmtFixed(tr.size.y).c_str(), fmtFixed(tr.size.z).c_str(), nullptr, sz),
                "tsize", [&](splash::Object& ob) { ob.trigger->size = {std::max(0.0f, sz[0]), std::max(0.0f, sz[1]), std::max(0.0f, sz[2])}; });
         bool found = !tr.lua.empty() && doc.fileExists(tr.lua);
-        assetField("tlua", row("ltlua", "Script", "The Lua file that gets the enter and exit calls."), icon::fileCode,
-                   tr.lua.empty() || found ? kind::script : color::warn, tr.lua.empty() ? "None" : fileName(tr.lua).c_str(), nullptr);
+        if (assetField("tlua", row("ltlua", "Script", "The Lua file that gets the enter and exit calls. Click to pick one."), icon::fileCode,
+                       tr.lua.empty() || found ? kind::script : color::warn, tr.lua.empty() ? "None" : fileName(tr.lua).c_str(), nullptr))
+            pickAsset(AssetSlot::TriggerLua, path);
         sectionEnd(top);
     }
     if (o->interactable) {
@@ -2661,9 +2782,10 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
         top = y;
         compSection("s_audio", editor::ComponentKind::Audio);
         bool found = doc.fileExists(a.clip);
-        assetField("clip", row("lclip", "Clip", "A WAV file, converted to SPU ADPCM at export."), icon::music,
-                   found ? kind::audio : color::warn, a.clip.empty() ? "None" : fileName(a.clip).c_str(), nullptr);
-        fileCard("fixclip", found ? editor::AssetStatus::Ok : editor::AssetStatus::Missing, a.clip, std::string());
+        if (assetField("clip", row("lclip", "Clip", "A WAV file, converted to SPU ADPCM at export. Click to pick one."), icon::music,
+                       found ? kind::audio : color::warn, a.clip.empty() ? "None" : fileName(a.clip).c_str(), nullptr) |
+            fileCard("fixclip", found ? editor::AssetStatus::Ok : editor::AssetStatus::Missing, a.clip, std::string()))
+            pickAsset(AssetSlot::Clip, path);
         sectionEnd(top);
     }
     if (o->skin) {
@@ -2671,7 +2793,9 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
         top = y;
         compSection("s_skin", editor::ComponentKind::Skin);
         std::string clips = std::to_string(sk.clips.size()) + (sk.clips.size() == 1 ? " clip" : " clips");
-        assetField("clips", row("lclips", "Clips", "Animation clips, at most 16."), icon::play, kind::camera, clips.c_str(), nullptr);
+        if (assetField("clips", row("lclips", "Clips", "Animation clips, at most 16. Click to pick the .anim files; the pick replaces the list."),
+                       icon::play, kind::camera, clips.c_str(), nullptr))
+            pickAsset(AssetSlot::SkinClips, path);
         number("sfps", "Bake rate", "Frames per second the clips are sampled at.", static_cast<float>(sk.fps), "fps", "sfps", 1, 30,
                [](splash::Object& ob, float v) { ob.skin->fps = static_cast<int>(std::lround(v)); });
         sectionEnd(top);
