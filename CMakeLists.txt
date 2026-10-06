@@ -29,7 +29,7 @@ FetchContent_Declare(recastnavigation
 # Pin to the commit psxsplash's nugget uses.
 FetchContent_Declare(psxlua
     GIT_REPOSITORY https://github.com/rixnobis/psxlua.git
-    GIT_TAG ae62a07f167386c90ea154fa30dde39992c042a4
+    GIT_TAG 4401a3354e1ffe5f38b028c4d5cedf7c077638bd
     SOURCE_SUBDIR src)
 # libpsxav's SPU-ADPCM encoder (the one psxavenc uses), and dr_wav to read WAV.
 FetchContent_Declare(psxavenc
