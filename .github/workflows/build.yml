@@ -23,9 +23,12 @@ jobs:
       - name: Build
         run: |
           make -j4 LOADER=cdrom PREFIX=mipsel-linux-gnu FORMAT=elf32-tradlittlemips
-          mv psxsplash.ps-exe psxsplash-cdrom.ps-exe
+          # make clean deletes every *.ps-exe, so park the CD-ROM build elsewhere.
+          mv psxsplash.ps-exe ../psxsplash-cdrom
           make clean
           make -j4 PREFIX=mipsel-linux-gnu FORMAT=elf32-tradlittlemips
+          mv ../psxsplash-cdrom psxsplash-cdrom.ps-exe
+          test -f psxsplash.ps-exe && test -f psxsplash-cdrom.ps-exe
       - uses: actions/upload-artifact@v4
         with:
           name: engine
