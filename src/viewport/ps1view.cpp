@@ -11,6 +11,7 @@
 #include "editor/pick.hh"
 #include "gl.h"
 #include "scene.hh"
+#include "splashpack.hh"
 #include "unitymath.hh"
 
 namespace viewport {
@@ -204,32 +205,6 @@ static void makeFallback(std::vector<uint8_t>& px) {
         }
 }
 
-// A point light as the lighting pass consumes it, in Unity world space.
-struct PointLight {
-    splash::Vec3 pos;
-    Vec3 color;  // colour * intensity
-    float range;
-};
-
-// Per-vertex lighting in Unity world space, matching the exporter's look:
-// ambient + one directional + attenuated point lights. The default
-// directional (used when the scene has none) reproduces the old torch scene's
-// sun. Returns colour scaled so the shader's `* 2.0` keeps the PS1 brightness.
-static Vec3 shade(splash::Vec3 p, splash::Vec3 n, const std::vector<PointLight>& lights, Vec3 ambient, Vec3 sunDir,
-                  Vec3 sunColor) {
-    Vec3 nn{n.x, n.y, n.z};
-    Vec3 c = ambient;
-    c = c + sunColor * std::max(0.0f, dot(nn, sunDir));
-    for (const PointLight& pl : lights) {
-        Vec3 l{pl.pos.x - p.x, pl.pos.y - p.y, pl.pos.z - p.z};
-        float dist = std::sqrt(dot(l, l));
-        float atten = std::max(0.0f, 1.0f - dist / pl.range);
-        float nd = std::max(0.0f, dot(nn, normalize(l)));
-        c = c + pl.color * (atten * atten * (0.3f + 0.7f * nd));
-    }
-    return {std::min(c.x, 1.0f) * 0.62f, std::min(c.y, 1.0f) * 0.62f, std::min(c.z, 1.0f) * 0.62f};
-}
-
 unsigned Ps1View::textureFor(const std::string& projectPath) {
     if (projectPath.empty()) return m_white;
     auto it = m_texCache.find(projectPath);
@@ -266,30 +241,6 @@ void Ps1View::rebuild() {
 
     const splash::Scene& scene = m_doc->scene();
     std::vector<splash::FlatObject> flats = splash::flatten(scene);
-
-    // Gather lights, and work out the default directional when there is none.
-    std::vector<PointLight> points;
-    bool haveDirectional = false;
-    Vec3 sunDir = normalize({0.45f, 1.0f, -0.35f});  // Unity-space twin of the old GL sun {0.45,1,0.35}
-    Vec3 sunColor{0.46f, 0.44f, 0.46f};
-    const Vec3 ambient{0.34f, 0.35f, 0.44f};
-    for (const splash::FlatObject& fo : flats) {
-        if (!fo.activeInHierarchy || !fo.object->light) continue;
-        const splash::LightComponent& lc = *fo.object->light;
-        if (!lc.enabled) continue;
-        Vec3 col{lc.color[0] * lc.intensity, lc.color[1] * lc.intensity, lc.color[2] * lc.intensity};
-        if (lc.kind == splash::LightKind::Directional) {
-            if (!haveDirectional) {
-                // Unity forward is +Z; the direction towards the light is -forward.
-                splash::Vec3 fwd = splash::rotate(fo.worldRotation, {0, 0, 1});
-                sunDir = normalize({-fwd.x, -fwd.y, -fwd.z});
-                sunColor = col;
-                haveDirectional = true;
-            }
-        } else if (lc.kind == splash::LightKind::Point) {
-            points.push_back({fo.localToWorld.position(), col, lc.range > 0 ? lc.range : 1.0f});
-        }
-    }
 
     // Collect geometry into per-texture buckets.
     std::map<unsigned, std::vector<Vertex>> buckets;
@@ -328,13 +279,11 @@ void Ps1View::rebuild() {
         }
         if (mesh->positions.empty() || mesh->normals.size() != mesh->positions.size()) continue;
 
-        // World positions and normals (Unity space); render space negates Z.
-        std::vector<splash::Vec3> wp(mesh->positions.size()), wn(mesh->positions.size());
-        for (size_t i = 0; i < mesh->positions.size(); ++i) {
-            wp[i] = fo.localToWorld.point(mesh->positions[i]);
-            wn[i] = splash::normalized(splash::rotate(fo.worldRotation, mesh->normals[i]));
-        }
+        // World positions (Unity space); render space negates Z.
+        std::vector<splash::Vec3> wp(mesh->positions.size());
+        for (size_t i = 0; i < mesh->positions.size(); ++i) wp[i] = fo.localToWorld.point(mesh->positions[i]);
         const bool haveUv = mesh->uv.size() == mesh->positions.size();
+        const std::vector<splash::Vec3> colors = splash::exportVertexColors(flats, fo, *mesh);
 
         for (size_t sub = 0; sub < mesh->submeshes.size(); ++sub) {
             const splash::Material& mat = mc.materials[std::min(sub, mc.materials.size() - 1)];
@@ -349,7 +298,8 @@ void Ps1View::rebuild() {
             m_pick.ranges.push_back({(int)fi, firstTri, m_pick.positions.size() / 3 - firstTri});
             for (int idx : tri) {
                 size_t i = (size_t)idx;
-                Vec3 col = shade(wp[i], wn[i], points, ambient, sunDir, sunColor);
+                // The exporter's colour, so this view lights the scene the way the game does.
+                Vec3 col = i < colors.size() ? Vec3{colors[i].x, colors[i].y, colors[i].z} : Vec3{0.5f, 0.5f, 0.5f};
                 if (!textured) col = {col.x * mat.color[0], col.y * mat.color[1], col.z * mat.color[2]};
                 splash::Vec2 uv = haveUv ? mesh->uv[i] : splash::Vec2{};
                 bucket.push_back({wp[i].x, wp[i].y, -wp[i].z, uv.x, uv.y, col.x, col.y, col.z});
