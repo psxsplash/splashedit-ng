@@ -684,6 +684,25 @@ void testPlay() {
     CHECK(!b.ok());
     CHECK(!fs::exists(dir / "scene_0.splashpack") && !fs::exists(dir / "scene_0.vram") && !fs::exists(dir / "scene_0.spu"));
 
+    // Live edits: a good export replaces the files and bumps the flag the game
+    // polls; a bad one leaves both as they were. Play writes the flag at 0.
+    auto flag = [&] {
+        std::ifstream in(dir / "reload.flag");
+        std::string v;
+        std::getline(in, v);
+        return v;
+    };
+    CHECK(editor::exportForPlay(scene, project, dir).ok() && !fs::exists(dir / "reload.flag"));
+    CHECK(editor::writeReloadFlag(dir, 0) && flag() == "0");
+    splash::Scene moved = scene;
+    moved.objects.push_back(named("added during play"));
+    splash::ExportResult lr = editor::reloadForPlay(moved, project, dir, 3);
+    CHECK(lr.ok() && flag() == "3");
+    CHECK(fs::file_size(dir / "scene_0.splashpack", ec) == lr.stats.splashpackBytes);
+    const auto packTime = fs::last_write_time(dir / "scene_0.splashpack", ec);
+    CHECK(!editor::reloadForPlay(bad, project, dir, 4).ok());
+    CHECK(flag() == "3" && fs::exists(dir / "scene_0.vram") && fs::last_write_time(dir / "scene_0.splashpack", ec) == packTime);
+
     // Settings: round trip (non-ASCII path), missing file, unknown keys.
     const fs::path cfg = g_outDir / "play" / "play.cfg";
     editor::PlayTools t;

@@ -43,6 +43,15 @@ std::vector<std::string> missingHardwareTools(const PlayTools& tools);
 splash::ExportResult exportForPlay(const splash::Scene& scene, const std::filesystem::path& projectRoot,
                                    const std::filesystem::path& dir);
 
+// Live edits while the game runs. psxsplash re-reads dir/reload.flag every
+// few frames when it existed at boot, and reloads the scene in place when its
+// contents change. writeReloadFlag stores `generation` there; reloadForPlay
+// exports into dir/next, moves the files over the ones the game loads, then
+// bumps the flag. A failed export leaves the running scene's files alone.
+bool writeReloadFlag(const std::filesystem::path& dir, unsigned generation);
+splash::ExportResult reloadForPlay(const splash::Scene& scene, const std::filesystem::path& projectRoot,
+                                   const std::filesystem::path& dir, unsigned generation);
+
 // What a development (PCdrv) psxsplash reports using, from its line
 // "psxsplash: render peak depth D of N, bump B of M".
 struct RenderPeak {

@@ -146,6 +146,7 @@ splash::ExportResult exportForPlay(const splash::Scene& scene, const fs::path& p
     }
     // Stale files from an earlier play must not be booted if this export fails.
     for (const char* ext : {".splashpack", ".vram", ".spu"}) fs::remove(dir / (std::string("scene_0") + ext), ec);
+    fs::remove(dir / "reload.flag", ec);
     splash::ExportOptions opt;
     opt.luaBytecode = true;
     try {
@@ -166,6 +167,36 @@ bool parseRenderPeak(const std::string& line, RenderPeak* out) {
         return false;
     *out = p;
     return true;
+}
+
+bool writeReloadFlag(const fs::path& dir, unsigned generation) {
+    const fs::path tmp = dir / "reload.flag.tmp";
+    {
+        std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+        out << generation;
+        if (!out) return false;
+    }
+    std::error_code ec;
+    fs::rename(tmp, dir / "reload.flag", ec);
+    return !ec;
+}
+
+splash::ExportResult reloadForPlay(const splash::Scene& scene, const fs::path& projectRoot, const fs::path& dir,
+                                   unsigned generation) {
+    const fs::path next = dir / "next";
+    std::error_code ec;
+    fs::remove_all(next, ec);
+    splash::ExportResult r = exportForPlay(scene, projectRoot, next);
+    if (!r.ok()) return r;
+    for (const fs::directory_entry& e : fs::directory_iterator(next, ec)) {
+        fs::rename(e.path(), dir / e.path().filename(), ec);
+        if (ec) {
+            r.errors.push_back("Cannot replace " + utf8(dir / e.path().filename()) + ": " + ec.message());
+            return r;
+        }
+    }
+    if (!writeReloadFlag(dir, generation)) r.errors.push_back("Cannot write " + utf8(dir / "reload.flag"));
+    return r;
 }
 
 std::vector<std::string> reduxCommand(const PlayTools& t, const fs::path& dir) {
