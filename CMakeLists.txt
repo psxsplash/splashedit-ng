@@ -75,6 +75,7 @@ add_library(splasheditdoc STATIC
     src/editor/project.cpp
     src/editor/serial.cpp
     src/editor/hardware.cpp
+    src/editor/psxmon.cpp
     src/editor/unirom.cpp)
 target_include_directories(splasheditdoc PUBLIC src)
 find_package(Threads REQUIRED)

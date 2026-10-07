@@ -366,63 +366,32 @@ bool PcdrvHost::handleCall(Link& raw, const std::function<void(const std::string
         }
         uint32_t flags;
         if (!in.u32(&flags)) return false;
-        bool ok;
-        const fs::path path = resolve(name, &ok);
-        std::FILE* f = nullptr;
-#ifdef _WIN32
-        if (ok) f = _wfopen(path.c_str(), L"rb");
-#else
-        if (ok) f = std::fopen(path.c_str(), "rb");
-#endif
-        if (!f) {
-            report("open " + name + ": " + (ok ? "not found" : "outside the play folder"));
-            return refuse(link) || closed();
-        }
-        const uint32_t h = nextHandle_++;
-        files_[h] = f;
-        report("open " + name + " -> " + std::to_string(h));
-        return (sendText(link, "OKAY") && sendWord(link, h)) || closed();
+        const int32_t h = open(name, event);
+        if (h < 0) return refuse(link) || closed();
+        return (sendText(link, "OKAY") && sendWord(link, uint32_t(h))) || closed();
     }
 
     uint32_t a1, a2, a3;
     if (!in.u32(&a1) || !in.u32(&a2) || !in.u32(&a3)) return false;
-    auto it = files_.find(a1);
-    std::FILE* f = it == files_.end() ? nullptr : it->second;
-    const std::string h = std::to_string(a1);
 
     switch (op) {
         case kClose:
-            if (f) {
-                std::fclose(f);
-                files_.erase(it);
-            }
-            report("close " + h);
+            close(a1, event);
             return (sendText(link, "OKAY") && sendWord(link, a1)) || closed();
 
         case kSeek: {
-            const int whence = a3 == 1 ? SEEK_CUR : a3 == 2 ? SEEK_END : SEEK_SET;
-            if (!f || std::fseek(f, long(int32_t(a2)), whence) != 0) {
-                report("seek " + h + ": failed");
-                return refuse(link) || closed();
-            }
-            const long pos = std::ftell(f);
-            report("seek " + h + " -> " + std::to_string(pos));
+            const int32_t pos = seek(a1, int32_t(a2), a3, event);
+            if (pos < 0) return refuse(link) || closed();
             return (sendText(link, "OKAY") && sendWord(link, uint32_t(pos))) || closed();
         }
 
         case kRead: {
-            if (!f || a2 > kMaxTransfer) {
-                report("read " + h + ": refused");
-                return refuse(link) || closed();
-            }
+            std::vector<uint8_t> data;
+            if (read(a1, a2, &data, event) < 0) return refuse(link) || closed();
             // The console reads exactly the count it is told, so the count is what the file had.
-            std::vector<uint8_t> data(a2);
-            data.resize(std::fread(data.data(), 1, a2, f));
-            if (!sendText(link, "OKAY") || !sendWord(link, uint32_t(data.size())) ||
-                !sendWord(link, byteSum(data.data(), data.size())) || !link.write(data.data(), data.size()))
-                return closed();
-            report("read " + h + ": " + std::to_string(data.size()) + " of " + std::to_string(a2) + " bytes");
-            return true;
+            return (sendText(link, "OKAY") && sendWord(link, uint32_t(data.size())) &&
+                    sendWord(link, byteSum(data.data(), data.size())) && link.write(data.data(), data.size())) ||
+                   closed();
         }
 
         default:
@@ -433,6 +402,60 @@ bool PcdrvHost::handleCall(Link& raw, const std::function<void(const std::string
             }());
             return refuse(link) || closed();
     }
+}
+
+int32_t PcdrvHost::open(const std::string& name, const Event& event) {
+    bool ok;
+    const fs::path path = resolve(name, &ok);
+    std::FILE* f = nullptr;
+#ifdef _WIN32
+    if (ok) f = _wfopen(path.c_str(), L"rb");
+#else
+    if (ok) f = std::fopen(path.c_str(), "rb");
+#endif
+    if (!f) {
+        if (event) event("open " + name + ": " + (ok ? "not found" : "outside the play folder"));
+        return -1;
+    }
+    const uint32_t h = nextHandle_++;
+    files_[h] = f;
+    if (event) event("open " + name + " -> " + std::to_string(h));
+    return int32_t(h);
+}
+
+int32_t PcdrvHost::close(uint32_t handle, const Event& event) {
+    auto it = files_.find(handle);
+    if (event) event("close " + std::to_string(handle));
+    if (it == files_.end()) return -1;
+    std::fclose(it->second);
+    files_.erase(it);
+    return 0;
+}
+
+int32_t PcdrvHost::seek(uint32_t handle, int32_t offset, uint32_t whence, const Event& event) {
+    auto it = files_.find(handle);
+    const std::string h = std::to_string(handle);
+    const int w = whence == 1 ? SEEK_CUR : whence == 2 ? SEEK_END : SEEK_SET;
+    if (it == files_.end() || std::fseek(it->second, long(offset), w) != 0) {
+        if (event) event("seek " + h + ": failed");
+        return -1;
+    }
+    const long pos = std::ftell(it->second);
+    if (event) event("seek " + h + " -> " + std::to_string(pos));
+    return int32_t(pos);
+}
+
+int32_t PcdrvHost::read(uint32_t handle, uint32_t len, std::vector<uint8_t>* data, const Event& event) {
+    auto it = files_.find(handle);
+    const std::string h = std::to_string(handle);
+    if (it == files_.end() || len > kMaxTransfer) {
+        if (event) event("read " + h + ": refused");
+        return -1;
+    }
+    data->resize(len);
+    data->resize(std::fread(data->data(), 1, len, it->second));
+    if (event) event("read " + h + ": " + std::to_string(data->size()) + " of " + std::to_string(len) + " bytes");
+    return int32_t(data->size());
 }
 
 }  // namespace editor

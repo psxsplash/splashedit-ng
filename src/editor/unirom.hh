@@ -45,6 +45,15 @@ class PcdrvHost {
     bool serve(Link& link, const std::atomic<bool>& cancel, const std::function<void(const std::string&)>& line,
                const std::function<void(const std::string&)>& event, std::string* err);
 
+    using Event = std::function<void(const std::string&)>;
+    // The file calls themselves, for a host that carries the arguments some
+    // other way (psxmon's break calls). Each returns what the console is told,
+    // a handle, a byte count or a position, or -1, and reports one line.
+    int32_t open(const std::string& name, const Event& event);
+    int32_t close(uint32_t handle, const Event& event);
+    int32_t read(uint32_t handle, uint32_t len, std::vector<uint8_t>* data, const Event& event);
+    int32_t seek(uint32_t handle, int32_t offset, uint32_t whence, const Event& event);
+
   private:
     bool handleCall(Link& link, const std::function<void(const std::string&)>& event, std::string* err);
     std::filesystem::path resolve(const std::string& name, bool* ok) const;
