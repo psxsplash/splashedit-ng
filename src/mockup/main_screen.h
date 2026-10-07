@@ -10,6 +10,7 @@
 
 #include "disc.hh"
 #include "unitymath.hh"
+#include "editor/hardware.hh"
 #include "editor/live_export.hh"
 #include "editor/play.hh"
 #include "editor/project.hh"
@@ -73,7 +74,12 @@ struct State {
         // and whether the setup popup was opened for it rather than for Play.
         std::future<splash::DiscResult> disc;
         std::filesystem::path discOut;
-        bool setupForExport = false;
+        int setupFor = 0;  // which action the setup popup is for: 0 Play, 1 Export, 2 Run on hardware
+        // Run on hardware (Ctrl+F5): the export it uploads, then the serial session.
+        std::future<splash::ExportResult> hwBuild;
+        editor::HardwareRun hw;
+        std::string hwPort;              // the port the session was started on
+        std::vector<std::string> ports;  // serial ports found when the setup popup opened
         std::filesystem::path exportTo;  // screenshot mode: write here instead of asking
         // What the engine reported using in the last Play of scene `peakScene`
         // (Document::loadId), kept after it stops.

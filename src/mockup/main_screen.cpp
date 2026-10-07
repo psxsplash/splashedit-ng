@@ -115,11 +115,38 @@ static void togglePlay(State& st, const editor::Document& doc) {
     p.peakScene = doc.loadId();
     if (!editor::missingTools(editor::withDefaults(p.tools, p.bundleDir)).empty()) {
         p.openSetup = true;
-        p.setupForExport = false;
+        p.setupFor = 0;
         return;
     }
     p.build = std::async(std::launch::async, [scene = doc.scene(), root = doc.projectRoot()] {
         return editor::exportForPlay(scene, root, playDir());
+    });
+}
+
+// Run on hardware exports here, apart from Play's folder, and serves this one.
+static std::filesystem::path hardwareDir() {
+    std::error_code ec;
+    std::filesystem::path tmp = std::filesystem::temp_directory_path(ec);
+    return (ec ? std::filesystem::path(".") : tmp) / "splashedit-hardware";
+}
+
+// Ctrl+F5 and the Run on hardware button: export, upload to the console and
+// serve its files; or stop the session that is running.
+static void toggleRun(State& st, const editor::Document& doc) {
+    State::Play& p = st.play;
+    if (p.hw.active()) {
+        p.hw.stop();
+        return;
+    }
+    if (p.hwBuild.valid()) return;
+    p.message.clear();
+    if (!editor::missingHardwareTools(editor::withDefaults(p.tools, p.bundleDir)).empty()) {
+        p.openSetup = true;
+        p.setupFor = 2;
+        return;
+    }
+    p.hwBuild = std::async(std::launch::async, [scene = doc.scene(), root = doc.projectRoot()] {
+        return editor::exportForPlay(scene, root, hardwareDir());
     });
 }
 
@@ -128,6 +155,15 @@ static void startExport(State& st, const editor::Document& doc);
 
 static void updatePlay(State& st) {
     State::Play& p = st.play;
+    if (p.hwBuild.valid() && p.hwBuild.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        splash::ExportResult r = p.hwBuild.get();
+        const editor::PlayTools eff = editor::withDefaults(p.tools, p.bundleDir);
+        if (!r.ok()) p.message = "Run on hardware: " + r.errors.front();
+        else {
+            p.hwPort = eff.port;
+            p.hw.start(editor::HardwareRun::port(eff.port), eff.psxsplash, hardwareDir());
+        }
+    }
     p.emu.poll();
     // Read lines printed since the last frame (some may already have scrolled out).
     const std::deque<std::string>& out = p.emu.output();
@@ -164,6 +200,15 @@ static void updatePlay(State& st) {
 static std::mutex g_pickMutex;
 static int g_pickWhich = -1;
 static std::string g_pickPath;
+
+static int resizePort(ImGuiInputTextCallbackData* d) {
+    if (d->EventFlag == ImGuiInputTextFlags_CallbackResize) {
+        auto* str = static_cast<std::string*>(d->UserData);
+        str->resize(size_t(d->BufTextLen));
+        d->Buf = str->data();
+    }
+    return 0;
+}
 
 static void SDLCALL onToolPicked(void* which, const char* const* files, int) {
     if (!files || !files[0]) return;
@@ -212,6 +257,7 @@ static void playSetup(State& st, const editor::Document& doc, ImVec2 size) {
     const char* id = "##playsetup";
     if (p.openSetup) {
         p.openSetup = false;
+        if (p.setupFor == 2) p.ports = editor::listSerialPorts();
         ImGui::OpenPopup(id);
     }
     const float w = 560;
@@ -227,12 +273,14 @@ static void playSetup(State& st, const editor::Document& doc, ImVec2 size) {
     const ImVec2 o = ImGui::GetCursorScreenPos();
     const float inner = w - space::lg * 2;
     float y = o.y;
-    const bool forExport = p.setupForExport;
-    text(dl, ImVec2(o.x, y), f.semibold, type::title, color::text, forExport ? "Set up Export" : "Set up Play");
+    const int mode = std::clamp(p.setupFor, 0, 2);
+    const char* titles[3] = {"Set up Play", "Set up Export", "Set up Run on hardware"};
+    const char* blurbs[3] = {"Play exports the scene and boots it in pcsx-redux on your psxsplash build.",
+                             "Export puts the scene on a disc image with the CD-ROM build of psxsplash.",
+                             "Uploads psxsplash to a console at the Unirom shell, then serves it the scene over the cable."};
+    text(dl, ImVec2(o.x, y), f.semibold, type::title, color::text, titles[mode]);
     y += 24;
-    text(dl, ImVec2(o.x, y), f.regular, type::label, color::textDim,
-         forExport ? "Export puts the scene on a disc image with the CD-ROM build of psxsplash."
-                   : "Play exports the scene and boots it in pcsx-redux on your psxsplash build.");
+    text(dl, ImVec2(o.x, y), f.regular, type::label, color::textDim, blurbs[mode]);
     y += 30;
 
     const editor::PlayTools eff = editor::withDefaults(p.tools, p.bundleDir);
@@ -248,8 +296,8 @@ static void playSetup(State& st, const editor::Document& doc, ImVec2 size) {
     static const SDL_DialogFileFilter exeFilter[] = {{"PlayStation executable", "ps-exe;exe"}};
     static const SDL_DialogFileFilter biosFilter[] = {{"BIOS image", "bin;rom"}};
     // Each popup lists what its own action runs.
-    const int shown[2][3] = {{0, 1, 2}, {3, -1, -1}};
-    for (int i : shown[forExport]) {
+    const int shown[3][3] = {{0, 1, 2}, {3, -1, -1}, {1, -1, -1}};
+    for (int i : shown[mode]) {
         if (i < 0) continue;
         const Row& r = rows[i];
         ImGui::PushID(i);
@@ -281,16 +329,69 @@ static void playSetup(State& st, const editor::Document& doc, ImVec2 size) {
         ImGui::PopID();
         y += rowH + space::sm;
     }
+    if (mode == 2) {
+        // The port: typed, or one of those found on this machine.
+        const float rowH = 44;
+        dl->AddRectFilled(ImVec2(o.x, y), ImVec2(o.x + inner, y + rowH), color::field, radius::field);
+        text(dl, ImVec2(o.x + space::md, y + 6), f.medium, type::body, color::text, "Serial port");
+        text(dl, ImVec2(o.x + space::md, y + 24), f.regular, type::caption, p.tools.port.empty() ? color::warn : color::textFaint,
+             p.tools.port.empty() ? "Not set" : "115200 baud, 8N2");
+        const float fx = o.x + 150, fw = inner - 150 - space::sm;
+        ImGui::SetCursorScreenPos(ImVec2(fx, y + (rowH - size::field) * 0.5f));
+        ImGui::SetNextItemWidth(fw);
+        ImGui::PushFont(f.regular, type::body);
+        ImGui::PushStyleColor(ImGuiCol_FrameBg, color::raised);
+        ImGui::PushStyleColor(ImGuiCol_Text, color::text);
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(space::sm, (size::field - type::body) * 0.5f - 1));
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, radius::field);
+        if (ImGui::InputTextWithHint("##port", "COM3, /dev/ttyUSB0, or tcp:localhost:6699", p.tools.port.data(),
+                                     p.tools.port.capacity() + 1, ImGuiInputTextFlags_CallbackResize, resizePort, &p.tools.port) &&
+            !p.settingsFile.empty())
+            editor::savePlayTools(p.settingsFile, p.tools);
+        interactiveRects().push_back(ImRect(ImVec2(fx, y), ImVec2(fx + fw, y + rowH)));
+        ImGui::PopStyleVar(2);
+        ImGui::PopStyleColor(2);
+        ImGui::PopFont();
+        y += rowH + space::sm;
+        if (!p.ports.empty()) {
+            text(dl, ImVec2(o.x, y + 6), f.regular, type::caption, color::textFaint, "Found:");
+            const float left = o.x + 50;
+            float px = left;
+            for (size_t i = 0; i < p.ports.size() && i < 16; ++i) {
+                const float bw = buttonWidth(nullptr, p.ports[i].c_str());
+                if (px > left && px + bw > o.x + inner) {  // wrap
+                    px = left;
+                    y += size::field + 6 + space::xs;
+                }
+                ImGui::PushID(int(i) + 100);
+                if (button("port", ImVec2(px, y), nullptr, p.ports[i].c_str(),
+                           p.tools.port == p.ports[i] ? ButtonKind::Secondary : ButtonKind::Ghost)) {
+                    p.tools.port = p.ports[i];
+                    if (!p.settingsFile.empty()) editor::savePlayTools(p.settingsFile, p.tools);
+                }
+                px += bw + space::xs;
+                ImGui::PopID();
+            }
+            y += size::field + 6 + space::sm;
+        }
+    }
     y += space::sm;
-    const bool ready = (forExport ? editor::missingDiscTools(eff) : editor::missingTools(eff)).empty();
-    const char* goIcon = forExport ? icon::package : icon::play;
-    const char* goLabel = forExport ? "Export" : "Play";
+    const editor::PlayTools effNow = editor::withDefaults(p.tools, p.bundleDir);
+    const bool ready = (mode == 1   ? editor::missingDiscTools(effNow)
+                        : mode == 2 ? editor::missingHardwareTools(effNow)
+                                    : editor::missingTools(effNow))
+                           .empty();
+    const char* goIcons[3] = {icon::play, icon::package, icon::cpu};
+    const char* goLabels[3] = {"Play", "Export", "Run"};
+    const char* goIcon = goIcons[mode];
+    const char* goLabel = goLabels[mode];
     const float pw = buttonWidth(goIcon, goLabel), cw = buttonWidth(icon::x, "Cancel");
     float bx = o.x + inner - pw;
     if (ready) {
         if (button("go", ImVec2(bx, y), goIcon, goLabel, ButtonKind::Primary)) {
             ImGui::CloseCurrentPopup();
-            if (forExport) startExport(st, doc);
+            if (mode == 1) startExport(st, doc);
+            else if (mode == 2) toggleRun(st, doc);
             else togglePlay(st, doc);
         }
     }
@@ -358,7 +459,10 @@ static ImRect titleBar(State& st, ImDrawList* dl, ImVec2 size, editor::Document&
     const char* playIcon = playing ? icon::square : icon::play;
     const char* playLabel = playing ? "Stop" : building ? "Building" : "Play";
     wPlay = width(playIcon, playLabel);
-    wRun = width(icon::cpu, "Run on hardware");
+    const bool onHw = st.play.hw.active(), hwBuilding = st.play.hwBuild.valid();
+    const char* runIcon = onHw ? icon::square : icon::cpu;
+    const char* runLabel = onHw ? "Stop hardware" : hwBuilding ? "Building" : "Run on hardware";
+    wRun = width(runIcon, runLabel);
     const bool exporting = st.play.disc.valid();
     const char* exportLabel = exporting ? "Exporting" : "Export";
     wExport = width(icon::package, exportLabel);
@@ -368,8 +472,9 @@ static ImRect titleBar(State& st, ImDrawList* dl, ImVec2 size, editor::Document&
     if (button("play", ImVec2(ax, ay), playIcon, playLabel, ButtonKind::Primary, nullptr,
                st.play.emu.running() ? "Stop pcsx-redux (F5)" : "Build and run in pcsx-redux (F5)"))
         togglePlay(st, doc);
-    button("run", ImVec2(ax + wPlay + space::sm, ay), icon::cpu, "Run on hardware", ButtonKind::Secondary, nullptr,
-           "Upload to a console over serial (Ctrl+F5)");
+    if (button("run", ImVec2(ax + wPlay + space::sm, ay), runIcon, runLabel, ButtonKind::Secondary, nullptr,
+               onHw ? "Stop serving the console (Ctrl+F5)" : "Upload to a console over serial (Ctrl+F5)"))
+        toggleRun(st, doc);
     if (button("export", ImVec2(ax + wPlay + wRun + space::sm * 2, ay), icon::package, exportLabel, ButtonKind::Ghost, nullptr,
                "Build a disc image (Ctrl+B)"))
         startExport(st, doc);
@@ -759,7 +864,7 @@ static void startExport(State& st, const editor::Document& doc) {
     if (p.disc.valid() || doc.projectRoot().empty()) return;
     if (!editor::missingDiscTools(editor::withDefaults(p.tools, p.bundleDir)).empty()) {
         p.openSetup = true;
-        p.setupForExport = true;
+        p.setupFor = 1;
         return;
     }
     if (!p.exportTo.empty()) {
@@ -1040,6 +1145,8 @@ static std::vector<MenuEntry> menuEntries(int which, State& st, editor::Document
             break;
         case 3:  // Build
             m.push_back(item(st.play.emu.running() ? "Stop" : "Play", "F5", !st.play.build.valid(), [&] { togglePlay(st, doc); }));
+            m.push_back(item(st.play.hw.active() ? "Stop Hardware Run" : "Run on Hardware", "Ctrl+F5", !st.play.hwBuild.valid(),
+                             [&] { toggleRun(st, doc); }));
             m.push_back(item("Export Disc Image...", "Ctrl+B", !st.play.disc.valid(), [&] { startExport(st, doc); }));
             break;
         case 4:  // View
@@ -3197,7 +3304,7 @@ static std::string mb(size_t bytes) {
 
 // Status bar entry for Play: building, running (click for its output), how
 // it ended, or why it did not start.
-static void playStatus(ImDrawList* dl, ImRect bar, float x, State& st) {
+static float playStatus(ImDrawList* dl, ImRect bar, float x, State& st) {
     State::Play& p = st.play;
     Fonts& f = fonts();
     std::string label;
@@ -3215,7 +3322,7 @@ static void playStatus(ImDrawList* dl, ImRect bar, float x, State& st) {
         label = c ? "pcsx-redux exited with code " + std::to_string(c) : "pcsx-redux closed";
         tone = c ? color::bad : color::textFaint;
     } else {
-        return;
+        return x;
     }
     ImVec2 ls = measure(f.medium, type::caption, label.c_str());
     float pad = dot ? 22 : 10;
@@ -3235,7 +3342,7 @@ static void playStatus(ImDrawList* dl, ImRect bar, float x, State& st) {
     const bool open = ImGui::BeginPopup("##playoutput", ImGuiWindowFlags_NoSavedSettings);
     ImGui::PopStyleVar(4);
     ImGui::PopStyleColor(2);
-    if (!open) return;
+    if (!open) return r.Max.x + space::md;
     ImGui::PushFont(f.regular, type::caption);
     ImGui::PushStyleColor(ImGuiCol_ChildBg, color::field);
     ImGui::PushStyleColor(ImGuiCol_Text, color::textDim);
@@ -3248,6 +3355,71 @@ static void playStatus(ImDrawList* dl, ImRect bar, float x, State& st) {
     if (p.emu.running()) {
         ImVec2 c = ImGui::GetCursorScreenPos();
         if (button("stopplay", c, icon::square, "Stop", ButtonKind::Secondary)) p.emu.stop();
+        ImGui::Dummy(ImVec2(1, size::field + 6));
+    }
+    ImGui::EndPopup();
+    return r.Max.x + space::md;
+}
+
+// Status bar entry for Run on hardware: building, uploading, running (click
+// for what the console printed and the files it asked for), or why it stopped.
+static void hardwareStatus(ImDrawList* dl, ImRect bar, float x, State& st) {
+    State::Play& p = st.play;
+    Fonts& f = fonts();
+    using Phase = editor::HardwareRun::Phase;
+    std::string label;
+    ImU32 tone = color::textDim, dot = 0;
+    const Phase ph = p.hw.phase();
+    if (p.hwBuild.valid()) {
+        label = "Building for the console";
+    } else if (ph == Phase::Connecting) {
+        label = "Connecting to " + p.hwPort;
+    } else if (ph == Phase::Uploading) {
+        label = "Uploading " + std::to_string(p.hw.progress()) + "%";
+        dot = color::warn;
+    } else if (ph == Phase::Running) {
+        label = "Running on " + p.hwPort;
+        dot = color::good;
+    } else if (ph == Phase::Failed) {
+        label = p.hw.error();
+        tone = color::bad;
+    } else if (ph == Phase::Stopped) {
+        label = "Hardware run stopped";
+        tone = color::textFaint;
+    } else {
+        return;
+    }
+    ImVec2 ls = measure(f.medium, type::caption, label.c_str());
+    float pad = dot ? 22 : 10;
+    ImRect r(ImVec2(x, bar.Min.y + 5), ImVec2(x + pad + ls.x + 10, bar.Max.y - 5));
+    Hit h = interact("hwstatus", r);
+    const bool hasOutput = p.hw.lineCount() > 0;
+    if (hasOutput) {
+        dl->AddRectFilled(r.Min, r.Max, lerpColor(color::raised, color::hover, h.hover), radius::pill);
+        if (h.clicked) ImGui::OpenPopup("##hwoutput");
+    }
+    if (dot) dl->AddCircleFilled(ImVec2(r.Min.x + 12, r.GetCenter().y), 3.5f, dot, 12);
+    text(dl, ImVec2(r.Min.x + pad, bar.Min.y + (size::statusBar - ls.y) * 0.5f), f.medium, type::caption, tone, label.c_str());
+
+    ImGui::SetNextWindowPos(ImVec2(r.Min.x, r.Min.y - space::xs), ImGuiCond_Always, ImVec2(0, 1));
+    ImGui::SetNextWindowSize(ImVec2(640, 0));
+    pushPopupStyle();
+    const bool open = ImGui::BeginPopup("##hwoutput", ImGuiWindowFlags_NoSavedSettings);
+    ImGui::PopStyleVar(4);
+    ImGui::PopStyleColor(2);
+    if (!open) return;
+    ImGui::PushFont(f.regular, type::caption);
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, color::field);
+    ImGui::PushStyleColor(ImGuiCol_Text, color::textDim);
+    ImGui::BeginChild("##hwlines", ImVec2(0, 320), ImGuiChildFlags_None, ImGuiWindowFlags_HorizontalScrollbar);
+    for (const std::string& line : p.hw.lines()) ImGui::TextUnformatted(line.c_str());
+    if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 4) ImGui::SetScrollHereY(1.0f);
+    ImGui::EndChild();
+    ImGui::PopStyleColor(2);
+    ImGui::PopFont();
+    if (p.hw.active()) {
+        ImVec2 c = ImGui::GetCursorScreenPos();
+        if (button("stophw", c, icon::square, "Stop", ButtonKind::Secondary)) p.hw.stop();
         ImGui::Dummy(ImVec2(1, size::field + 6));
     }
     ImGui::EndPopup();
@@ -3288,7 +3460,8 @@ static void statusBar(ImDrawList* dl, ImVec2 size, const editor::Document& doc, 
              res ? color::bad : color::textFaint, msg);
         x += ms.x + space::xl;
     }
-    playStatus(dl, bar, x, st);
+    x = playStatus(dl, bar, x, st);
+    hardwareStatus(dl, bar, x, st);
 
     // Right side: problems and save state.
     const bool showNotice = st.saveError.empty() && !st.notice.empty() && ImGui::GetTime() < st.noticeUntil;
@@ -3383,6 +3556,7 @@ static void shortcuts(State& st, editor::Document& doc) {
     if (ctrl && !shift && pressed(ImGuiKey_A)) st.openAddObject = true;
     if (ctrl && !shift && pressed(ImGuiKey_F)) st.focusTreeFilter = true;
     if (!ctrl && pressed(ImGuiKey_F5)) togglePlay(st, doc);
+    if (ctrl && !shift && pressed(ImGuiKey_F5)) toggleRun(st, doc);
     if (ctrl && !shift && pressed(ImGuiKey_S)) saveDoc(st, doc);
     if (ctrl && !shift && pressed(ImGuiKey_B)) startExport(st, doc);
     if (ctrl && shift && pressed(ImGuiKey_S) && !doc.projectRoot().empty()) saveDocAs(doc);
