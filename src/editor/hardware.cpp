@@ -95,8 +95,12 @@ void HardwareRun::start(Opener open, std::filesystem::path exe, std::filesystem:
         phase_ = Phase::Running;
         add("Running. Files are served from " + dir.string());
         PcdrvHost host(dir);
-        const bool ok = host.serve(*link, cancel_, [this](const std::string& l) { add(l); },
-                                   [this](const std::string& e) { add("[file] " + e); }, &err);
+        auto line = [this](const std::string& l) { add(l); };
+        auto event = [this](const std::string& e) { add("[file] " + e); };
+        // Under psxmon the program asks for files with break calls the monitor
+        // stops on; at the Unirom shell it speaks psxsplash's own SIO1 protocol.
+        const bool ok = monitor ? psxmonServe(*link, host, cancel_, line, event, &err)
+                                : host.serve(*link, cancel_, line, event, &err);
         if (!ok && !cancel_) return fail(err);
         phase_ = Phase::Stopped;
     });

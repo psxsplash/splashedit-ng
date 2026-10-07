@@ -18,7 +18,22 @@ namespace editor {
 
 namespace psxmon {
 
-enum : uint16_t { Ping = 0x01, Load = 0x08, Run = 0x09, Ack = 0x40, Pong = 0x43, Error = 0x4f };
+enum : uint16_t {
+    Ping = 0x01,
+    ReadMem = 0x02,
+    WriteMem = 0x03,
+    GetRegs = 0x04,
+    SetReg = 0x05,
+    Load = 0x08,
+    Run = 0x09,
+    Cont = 0x0a,
+    Ack = 0x40,
+    Data = 0x41,
+    Regs = 0x42,
+    Pong = 0x43,
+    Error = 0x4f,
+    Stopped = 0x81,
+};
 
 uint32_t fletcher(const uint16_t* words, size_t count);
 // The whole frame as it goes on the wire, leading 0x00 included.
@@ -33,5 +48,14 @@ bool psxmonPresent(Link& link, int timeoutMs);
 // have answered a PING. False with *err when a frame is refused or not answered.
 bool psxmonUpload(Link& link, const std::vector<uint8_t>& exe, std::string* err, const UploadProgress& progress = {},
                   const std::atomic<bool>* cancel = nullptr);
+
+// Serves the program psxmonUpload started: its console text goes to `line`,
+// and its PCDRV calls (`break 0, 0x101`..`0x107`, which stop it in the
+// monitor) are answered from `files` through the monitor's register and
+// memory commands, then resumed. Runs until `cancel`, the link goes away, or
+// the program exits (`break 4, 0`) or stops for any other reason. True on
+// cancel or exit; false with *err otherwise.
+bool psxmonServe(Link& link, PcdrvHost& files, const std::atomic<bool>& cancel,
+                 const std::function<void(const std::string&)>& line, const PcdrvHost::Event& event, std::string* err);
 
 }  // namespace editor
