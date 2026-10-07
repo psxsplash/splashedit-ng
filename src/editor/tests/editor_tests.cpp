@@ -1482,6 +1482,26 @@ void testPsxmon() {
               err.find("error 3") != std::string::npos);
         t.join();
     }
+    // A psxsplash from before break calls under psxmon: it tries its SIO1
+    // protocol, and the host says why nothing loads.
+    {
+        Pipe a, b;
+        PipeEnd h(a, b), c(b, a);
+        FakeMonitor m{FakeConsole{c, 1, {}, {}, 0, 0}};
+        std::thread t([&] {
+            const uint8_t escape[] = {0, 'p', 0x01, 0x01, 0, 0};
+            m.con.put(escape, sizeof escape);
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            c.close();
+        });
+        std::vector<std::string> seen;
+        std::atomic<bool> stop{false};
+        editor::PcdrvHost files(base);
+        editor::psxmonServe(h, files, stop, [&](const std::string& l) { seen.push_back(l); }, {}, &err);
+        t.join();
+        CHECK(std::count_if(seen.begin(), seen.end(),
+                            [](const std::string& l) { return l.find("over SIO1") != std::string::npos; }) == 1);
+    }
     // Nothing answers the PING: not present, so Unirom gets its turn.
     {
         Pipe a, b;

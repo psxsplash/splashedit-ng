@@ -66,6 +66,7 @@ struct Reader {
     // Read one byte at a time, so nothing past the awaited frame is taken off the link.
     bool exact = false;
     std::string text;  // console text seen between frames
+    bool sioEscape = false;  // psxsplash's SIO1 file call (0x00 'p') seen instead of a frame
 
     // Next frame of a type in `types`, or false at the deadline. Frames of
     // other types are dropped.
@@ -91,6 +92,12 @@ struct Reader {
             while (!buf.empty() && buf.front() != 0) {
                 text.push_back(char(buf.front()));
                 buf.pop_front();
+            }
+            // psxsplash's own file call starts 0x00 'p', never a frame.
+            if (buf.size() >= 2 && buf[1] == 'p') {
+                sioEscape = true;
+                buf.pop_front();
+                continue;
             }
             if (buf.size() < 7) return false;
             // A run of zeros is one frame start.
@@ -278,6 +285,7 @@ bool psxmonServe(Link& link, PcdrvHost& files, const std::atomic<bool>& cancel,
     Reader r{link, {}, false, false, {}};
     Served s{r, err};
     std::string pendingLine;
+    bool warned = false;
     // Console text goes out a line at a time; a partial line waits for its end
     // or for the link to go quiet.
     auto flushText = [&](bool idle) {
@@ -303,6 +311,11 @@ bool psxmonServe(Link& link, PcdrvHost& files, const std::atomic<bool>& cancel,
         Frame f;
         const bool got = r.wait({psxmon::Stopped}, Clock::now() + std::chrono::milliseconds(50), &f);
         flushText(!got);
+        if (r.sioEscape && !warned) {
+            // It never stops for a break call, so nothing below would ever say why it waits.
+            warned = true;
+            if (line) line("This psxsplash asks for files over SIO1, which psxmon does not allow. Update psxsplash.");
+        }
         if (r.closed) return s.lost();
         if (!got) continue;
         const uint32_t reason = f.words.empty() ? 0 : f.words[0];
