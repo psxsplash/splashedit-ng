@@ -2,6 +2,10 @@
 
 Standalone scene editor for [psxsplash](https://github.com/psxsplash/psxsplash), replacing the Unity-based SplashEdit. Plan and design decisions: psxsplash/splashedit#48.
 
+## Download
+
+[Nightly build](https://github.com/psxsplash/splashedit-ng/releases/tag/nightly), rebuilt from every push to `main`: one archive per OS with the editor, the psxsplash engine and pcsx-redux. Per-OS notes are on the release page.
+
 ## Building
 
 Needs CMake 3.24+, a C++20 compiler, SDL3 and FreeType. Dear ImGui and stb are fetched at configure time.

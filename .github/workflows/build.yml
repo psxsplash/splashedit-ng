@@ -3,6 +3,7 @@ name: Build
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
 
 jobs:
@@ -51,8 +52,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ninja-build libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev \
             libxss-dev libxtst-dev libxkbcommon-dev libwayland-dev wayland-protocols libegl1-mesa-dev libgl1-mesa-dev
+      # SDL3 and FreeType are always built in, so the package never links a
+      # library the target machine lacks (Homebrew's FreeType on macOS).
       - name: Configure
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_DISABLE_FIND_PACKAGE_SDL3=ON -DCMAKE_DISABLE_FIND_PACKAGE_Freetype=ON
       - name: Build
         run: cmake --build build --config Release --parallel
       - name: Test
@@ -96,7 +99,13 @@ jobs:
           case "${{ runner.os }}" in
             Windows)
               (cd pkg/redux && cmake -E tar xf ../../redux-download)
-              cp build/Release/splashedit.exe pkg/ ;;
+              cp build/Release/splashedit.exe pkg/
+              # The editor and redux both import the MSVC runtime, which a
+              # clean Windows does not have: ship it app-local beside each.
+              for d in msvcp140 msvcp140_atomic_wait vcruntime140 vcruntime140_1; do
+                cp "C:/Windows/System32/$d.dll" pkg/
+                cp "C:/Windows/System32/$d.dll" pkg/redux/
+              done ;;
             macOS)
               mnt=$(mktemp -d)
               hdiutil attach -nobrowse -readonly -mountpoint "$mnt" redux-download
@@ -104,7 +113,11 @@ jobs:
               hdiutil detach "$mnt"
               cp build/splashedit pkg/ ;;
             *)
-              (cd pkg/redux && cmake -E tar xf ../../redux-download && mv PCSX-Redux-*.AppImage pcsx-redux && chmod +x pcsx-redux)
+              # Unpacked, because running an AppImage needs libfuse2, which
+              # recent distributions no longer install.
+              (cd pkg/redux && cmake -E tar xf ../../redux-download && chmod +x PCSX-Redux-*.AppImage &&
+                ./PCSX-Redux-*.AppImage --appimage-extract >/dev/null && rm PCSX-Redux-*.AppImage &&
+                mv squashfs-root pcsx-redux.AppDir && ln -s pcsx-redux.AppDir/AppRun pcsx-redux)
               cp build/splashedit pkg/ ;;
           esac
           cp -R assets pkg/
@@ -113,6 +126,12 @@ jobs:
           test -f pkg/engine/psxsplash.ps-exe
           test -f pkg/engine/psxsplash-cdrom.ps-exe
           test -f pkg/redux/pcsx-redux.exe || test -f pkg/redux/pcsx-redux || test -d pkg/redux/PCSX-Redux.app
+          # Nothing outside the OS may be linked in.
+          case "${{ runner.os }}" in
+            Windows) test -f pkg/vcruntime140.dll && test -f pkg/redux/msvcp140.dll ;;
+            macOS) otool -L pkg/splashedit; ! otool -L pkg/splashedit | grep -E '/opt/homebrew|/usr/local' ;;
+            *) test -x pkg/redux/pcsx-redux && ! ldd pkg/redux/pcsx-redux.AppDir/usr/bin/pcsx-redux | grep 'not found' ;;
+          esac
           # upload-artifact drops the executable bit, so Linux and macOS ship a tarball.
           mv pkg splashedit
           if [ "${{ runner.os }}" = Windows ]; then
@@ -124,3 +143,31 @@ jobs:
         with:
           name: splashedit-${{ runner.os }}
           path: splashedit-*.*
+
+  # The packages as downloads anyone can take without a GitHub login: every
+  # push to main replaces the "nightly" prerelease, a v* tag makes a release.
+  release:
+    needs: build
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: splashedit-*
+          merge-multiple: true
+          path: dist
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -l dist
+          if [ "${{ github.ref_type }}" = tag ]; then
+            gh release create "${{ github.ref_name }}" dist/* --verify-tag --title "${{ github.ref_name }}" --notes-file docs/release-notes.md
+          else
+            gh release delete nightly --cleanup-tag --yes || true
+            gh release create nightly dist/* --prerelease --target "${{ github.sha }}" \
+              --title "Nightly ($(git log -1 --format=%h))" --notes-file docs/release-notes.md
+          fi
