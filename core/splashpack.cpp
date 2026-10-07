@@ -1,7 +1,9 @@
 #include "splashpack.hh"
 
 #include <algorithm>
+#include <array>
 #include <cfloat>
+#include <cmath>
 #include <cstring>
 #include <deque>
 #include <fstream>
@@ -55,6 +57,7 @@ struct ExpObject {
     std::vector<PsxTexture*> finalTextures;  // deduplicated, after packing
     std::vector<int> vertexBone;             // skinned only: bone per mesh vertex
     std::vector<uint8_t> triBones;           // skinned only: bone per Tri vertex, Tri order
+    std::vector<Vec3> triPositions;          // mesh-space corners of each Tri, Tri order (BVH input)
     bool dynamicLit = false;                 // runtime point lights are applied on the console
     bool dynamicLitSmooth = false;           // per vertex instead of per triangle
 };
@@ -219,6 +222,84 @@ PsxVert toPsxVertex(Vec3 vertex, float gte, Vec3 normal, Vec2 uv, int width, int
     return p;
 }
 
+// A triangle corner with everything the exporter interpolates when it cuts a
+// face: mesh-space position, normal, baked colour, UV, and barycentric weights
+// against the authored triangle (the skinned bone goes with the heaviest one).
+struct Corner {
+    Vec3 pos, normal;
+    Color color;
+    Vec2 uv;
+    float w[3];
+};
+
+Corner lerpCorner(const Corner& a, const Corner& b, float t) {
+    Corner r;
+    r.pos = a.pos + (b.pos - a.pos) * t;
+    r.normal = normalized(a.normal + (b.normal - a.normal) * t);
+    r.color = {a.color.r + (b.color.r - a.color.r) * t, a.color.g + (b.color.g - a.color.g) * t,
+               a.color.b + (b.color.b - a.color.b) * t};
+    r.uv = {a.uv.x + (b.uv.x - a.uv.x) * t, a.uv.y + (b.uv.y - a.uv.y) * t};
+    for (int j = 0; j < 3; j++) r.w[j] = a.w[j] + (b.w[j] - a.w[j]) * t;
+    return r;
+}
+
+// Keep the part of a convex polygon where uv[axis] lies in [lo, hi].
+std::vector<Corner> clipToBand(const std::vector<Corner>& in, int axis, float lo, float hi) {
+    auto coord = [axis](const Corner& c) { return axis == 0 ? c.uv.x : c.uv.y; };
+    std::vector<Corner> poly = in;
+    for (int side = 0; side < 2 && poly.size() >= 3; side++) {
+        auto inside = [&](const Corner& c) { return side == 0 ? coord(c) >= lo : coord(c) <= hi; };
+        float edge = side == 0 ? lo : hi;
+        std::vector<Corner> out;
+        for (size_t i = 0; i < poly.size(); i++) {
+            const Corner& p = poly[i];
+            const Corner& q = poly[(i + 1) % poly.size()];
+            bool pin = inside(p), qin = inside(q);
+            if (pin) out.push_back(p);
+            if (pin != qin) out.push_back(lerpCorner(p, q, (edge - coord(p)) / (coord(q) - coord(p))));
+        }
+        poly = std::move(out);
+    }
+    return poly;
+}
+
+// The PS1 cannot repeat a texture across a polygon, so a face whose UVs span
+// more than one copy of the texture is cut along the integer U and V lines.
+// Each piece then lies inside one copy and is shifted back into [0,1]. A face
+// that already fits one copy is only shifted (not at all when it is the [0,1]
+// copy) and false is returned: emit t itself instead of pieces.
+bool tileTriangle(std::array<Corner, 3>& t, std::vector<std::array<Corner, 3>>& pieces) {
+    constexpr float eps = 1e-4f;
+    float lo[2], hi[2];
+    for (int ax = 0; ax < 2; ax++) {
+        auto c = [ax](const Corner& k) { return ax == 0 ? k.uv.x : k.uv.y; };
+        lo[ax] = std::floor(std::min({c(t[0]), c(t[1]), c(t[2])}) + eps);
+        hi[ax] = std::ceil(std::max({c(t[0]), c(t[1]), c(t[2])}) - eps);
+        if (hi[ax] <= lo[ax]) hi[ax] = lo[ax] + 1;
+    }
+    if (hi[0] - lo[0] == 1 && hi[1] - lo[1] == 1) {
+        if (lo[0] == 0 && lo[1] == 0) return false;
+        for (Corner& k : t) k.uv = {k.uv.x - lo[0], k.uv.y - lo[1]};
+        return false;
+    }
+    std::vector<Corner> whole(t.begin(), t.end());
+    for (float u = lo[0]; u < hi[0]; u++) {
+        std::vector<Corner> col = clipToBand(whole, 0, u, u + 1);
+        if (col.size() < 3) continue;
+        for (float v = lo[1]; v < hi[1]; v++) {
+            std::vector<Corner> cell = clipToBand(col, 1, v, v + 1);
+            if (cell.size() < 3) continue;
+            for (Corner& k : cell) k.uv = {k.uv.x - u, k.uv.y - v};
+            for (size_t j = 1; j + 1 < cell.size(); j++) {
+                Vec3 n = cross(cell[j].pos - cell[0].pos, cell[j + 1].pos - cell[0].pos);
+                if (sqrMagnitude(n) <= 0) continue;  // sliver along a cut line
+                pieces.push_back({cell[0], cell[j], cell[j + 1]});
+            }
+        }
+    }
+    return true;
+}
+
 // PSXMesh.BuildFromMesh
 void buildTris(ExpObject& e, float gte, const std::vector<SceneLight>& lights, ExportResult& res) {
     const Mesh& m = *e.mesh;
@@ -247,16 +328,21 @@ void buildTris(ExpObject& e, float gte, const std::vector<SceneLight>& lights, E
                     texIndex = int(i);
                     break;
                 }
-        auto convert = [&](int idx) {
-            size_t i = size_t(idx);
-            Vec3 v = scale(m.positions[i], fo.lossyScale);
-            Color c = colors[i];
+        auto convert = [&](const Corner& k) {
+            Vec3 v = scale(k.pos, fo.lossyScale);
+            Color c = k.color;
             if (texIndex == -1) {
                 c = {c.r * mat.color[0], c.g * mat.color[1], c.b * mat.color[2]};
-                return toPsxVertex(v, gte, m.normals[i], {}, 0, 0, c);
+                return toPsxVertex(v, gte, k.normal, {}, 0, 0, c);
             }
             const PsxTexture* t = e.textures[size_t(texIndex)];
-            return toPsxVertex(v, gte, m.normals[i], uvs[i], t->width, t->height, c);
+            return toPsxVertex(v, gte, k.normal, k.uv, t->width, t->height, c);
+        };
+        auto corner = [&](int idx, int slot) {
+            size_t i = size_t(idx);
+            Corner k{m.positions[i], m.normals[i], colors[i], uvs[i], {}};
+            k.w[slot] = 1;
+            return k;
         };
         const auto& tri = m.submeshes[sub];
         for (size_t i = 0; i + 2 < tri.size(); i += 3) {
@@ -264,11 +350,34 @@ void buildTris(ExpObject& e, float gte, const std::vector<SceneLight>& lights, E
             Vec3 p0 = m.positions[size_t(a)];
             Vec3 fn = normalized(cross(m.positions[size_t(b)] - p0, m.positions[size_t(c)] - p0));
             if (dot(fn, m.normals[size_t(a)]) < 0) std::swap(b, c);
-            e.tris.push_back({{convert(a), convert(b), convert(c)}, texIndex});
-            if (!e.vertexBone.empty())
-                for (int v : {a, b, c}) e.triBones.push_back(uint8_t(e.vertexBone[size_t(v)]));
+            int ids[3] = {a, b, c};
+            std::array<Corner, 3> k{corner(a, 0), corner(b, 1), corner(c, 2)};
+            auto bonesFor = [&](const Corner& q) {
+                int best = 0;
+                for (int j = 1; j < 3; j++)
+                    if (q.w[j] > q.w[best]) best = j;
+                return uint8_t(e.vertexBone[size_t(ids[best])]);
+            };
+            std::vector<std::array<Corner, 3>> pieces;
+            if (texIndex == -1 || !tileTriangle(k, pieces)) {
+                // One texture copy covers it: emit it as authored, corners in mesh order for the BVH.
+                e.tris.push_back({{convert(k[0]), convert(k[1]), convert(k[2])}, texIndex});
+                for (int v : {tri[i], tri[i + 1], tri[i + 2]}) e.triPositions.push_back(m.positions[size_t(v)]);
+                if (!e.vertexBone.empty())
+                    for (const Corner& q : k) e.triBones.push_back(bonesFor(q));
+                continue;
+            }
+            for (const auto& pc : pieces) {
+                e.tris.push_back({{convert(pc[0]), convert(pc[1]), convert(pc[2])}, texIndex});
+                for (const Corner& q : pc) e.triPositions.push_back(q.pos);
+                if (!e.vertexBone.empty())
+                    for (const Corner& q : pc) e.triBones.push_back(bonesFor(q));
+            }
         }
     }
+    if (e.tris.size() > 65535)
+        res.errors.push_back(e.obj->name + ": " + std::to_string(e.tris.size()) +
+                             " triangles after splitting repeating textures, more than 65535");
 }
 
 // Same test the engine runs: does the light's range reach the mesh's world AABB?
@@ -1049,11 +1158,11 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
                     return mc;
                 }();
                 static const Mesh noMesh{};
-                exporters.push_back(ExpObject{&fo, fo.object, &noMeshComponent, &noMesh, {}, {}, {}, {}, {}});
+                exporters.push_back(ExpObject{&fo, fo.object, &noMeshComponent, &noMesh, {}, {}, {}, {}, {}, {}});
             }
             continue;
         }
-        ExpObject e{&fo, fo.object, &*fo.object->mesh, nullptr, {}, {}, {}, {}, {}};
+        ExpObject e{&fo, fo.object, &*fo.object->mesh, nullptr, {}, {}, {}, {}, {}, {}};
         try {
             e.mesh = meshFor(e.mc->mesh);
         } catch (const std::exception& ex) {
@@ -1239,11 +1348,12 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
             if (t.textureIndex >= 0) t.textureIndex = remap[size_t(t.textureIndex)];
     }
 
-    // BVH over active objects' meshes (mesh.triangles = submeshes concatenated).
+    // BVH over active objects' exported triangles.
     std::vector<BvhInputObject> bvhIn;
     for (ExpObject& e : exporters) {
-        BvhInputObject b{e.obj->active, e.flat->localToWorld, &e.mesh->positions, {}};
-        for (const auto& sm : e.mesh->submeshes) b.triangles.insert(b.triangles.end(), sm.begin(), sm.end());
+        // Over the exported Tris, which the engine's TriangleRef indexes into.
+        BvhInputObject b{e.obj->active, e.flat->localToWorld, &e.triPositions, {}};
+        for (size_t i = 0; i < e.triPositions.size(); i++) b.triangles.push_back(int(i));
         bvhIn.push_back(std::move(b));
     }
     Bvh bvh = buildBvh(bvhIn);
