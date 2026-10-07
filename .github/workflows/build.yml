@@ -122,7 +122,7 @@ jobs:
           esac
           cp -R assets pkg/
           cp -R examples/courtyard pkg/examples/
-          ls -R pkg | head -40
+          ls pkg pkg/engine pkg/redux
           test -f pkg/engine/psxsplash.ps-exe
           test -f pkg/engine/psxsplash-cdrom.ps-exe
           test -f pkg/redux/pcsx-redux.exe || test -f pkg/redux/pcsx-redux || test -d pkg/redux/PCSX-Redux.app
