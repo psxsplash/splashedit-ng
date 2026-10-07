@@ -1,6 +1,13 @@
 // Headless tests for the editor's document model: the undo history and the
 // viewport's ray picker and gizmo maths. No SDL, no GL. Run through CTest (`ctest`).
 #include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <cstring>
+#include <deque>
+#include <mutex>
+#include <thread>
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
@@ -12,11 +19,14 @@
 
 #include "editor/catalog.hh"
 #include "editor/document.hh"
+#include "editor/hardware.hh"
 #include "editor/gizmo.hh"
 #include "editor/live_export.hh"
 #include "editor/pick.hh"
 #include "editor/play.hh"
 #include "editor/project.hh"
+#include "editor/serial.hh"
+#include "editor/unirom.hh"
 #include "budget.hh"
 #include "splashpack.hh"
 
@@ -678,10 +688,14 @@ void testPlay() {
     t.redux = fs::path(u8"/opt/rédux/pcsx-redux");
     t.psxsplash = "/x/psxsplash.ps-exe";
     t.disc = "/x/psxsplash-cdrom.ps-exe";
+    t.port = "tcp:localhost:6699";
     CHECK(editor::savePlayTools(cfg, t));
     { std::ofstream(cfg, std::ios::app) << "colour=blue\nnot a pair\n"; }
     editor::PlayTools l = editor::loadPlayTools(cfg);
-    CHECK(l.redux == t.redux && l.psxsplash == t.psxsplash && l.bios.empty() && l.disc == t.disc);
+    CHECK(l.redux == t.redux && l.psxsplash == t.psxsplash && l.bios.empty() && l.disc == t.disc && l.port == t.port);
+    editor::PlayTools noPort = l;
+    noPort.port.clear();
+    CHECK(editor::missingHardwareTools(noPort).size() == 2);  // the build is not on disk either
     editor::PlayTools none = editor::loadPlayTools(dir / "absent.cfg");
     CHECK(none.redux.empty() && none.psxsplash.empty());
 
@@ -953,6 +967,343 @@ void testMove() {
     CHECK(!d.pinned());
 }
 
+// ---- Run on hardware: the Unirom upload and PCdrv host against a simulated console.
+
+struct Pipe {
+    std::mutex m;
+    std::condition_variable cv;
+    std::deque<uint8_t> q;
+    bool closed = false;
+};
+
+class PipeEnd : public editor::Link {
+  public:
+    PipeEnd(Pipe& in, Pipe& out) : in_(in), out_(out) {}
+    bool write(const void* d, size_t n) override {
+        std::lock_guard<std::mutex> lock(out_.m);
+        if (out_.closed) return false;
+        const uint8_t* p = static_cast<const uint8_t*>(d);
+        out_.q.insert(out_.q.end(), p, p + n);
+        out_.cv.notify_all();
+        return true;
+    }
+    int read(void* d, size_t n, int timeoutMs) override {
+        std::unique_lock<std::mutex> lock(in_.m);
+        in_.cv.wait_for(lock, std::chrono::milliseconds(timeoutMs), [&] { return !in_.q.empty() || in_.closed; });
+        if (in_.q.empty()) return in_.closed ? -1 : 0;
+        size_t k = std::min(n, in_.q.size());
+        std::copy(in_.q.begin(), in_.q.begin() + k, static_cast<uint8_t*>(d));
+        in_.q.erase(in_.q.begin(), in_.q.begin() + k);
+        return int(k);
+    }
+    void close() {
+        std::lock_guard<std::mutex> lock(out_.m);
+        out_.closed = true;
+        out_.cv.notify_all();
+    }
+
+  private:
+    Pipe& in_;
+    Pipe& out_;
+};
+
+// The console's half of the protocol, as Unirom (sio.c, kdebug.c) speaks it.
+struct FakeConsole {
+    PipeEnd& link;
+    int offer;  // protocol version Unirom offers: 1 (none), 2 or 3
+    std::vector<std::string> problems;
+    std::vector<uint8_t> program;
+    uint32_t dest = 0, entry = 0;
+
+    void fail(const std::string& s) { problems.push_back(s); }
+    bool get(void* p, size_t n) {
+        uint8_t* o = static_cast<uint8_t*>(p);
+        while (n) {
+            int r = link.read(o, n, 3000);
+            if (r <= 0) {
+                fail("console: host went quiet");
+                return false;
+            }
+            o += r;
+            n -= size_t(r);
+        }
+        return true;
+    }
+    uint32_t u32() {
+        uint8_t b[4] = {};
+        get(b, 4);
+        return uint32_t(b[0]) | uint32_t(b[1]) << 8 | uint32_t(b[2]) << 16 | uint32_t(b[3]) << 24;
+    }
+    void put(const void* p, size_t n) { link.write(p, n); }
+    void say(const char* s) { put(s, std::strlen(s)); }
+    void put32(uint32_t v) {
+        uint8_t b[4] = {uint8_t(v), uint8_t(v >> 8), uint8_t(v >> 16), uint8_t(v >> 24)};
+        put(b, 4);
+    }
+    std::string command() {  // the shell echoes what it reads
+        char c[5] = {};
+        if (!get(c, 4)) return {};
+        put(c, 4);
+        return c;
+    }
+    static uint32_t sum(const uint8_t* p, size_t n) {
+        uint32_t s = 0;
+        for (size_t i = 0; i < n; ++i) s += p[i];
+        return s;
+    }
+
+    void shell() {
+        std::string cmd = command();
+        if (cmd != "SEXE") return fail("console: expected SEXE, got " + cmd);
+        int version = 1;
+        if (offer >= 2) {
+            say(offer == 3 ? "OKV3" : "OKV2");
+            std::string up = command();
+            if (up != (offer == 3 ? "UPV3" : "UPV2")) return fail("console: upgrade answered with " + up);
+            version = offer;
+        }
+        say("OKAY");
+        std::vector<uint8_t> header(2048);
+        if (!get(header.data(), header.size())) return;
+        if (std::memcmp(header.data(), "PS-X EXE", 8)) fail("console: SEXE header is not the EXE header");
+        entry = u32();
+        dest = u32();
+        const uint32_t len = u32(), check = u32();
+        if (len % 2048) fail("console: SEXE length not padded");
+        program.assign(len, 0);
+        bool corrupted = false;
+        for (uint32_t at = 0; at < len;) {
+            if (!get(program.data() + at, 2048)) return;
+            if (version >= 2) {
+                say("CHEK");
+                const uint32_t host = u32();
+                if (host != sum(program.data() + at, 2048)) fail("console: wrong chunk checksum");
+                if (!corrupted) {  // pretend the first chunk arrived damaged
+                    corrupted = true;
+                    say("ERR!");
+                    continue;
+                }
+                say("MORE");
+            }
+            at += 2048;
+        }
+        uint32_t whole = 0;
+        if (version == 3) {
+            whole = 5381;
+            for (uint8_t b : program) whole = ((whole << 5) + whole) ^ b;
+        } else {
+            whole = sum(program.data(), program.size());
+        }
+        if (whole != check) fail("console: wrong SEXE checksum");
+    }
+
+    // psxsplash's side of a file call (pcdrv_handler.hh): escape, call number, presence OKAY.
+    bool okay() {  // sio_check_okay: stops reading at the first byte that does not match
+        for (const char* w = "OKAY"; *w; ++w) {
+            uint8_t c = 0;
+            if (!get(&c, 1) || c != uint8_t(*w)) return false;
+        }
+        return true;
+    }
+    bool call(uint32_t op) {
+        uint8_t esc[2] = {0, 'p'};
+        put(esc, 2);
+        put32(op);
+        if (okay()) return true;
+        fail("console: no presence ack");
+        return false;
+    }
+    bool init() {
+        if (!call(0x101)) return false;
+        uint8_t z = 1;
+        get(&z, 1);
+        return z == 0;
+    }
+    bool open(const char* name, uint32_t* h) {
+        if (!call(0x103)) return false;
+        put(name, std::strlen(name) + 1);
+        put32(0);
+        if (!okay()) return false;
+        *h = u32();
+        return true;
+    }
+    std::vector<uint8_t> read(uint32_t h, uint32_t len) {
+        if (!call(0x105)) return {};
+        put32(h), put32(len), put32(0x80100000);
+        if (!okay()) {
+            fail("console: read refused");
+            return {};
+        }
+        const uint32_t n = u32(), check = u32();
+        std::vector<uint8_t> mem(n);
+        get(mem.data(), n);
+        if (check != sum(mem.data(), n)) fail("console: read checksum");
+        return mem;
+    }
+    bool three(uint32_t op, uint32_t a, uint32_t b, uint32_t c, uint32_t* out) {
+        if (!call(op)) return false;
+        put32(a), put32(b), put32(c);
+        if (!okay()) return false;
+        *out = u32();
+        return true;
+    }
+};
+
+void runUnirom(int offer) {
+    namespace fs = std::filesystem;
+    const fs::path base = g_outDir / ("unirom" + std::to_string(offer));
+    std::error_code ec;
+    fs::remove_all(base, ec);
+    fs::create_directories(base, ec);
+    std::vector<uint8_t> scene(3000);
+    for (size_t i = 0; i < scene.size(); ++i) scene[i] = uint8_t(i * 7 + 1);
+    {
+        std::ofstream(base / "scene_0.splashpack", std::ios::binary).write(reinterpret_cast<const char*>(scene.data()), scene.size());
+    }
+    // A program of a bit over two chunks.
+    std::vector<uint8_t> exe(0x800 + 5000);
+    std::memcpy(exe.data(), "PS-X EXE", 8);
+    const uint32_t pc = 0x80010000, addr = 0x80010000;
+    std::memcpy(&exe[0x10], &pc, 4);
+    std::memcpy(&exe[0x18], &addr, 4);
+    for (size_t i = 0x800; i < exe.size(); ++i) exe[i] = uint8_t(i * 13);
+
+    Pipe toConsole, toHost;
+    PipeEnd hostEnd(toHost, toConsole), consoleEnd(toConsole, toHost);
+    FakeConsole con{consoleEnd, offer, {}, {}, 0, 0};
+    std::vector<uint8_t> readBack, tail;
+    uint32_t seekPos = 0, closed = 99;
+    bool inited = false, escapeRefused = false, missingRefused = false, unsupportedRefused = false;
+    std::thread console([&] {
+        con.shell();
+        con.say("psxsplash: boot\r\n");
+        uint32_t h = 0, n = 0;
+        inited = con.init();
+        if (con.open("scene_0.splashpack", &h)) {
+            readBack = con.read(h, 4096);  // more than the file holds
+            con.three(0x107, h, 2990, 0, &seekPos);
+            tail = con.read(h, 64);
+            con.three(0x104, h, 0, 0, &closed);
+        }
+        escapeRefused = !con.open("../outside", &n);
+        missingRefused = !con.open("missing.bin", &n);
+        if (con.call(0x106)) {  // write: not served, the host answers NOPE
+            con.put32(h), con.put32(4), con.put32(0x80100000);
+            unsupportedRefused = !con.okay();
+        }
+        con.say("done\n");
+        consoleEnd.close();
+    });
+
+    std::string err;
+    std::vector<int> progress;
+    CHECK(editor::uniromUpload(hostEnd, exe, &err, [&](int p) { progress.push_back(p); }));
+    if (!err.empty()) std::fprintf(stderr, "upload: %s\n", err.c_str());
+    std::vector<std::string> lines, events;
+    std::atomic<bool> cancel{false};
+    editor::PcdrvHost host(base);
+    const bool clean = host.serve(hostEnd, cancel, [&](const std::string& l) { lines.push_back(l); },
+                                  [&](const std::string& e) { events.push_back(e); }, &err);
+    console.join();
+
+    CHECK(!clean && err == "The connection closed.");  // the console hung up
+    for (const std::string& p : con.problems) std::fprintf(stderr, "offer %d: %s\n", offer, p.c_str());
+    CHECK(con.problems.empty());
+    CHECK(con.dest == addr && con.entry == pc);
+    CHECK(con.program.size() == 6144 && std::equal(exe.begin() + 0x800, exe.end(), con.program.begin()));
+    CHECK(!progress.empty() && progress.back() == 100);
+    CHECK(std::find(lines.begin(), lines.end(), "psxsplash: boot") != lines.end());
+    CHECK(std::find(lines.begin(), lines.end(), "done") != lines.end());
+    CHECK(inited);
+    CHECK(readBack.size() == 3000 && std::equal(scene.begin(), scene.end(), readBack.begin()));
+    CHECK(seekPos == 2990 && tail.size() == 10 && std::equal(scene.end() - 10, scene.end(), tail.begin()));
+    CHECK(closed != 99);
+    CHECK(escapeRefused && missingRefused && unsupportedRefused);
+    CHECK(!fs::exists(base.parent_path() / "outside"));
+}
+
+// HardwareRun: the editor's session, over a pipe to the same fake console.
+class Borrowed : public editor::Link {
+  public:
+    explicit Borrowed(editor::Link& l) : l_(l) {}
+    bool write(const void* d, size_t n) override { return l_.write(d, n); }
+    int read(void* d, size_t n, int t) override { return l_.read(d, n, t); }
+
+  private:
+    editor::Link& l_;
+};
+
+void testHardwareRun() {
+    namespace fs = std::filesystem;
+    const fs::path dir = g_outDir / "hwrun";
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+    std::vector<uint8_t> exe(0x800 + 100);
+    std::memcpy(exe.data(), "PS-X EXE", 8);
+    const fs::path exePath = dir / "engine.ps-exe";
+    std::ofstream(exePath, std::ios::binary).write(reinterpret_cast<const char*>(exe.data()), exe.size());
+
+    Pipe toConsole, toHost;
+    PipeEnd hostEnd(toHost, toConsole), consoleEnd(toConsole, toHost);
+    FakeConsole con{consoleEnd, 2, {}, {}, 0, 0};
+    std::atomic<bool> printed{false};
+    std::thread console([&] {
+        con.shell();
+        con.say("hello from the console\n");
+        printed = true;
+    });
+    editor::HardwareRun run;
+    run.start([&](std::string*) { return std::make_unique<Borrowed>(hostEnd); }, exePath, dir);
+    auto waitFor = [&](auto pred) {
+        for (int i = 0; i < 300 && !pred(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        return pred();
+    };
+    console.join();
+    CHECK(con.problems.empty());
+    CHECK(waitFor([&] {
+        auto l = run.lines();
+        return std::find(l.begin(), l.end(), "hello from the console") != l.end();
+    }));
+    CHECK(run.phase() == editor::HardwareRun::Phase::Running && run.active() && run.progress() == 100);
+    run.stop();
+    CHECK(run.phase() == editor::HardwareRun::Phase::Stopped && !run.active());
+
+    // A port that does not open: Failed, with the reason.
+    run.start([](std::string* err) {
+        *err = "Cannot open COM9";
+        return std::unique_ptr<editor::Link>();
+    }, exePath, dir);
+    CHECK(waitFor([&] { return run.phase() == editor::HardwareRun::Phase::Failed; }));
+    CHECK(run.error() == "Cannot open COM9");
+    // No build on disk.
+    run.start([&](std::string*) { return std::make_unique<Borrowed>(hostEnd); }, dir / "absent.ps-exe", dir);
+    CHECK(waitFor([&] { return run.phase() == editor::HardwareRun::Phase::Failed; }));
+    CHECK(run.error() == "Cannot read the psxsplash build.");
+}
+
+void testUnirom() {
+    runUnirom(1);
+    runUnirom(2);
+    runUnirom(3);
+
+    // Not a PS-X EXE: refused before anything is sent.
+    Pipe a, b;
+    PipeEnd end(a, b);
+    std::string err;
+    CHECK(!editor::uniromUpload(end, std::vector<uint8_t>(4096), &err) && err == "Not a PS-X EXE.");
+    CHECK(b.q.empty());
+
+    // A console that never answers.
+    std::vector<uint8_t> exe(0x1000);
+    std::memcpy(exe.data(), "PS-X EXE", 8);
+    end.close();
+    CHECK(!editor::uniromUpload(end, exe, &err) && !err.empty());
+
+    std::string linkErr;
+    CHECK(!editor::openLink("", 115200, &linkErr) && !linkErr.empty());
+    CHECK(!editor::openLink("tcp:nonsense", 115200, &linkErr) && linkErr.find("tcp:HOST:PORT") != std::string::npos);
+}
+
 int main(int argc, char** argv) {
     std::error_code ec;
     std::filesystem::path exe = argc > 0 ? std::filesystem::absolute(argv[0], ec) : std::filesystem::path();
@@ -975,6 +1326,8 @@ int main(int argc, char** argv) {
     testPlay();
     testProject();
     testAdoptAsset();
+    testUnirom();
+    testHardwareRun();
     if (g_failures) {
         std::fprintf(stderr, "editor_tests: %d of %d checks failed\n", g_failures, g_checks);
         return 1;

@@ -33,6 +33,7 @@ PlayTools loadPlayTools(const fs::path& file) {
         else if (key == "psxsplash") t.psxsplash = p;
         else if (key == "bios") t.bios = p;
         else if (key == "disc") t.disc = p;
+        else if (key == "port") t.port = value;
     }
     return t;
 }
@@ -44,7 +45,8 @@ bool savePlayTools(const fs::path& file, const PlayTools& t) {
     out << "redux=" << utf8(t.redux) << "\n"
         << "psxsplash=" << utf8(t.psxsplash) << "\n"
         << "bios=" << utf8(t.bios) << "\n"
-        << "disc=" << utf8(t.disc) << "\n";
+        << "disc=" << utf8(t.disc) << "\n"
+        << "port=" << t.port << "\n";
     return bool(out);
 }
 
@@ -94,6 +96,8 @@ PlayTools withDefaults(PlayTools t, const fs::path& bundle) {
     fromEnv(t.psxsplash, "SPLASHEDIT_PSXSPLASH");
     fromEnv(t.bios, "SPLASHEDIT_BIOS");
     fromEnv(t.disc, "SPLASHEDIT_DISC_ENGINE");
+    if (t.port.empty())
+        if (const char* v = std::getenv("SPLASHEDIT_PORT"); v && *v) t.port = v;
     fromBundle(t.redux, bundle,
                {"redux/pcsx-redux.exe", "redux/PCSX-Redux.app/Contents/MacOS/PCSX-Redux", "redux/pcsx-redux"});
     fromBundle(t.psxsplash, bundle, {"engine/psxsplash.ps-exe"});
@@ -120,6 +124,15 @@ std::vector<std::string> missingDiscTools(const PlayTools& t) {
     std::error_code ec;
     if (t.disc.empty()) out.push_back("The psxsplash disc build (.ps-exe) is not set.");
     else if (!fs::is_regular_file(t.disc, ec)) out.push_back("The psxsplash disc build not found: " + utf8(t.disc));
+    return out;
+}
+
+std::vector<std::string> missingHardwareTools(const PlayTools& t) {
+    std::vector<std::string> out;
+    std::error_code ec;
+    if (t.psxsplash.empty()) out.push_back("The psxsplash build (.ps-exe) is not set.");
+    else if (!fs::is_regular_file(t.psxsplash, ec)) out.push_back("The psxsplash build not found: " + utf8(t.psxsplash));
+    if (t.port.empty()) out.push_back("No serial port is set.");
     return out;
 }
 

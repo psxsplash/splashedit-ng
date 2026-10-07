@@ -72,10 +72,16 @@ add_library(splasheditdoc STATIC
     src/editor/gizmo.cpp
     src/editor/live_export.cpp
     src/editor/play.cpp
-    src/editor/project.cpp)
+    src/editor/project.cpp
+    src/editor/serial.cpp
+    src/editor/hardware.cpp
+    src/editor/unirom.cpp)
 target_include_directories(splasheditdoc PUBLIC src)
 find_package(Threads REQUIRED)
 target_link_libraries(splasheditdoc PUBLIC splashcore Threads::Threads)
+if(WIN32)
+    target_link_libraries(splasheditdoc PUBLIC ws2_32)
+endif()
 if(MSVC)
     target_compile_options(splasheditdoc PRIVATE /W4 /utf-8)
 else()

@@ -16,14 +16,15 @@ namespace editor {
 // `disc` is the CD-ROM build of psxsplash that Export puts on the disc.
 struct PlayTools {
     std::filesystem::path redux, psxsplash, bios, disc;
+    std::string port;  // Run on hardware: a serial port, or tcp:HOST:PORT
 };
 
-// key=value lines: redux=, psxsplash=, bios=, disc=. A missing file reads as empty.
+// key=value lines: redux=, psxsplash=, bios=, disc=, port=. A missing file reads as empty.
 PlayTools loadPlayTools(const std::filesystem::path& file);
 bool savePlayTools(const std::filesystem::path& file, const PlayTools& tools);
 
 // Fills empty entries from SPLASHEDIT_REDUX, SPLASHEDIT_PSXSPLASH,
-// SPLASHEDIT_BIOS and SPLASHEDIT_DISC_ENGINE, then from the copies shipped in
+// SPLASHEDIT_BIOS, SPLASHEDIT_DISC_ENGINE and SPLASHEDIT_PORT, then from the copies shipped in
 // `bundle` (the directory holding the editor: redux/ and engine/), then looks
 // for pcsx-redux on PATH.
 PlayTools withDefaults(PlayTools tools, const std::filesystem::path& bundle = {});
@@ -33,6 +34,9 @@ std::vector<std::string> missingTools(const PlayTools& tools);
 
 // The same for Export: only the disc build.
 std::vector<std::string> missingDiscTools(const PlayTools& tools);
+
+// The same for Run on hardware: the psxsplash build and a port.
+std::vector<std::string> missingHardwareTools(const PlayTools& tools);
 
 // Writes dir/scene_0.{splashpack,vram,spu}, the names psxsplash's PCdrv
 // loader opens for the first scene.
