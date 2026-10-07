@@ -1385,7 +1385,7 @@ struct FakeMonitor {
 
 void testPsxmon() {
     namespace fs = std::filesystem;
-    // Frames byte for byte as the farm's TypeScript host encodes them (encodeFrame).
+    // A PING and a LOAD byte for byte as a separate host implementation encodes them.
     const std::vector<uint8_t> ping = editor::psxmon::encode(editor::psxmon::Ping, {});
     const std::vector<uint8_t> load = editor::psxmon::encode(editor::psxmon::Load, {0x10, 0x8001, 3, 0, 0x0201, 0x03});
     CHECK(ping == std::vector<uint8_t>({0x00, 0xaa, 0x55, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x02, 0x00}));
