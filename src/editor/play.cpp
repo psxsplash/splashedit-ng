@@ -32,6 +32,7 @@ PlayTools loadPlayTools(const fs::path& file) {
         if (key == "redux") t.redux = p;
         else if (key == "psxsplash") t.psxsplash = p;
         else if (key == "bios") t.bios = p;
+        else if (key == "disc") t.disc = p;
     }
     return t;
 }
@@ -42,7 +43,8 @@ bool savePlayTools(const fs::path& file, const PlayTools& t) {
     std::ofstream out(file, std::ios::binary);
     out << "redux=" << utf8(t.redux) << "\n"
         << "psxsplash=" << utf8(t.psxsplash) << "\n"
-        << "bios=" << utf8(t.bios) << "\n";
+        << "bios=" << utf8(t.bios) << "\n"
+        << "disc=" << utf8(t.disc) << "\n";
     return bool(out);
 }
 
@@ -91,9 +93,11 @@ PlayTools withDefaults(PlayTools t, const fs::path& bundle) {
     fromEnv(t.redux, "SPLASHEDIT_REDUX");
     fromEnv(t.psxsplash, "SPLASHEDIT_PSXSPLASH");
     fromEnv(t.bios, "SPLASHEDIT_BIOS");
+    fromEnv(t.disc, "SPLASHEDIT_DISC_ENGINE");
     fromBundle(t.redux, bundle,
                {"redux/pcsx-redux.exe", "redux/PCSX-Redux.app/Contents/MacOS/PCSX-Redux", "redux/pcsx-redux"});
     fromBundle(t.psxsplash, bundle, {"engine/psxsplash.ps-exe"});
+    fromBundle(t.disc, bundle, {"engine/psxsplash-cdrom.ps-exe"});
     if (t.redux.empty()) t.redux = onPath("pcsx-redux");
     return t;
 }
@@ -108,6 +112,14 @@ std::vector<std::string> missingTools(const PlayTools& t) {
     need(t.redux, "pcsx-redux");
     need(t.psxsplash, "The psxsplash build (.ps-exe)");
     if (!t.bios.empty() && !fs::is_regular_file(t.bios, ec)) out.push_back("BIOS not found: " + utf8(t.bios));
+    return out;
+}
+
+std::vector<std::string> missingDiscTools(const PlayTools& t) {
+    std::vector<std::string> out;
+    std::error_code ec;
+    if (t.disc.empty()) out.push_back("The psxsplash disc build (.ps-exe) is not set.");
+    else if (!fs::is_regular_file(t.disc, ec)) out.push_back("The psxsplash disc build not found: " + utf8(t.disc));
     return out;
 }
 

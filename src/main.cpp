@@ -85,6 +85,8 @@ struct Args {
     // --drop <file>@x,y releases a file there after the scripted input;
     // --drag-over x,y holds a dragged file there for the whole run.
     std::string dropFile;
+    // --export-to <file.bin>: Export writes there instead of asking.
+    std::string exportTo;
     float dropX = -1, dropY = -1;
     float dragX = -1, dragY = -1;
 };
@@ -229,6 +231,7 @@ Args parse(int argc, char** argv) {
         else if (!std::strcmp(argv[i], "--project")) a.project = next();
         else if (!std::strcmp(argv[i], "--scene")) a.scene = next();
         else if (!std::strcmp(argv[i], "--select")) a.select = next();
+        else if (!std::strcmp(argv[i], "--export-to")) a.exportTo = next();
         else if (!std::strcmp(argv[i], "--click") || !std::strcmp(argv[i], "--dblclick")) {
             Action act(!std::strcmp(argv[i], "--click") ? Action::Click : Action::DoubleClick);
             std::sscanf(next(), "%f,%f,%d", &act.x0, &act.y0, &act.button);
@@ -389,6 +392,7 @@ int main(int argc, char** argv) {
     mockup::State state;
     state.viewMode = args.viewMode;
     state.play.bundleDir = baseDir();
+    state.play.exportTo = std::filesystem::path(std::u8string(args.exportTo.begin(), args.exportTo.end()));
     // Play's tool paths persist per user; screenshot runs read only the environment.
     if (!args.screenshot) {
         if (char* pref = SDL_GetPrefPath("psxsplash", "splashedit")) {

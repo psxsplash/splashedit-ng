@@ -87,6 +87,20 @@ directory as `scene_0.*`, the names the PCdrv loader opens.
 
     boot/boot.sh <pcsx-redux> <openbios.bin> <psxsplash.ps-exe> <dir>/scene shot.png [frame]
 
+`boot/discboot.sh` does the same for a disc image from `splashpack-cli disc` (a CD-ROM build of
+psxsplash, `make LOADER=cdrom`), booted from its .cue through the BIOS and SYSTEM.CNF.
+
+    boot/discboot.sh <pcsx-redux> <openbios.bin> image.cue shot.png [frame]
+
+Courtyard at frame 900 is pixel-identical between the disc and the PCdrv boot.
+
+`disccheck.py` builds a disc of the courtyard example with stand-in engines and reads it back: sync,
+BCD address, subheader, EDC on every sector, P/Q parity on a sample (recomputed in Python from the
+Reed-Solomon generator), the ISO 9660 tree, SYSTEM.CNF in the first root sector, and the scene files
+byte-equal to `export --lua-bytecode`. A PCdrv engine must be refused.
+
+    python3 disccheck.py <splashpack-cli>
+
 Without nav regions psxsplash does not attach the camera to the player, so the camera stays at the
 origin facing +Z and the player start in the file has no effect. Put the objects at positive Z.
 

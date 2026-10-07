@@ -115,12 +115,16 @@ static void togglePlay(State& st, const editor::Document& doc) {
     p.peakScene = doc.loadId();
     if (!editor::missingTools(editor::withDefaults(p.tools, p.bundleDir)).empty()) {
         p.openSetup = true;
+        p.setupForExport = false;
         return;
     }
     p.build = std::async(std::launch::async, [scene = doc.scene(), root = doc.projectRoot()] {
         return editor::exportForPlay(scene, root, playDir());
     });
 }
+
+// Ctrl+B and the Export button: ask where the disc image goes, then build it.
+static void startExport(State& st, const editor::Document& doc);
 
 static void updatePlay(State& st) {
     State::Play& p = st.play;
@@ -197,7 +201,10 @@ static void playSetup(State& st, const editor::Document& doc, ImVec2 size) {
         std::lock_guard<std::mutex> lock(g_pickMutex);
         if (g_pickWhich >= 0) {
             std::filesystem::path picked(std::u8string(g_pickPath.begin(), g_pickPath.end()));
-            (g_pickWhich == 0 ? p.tools.redux : g_pickWhich == 1 ? p.tools.psxsplash : p.tools.bios) = picked;
+            (g_pickWhich == 0   ? p.tools.redux
+             : g_pickWhich == 1 ? p.tools.psxsplash
+             : g_pickWhich == 2 ? p.tools.bios
+                                : p.tools.disc) = picked;
             if (!p.settingsFile.empty()) editor::savePlayTools(p.settingsFile, p.tools);
             g_pickWhich = -1;
         }
@@ -220,10 +227,12 @@ static void playSetup(State& st, const editor::Document& doc, ImVec2 size) {
     const ImVec2 o = ImGui::GetCursorScreenPos();
     const float inner = w - space::lg * 2;
     float y = o.y;
-    text(dl, ImVec2(o.x, y), f.semibold, type::title, color::text, "Set up Play");
+    const bool forExport = p.setupForExport;
+    text(dl, ImVec2(o.x, y), f.semibold, type::title, color::text, forExport ? "Set up Export" : "Set up Play");
     y += 24;
     text(dl, ImVec2(o.x, y), f.regular, type::label, color::textDim,
-         "Play exports the scene and boots it in pcsx-redux on your psxsplash build.");
+         forExport ? "Export puts the scene on a disc image with the CD-ROM build of psxsplash."
+                   : "Play exports the scene and boots it in pcsx-redux on your psxsplash build.");
     y += 30;
 
     const editor::PlayTools eff = editor::withDefaults(p.tools, p.bundleDir);
@@ -234,10 +243,14 @@ static void playSetup(State& st, const editor::Document& doc, ImVec2 size) {
         const char* filter;
     } rows[] = {{"pcsx-redux", &eff.redux, false, nullptr},
                 {"psxsplash build", &eff.psxsplash, false, "ps-exe"},
-                {"BIOS", &eff.bios, true, "bin"}};
+                {"BIOS", &eff.bios, true, "bin"},
+                {"psxsplash disc build", &eff.disc, false, "ps-exe"}};
     static const SDL_DialogFileFilter exeFilter[] = {{"PlayStation executable", "ps-exe;exe"}};
     static const SDL_DialogFileFilter biosFilter[] = {{"BIOS image", "bin;rom"}};
-    for (int i = 0; i < 3; ++i) {
+    // Each popup lists what its own action runs.
+    const int shown[2][3] = {{0, 1, 2}, {3, -1, -1}};
+    for (int i : shown[forExport]) {
+        if (i < 0) continue;
         const Row& r = rows[i];
         ImGui::PushID(i);
         const float rowH = 44;
@@ -261,7 +274,7 @@ static void playSetup(State& st, const editor::Document& doc, ImVec2 size) {
         const float bw = buttonWidth(icon::folderOpen, "Locate");
         if (button("locate", ImVec2(o.x + inner - bw - space::sm, y + (rowH - size::field - 6) * 0.5f), icon::folderOpen, "Locate",
                    ButtonKind::Secondary)) {
-            const SDL_DialogFileFilter* flt = i == 1 ? exeFilter : i == 2 ? biosFilter : nullptr;
+            const SDL_DialogFileFilter* flt = i == 1 || i == 3 ? exeFilter : i == 2 ? biosFilter : nullptr;
             SDL_ShowOpenFileDialog(onToolPicked, reinterpret_cast<void*>(static_cast<intptr_t>(i)), nullptr, flt, flt ? 1 : 0,
                                    nullptr, false);
         }
@@ -269,13 +282,16 @@ static void playSetup(State& st, const editor::Document& doc, ImVec2 size) {
         y += rowH + space::sm;
     }
     y += space::sm;
-    const bool ready = editor::missingTools(eff).empty();
-    const float pw = buttonWidth(icon::play, "Play"), cw = buttonWidth(icon::x, "Cancel");
+    const bool ready = (forExport ? editor::missingDiscTools(eff) : editor::missingTools(eff)).empty();
+    const char* goIcon = forExport ? icon::package : icon::play;
+    const char* goLabel = forExport ? "Export" : "Play";
+    const float pw = buttonWidth(goIcon, goLabel), cw = buttonWidth(icon::x, "Cancel");
     float bx = o.x + inner - pw;
     if (ready) {
-        if (button("go", ImVec2(bx, y), icon::play, "Play", ButtonKind::Primary)) {
+        if (button("go", ImVec2(bx, y), goIcon, goLabel, ButtonKind::Primary)) {
             ImGui::CloseCurrentPopup();
-            togglePlay(st, doc);
+            if (forExport) startExport(st, doc);
+            else togglePlay(st, doc);
         }
     }
     if (button("cancel", ImVec2(bx - cw - space::sm, y), icon::x, "Cancel", ButtonKind::Ghost)) ImGui::CloseCurrentPopup();
@@ -343,7 +359,9 @@ static ImRect titleBar(State& st, ImDrawList* dl, ImVec2 size, editor::Document&
     const char* playLabel = playing ? "Stop" : building ? "Building" : "Play";
     wPlay = width(playIcon, playLabel);
     wRun = width(icon::cpu, "Run on hardware");
-    wExport = width(icon::package, "Export");
+    const bool exporting = st.play.disc.valid();
+    const char* exportLabel = exporting ? "Exporting" : "Export";
+    wExport = width(icon::package, exportLabel);
     float total = wPlay + wRun + wExport + space::sm * 2;
     float ax = std::floor(size.x * 0.5f + 90 - total * 0.5f);
     float ay = bar.Min.y + (bar.GetHeight() - (size::field + 6)) * 0.5f;
@@ -352,8 +370,9 @@ static ImRect titleBar(State& st, ImDrawList* dl, ImVec2 size, editor::Document&
         togglePlay(st, doc);
     button("run", ImVec2(ax + wPlay + space::sm, ay), icon::cpu, "Run on hardware", ButtonKind::Secondary, nullptr,
            "Upload to a console over serial (Ctrl+F5)");
-    button("export", ImVec2(ax + wPlay + wRun + space::sm * 2, ay), icon::package, "Export", ButtonKind::Ghost, nullptr,
-           "Build a disc image (Ctrl+B)");
+    if (button("export", ImVec2(ax + wPlay + wRun + space::sm * 2, ay), icon::package, exportLabel, ButtonKind::Ghost, nullptr,
+               "Build a disc image (Ctrl+B)"))
+        startExport(st, doc);
 
     // Undo / redo just left of the window controls.
     float rx = size.x - 46 * 3 - space::sm;
@@ -709,7 +728,7 @@ static float centerY(ImFont* font, float size, float y0, float y1) {
 }
 
 // File dialogs answer on their own thread; the result is picked up next frame.
-enum class FileAsk { None, NewFolder, Open, SaveAs };
+enum class FileAsk { None, NewFolder, Open, SaveAs, ExportDisc };
 static std::mutex g_fileMutex;
 static FileAsk g_fileAsk = FileAsk::None;
 static std::string g_filePath;
@@ -722,6 +741,51 @@ static void SDLCALL onFilePicked(void* kind, const char* const* files, int) {
 }
 
 static const SDL_DialogFileFilter kSceneFilter[] = {{"psxsplash scene", "scene"}};
+static const SDL_DialogFileFilter kDiscFilter[] = {{"Disc image", "bin"}};
+
+static void buildDisc(State& st, const editor::Document& doc, std::filesystem::path bin) {
+    State::Play& p = st.play;
+    if (bin.extension() != ".bin") bin += ".bin";
+    p.discOut = bin;
+    p.disc = std::async(std::launch::async, [scene = doc.scene(), root = doc.projectRoot(),
+                                             engine = editor::withDefaults(p.tools, p.bundleDir).disc, bin,
+                                             title = doc.sceneStem()] {
+        return splash::exportDisc(scene, root, engine, bin, title);
+    });
+}
+
+static void startExport(State& st, const editor::Document& doc) {
+    State::Play& p = st.play;
+    if (p.disc.valid() || doc.projectRoot().empty()) return;
+    if (!editor::missingDiscTools(editor::withDefaults(p.tools, p.bundleDir)).empty()) {
+        p.openSetup = true;
+        p.setupForExport = true;
+        return;
+    }
+    if (!p.exportTo.empty()) {
+        buildDisc(st, doc, p.exportTo);
+        return;
+    }
+    const std::string loc = utf8(doc.projectRoot() / (doc.sceneStem() + ".bin"));
+    SDL_ShowSaveFileDialog(onFilePicked, reinterpret_cast<void*>(static_cast<intptr_t>(FileAsk::ExportDisc)), nullptr, kDiscFilter,
+                           1, loc.c_str());
+}
+
+// Reports a finished Export in the status bar.
+static void updateExport(State& st) {
+    State::Play& p = st.play;
+    if (!p.disc.valid() || p.disc.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return;
+    splash::DiscResult r = p.disc.get();
+    if (!r.exported.ok()) {
+        notify(st, "Export failed: " + r.exported.errors.front(), true);
+        return;
+    }
+    char size[32];
+    std::snprintf(size, sizeof size, "%.1f MB", r.disc.sectors * double(splash::kRawSectorSize) / (1024.0 * 1024.0));
+    std::filesystem::path cue = p.discOut;
+    cue.replace_extension(".cue");
+    notify(st, "Disc image written: " + utf8(p.discOut.filename()) + " + " + utf8(cue.filename()) + " (" + size + ")", false);
+}
 
 // Opens `file` as the document. The scene is parsed first, so a file that does
 // not load leaves the open document as it was.
@@ -826,6 +890,8 @@ static void filesPending(State& st, editor::Document& doc) {
             return;
         }
         if (openScene(st, doc, path / made.scene)) notify(st, "Created project " + utf8(path.filename()), false);
+    } else if (ask == FileAsk::ExportDisc) {
+        buildDisc(st, doc, path);
     } else if (ask == FileAsk::SaveAs) {
         std::optional<std::filesystem::path> rel = editor::sceneInProject(doc.projectRoot(), path);
         if (!rel) {
@@ -974,6 +1040,7 @@ static std::vector<MenuEntry> menuEntries(int which, State& st, editor::Document
             break;
         case 3:  // Build
             m.push_back(item(st.play.emu.running() ? "Stop" : "Play", "F5", !st.play.build.valid(), [&] { togglePlay(st, doc); }));
+            m.push_back(item("Export Disc Image...", "Ctrl+B", !st.play.disc.valid(), [&] { startExport(st, doc); }));
             break;
         case 4:  // View
             m.push_back(item("Hand", "Q", true, [&] { st.tool = 0; }, st.tool == 0));
@@ -3317,6 +3384,7 @@ static void shortcuts(State& st, editor::Document& doc) {
     if (ctrl && !shift && pressed(ImGuiKey_F)) st.focusTreeFilter = true;
     if (!ctrl && pressed(ImGuiKey_F5)) togglePlay(st, doc);
     if (ctrl && !shift && pressed(ImGuiKey_S)) saveDoc(st, doc);
+    if (ctrl && !shift && pressed(ImGuiKey_B)) startExport(st, doc);
     if (ctrl && shift && pressed(ImGuiKey_S) && !doc.projectRoot().empty()) saveDocAs(doc);
     if (ctrl && !shift && pressed(ImGuiKey_N)) request(st, doc, State::Pending::New);
     if (ctrl && !shift && pressed(ImGuiKey_O)) request(st, doc, State::Pending::Open);
@@ -3328,6 +3396,7 @@ ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view,
     shortcuts(st, doc);
     st.live.update(doc, ImGui::GetTime());
     updatePlay(st);
+    updateExport(st);
     ImGui::SetNextWindowPos(ImVec2(0, 0));
     ImGui::SetNextWindowSize(size);
     ImGui::Begin("##main", nullptr,

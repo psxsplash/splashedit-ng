@@ -13,6 +13,7 @@
 
 #include "luacompile.hh"
 #include "audio.hh"
+#include "disc.hh"
 #include "font.hh"
 #include "import.hh"
 #include "splashpack.hh"
@@ -56,6 +57,8 @@ static int usage() {
                  "  loads and saves a scene or mesh file\n"
                  "usage: splashpack-cli luac <in.lua> -o <out.luac>\n"
                  "  compiles one Lua file to PS1 bytecode, as --lua-bytecode does\n"
+                 "usage: splashpack-cli disc <scene> --engine <psxsplash.ps-exe> -o <out.bin> [--project <dir>]\n"
+                 "  builds a bootable disc image (.bin + .cue) of one scene; the engine is a LOADER=cdrom build\n"
                  "usage: splashpack-cli font <font.ttf> --size <px> -o <sheet.png>\n"
                  "       splashpack-cli font <bitmap.png> --cell <w>x<h> -o <sheet.png>\n"
                  "  builds one UI font sheet the way export does and prints its cell size and height\n");
@@ -253,7 +256,39 @@ static int font(int argc, char** argv) {
     }
 }
 
+static int discCmd(int argc, char** argv) {
+    std::string scenePath, outPath, project, engine;
+    for (int i = 2; i < argc; i++) {
+        std::string a = argv[i];
+        if (a == "-o" && i + 1 < argc)
+            outPath = argv[++i];
+        else if (a == "--project" && i + 1 < argc)
+            project = argv[++i];
+        else if (a == "--engine" && i + 1 < argc)
+            engine = argv[++i];
+        else if (scenePath.empty())
+            scenePath = a;
+        else
+            return usage();
+    }
+    if (scenePath.empty() || outPath.empty() || engine.empty()) return usage();
+    try {
+        splash::Scene scene = splash::loadScene(scenePath);
+        fs::path root = project.empty() ? fs::path(scenePath).parent_path() : fs::path(project);
+        splash::DiscResult r = splash::exportDisc(scene, root, engine, outPath, fs::path(scenePath).stem().string());
+        for (auto& m : r.exported.warnings) std::fprintf(stderr, "warning: %s\n", m.c_str());
+        for (auto& m : r.exported.errors) std::fprintf(stderr, "error: %s\n", m.c_str());
+        if (!r.exported.ok()) return 1;
+        std::printf("%s sectors=%u\n", outPath.c_str(), r.disc.sectors);
+        return 0;
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "error: %s\n", e.what());
+        return 1;
+    }
+}
+
 int main(int argc, char** argv) {
+    if (argc >= 2 && std::strcmp(argv[1], "disc") == 0) return discCmd(argc, argv);
     if (argc >= 2 && std::strcmp(argv[1], "font") == 0) return font(argc, argv);
     if (argc >= 2 && std::strcmp(argv[1], "texstats") == 0) return texstats(argc, argv);
     if (argc >= 2 && std::strcmp(argv[1], "import") == 0) return importCmd(argc, argv);
