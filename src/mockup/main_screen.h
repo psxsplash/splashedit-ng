@@ -66,7 +66,8 @@ struct State {
         std::future<splash::ExportResult> build;
         Emulator emu;
         GameView game;            // what redux shows, once it has published a frame
-        bool showGame = false;    // viewport shows the game rather than the scene
+        bool gameFocus = false;   // the Game view has the keyboard (a click in either view moves it)
+        float split = 0.5f;       // share of the viewport the Scene view keeps while the game runs
         uint64_t startedAt = 0;   // SDL ticks when redux started, to notice it never publishing
         std::string message;  // why the last Play did not start, for the status bar
         bool openSetup = false, openOutput = false;
