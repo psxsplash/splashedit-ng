@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 
+#include "disc.hh"
 #include "unitymath.hh"
 #include "editor/live_export.hh"
 #include "editor/play.hh"
@@ -68,6 +69,12 @@ struct State {
         uint64_t startedAt = 0;   // SDL ticks when redux started, to notice it never publishing
         std::string message;  // why the last Play did not start, for the status bar
         bool openSetup = false, openOutput = false;
+        // Export (Ctrl+B): a disc image built in the background, where it goes,
+        // and whether the setup popup was opened for it rather than for Play.
+        std::future<splash::DiscResult> disc;
+        std::filesystem::path discOut;
+        bool setupForExport = false;
+        std::filesystem::path exportTo;  // screenshot mode: write here instead of asking
         // What the engine reported using in the last Play of scene `peakScene`
         // (Document::loadId), kept after it stops.
         std::optional<editor::RenderPeak> peak;

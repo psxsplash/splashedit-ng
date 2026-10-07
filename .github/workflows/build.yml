@@ -7,7 +7,8 @@ on:
 
 jobs:
   # psxsplash.ps-exe is MIPS code, identical on every OS, so it is built once
-  # and shipped in each package.
+  # and shipped in each package: the PCdrv build Play boots, and the CD-ROM
+  # build (psxsplash-cdrom.ps-exe) Export puts on a disc.
   engine:
     runs-on: ubuntu-24.04
     steps:
@@ -20,11 +21,20 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y g++-mipsel-linux-gnu
       - name: Build
-        run: make -j4 PREFIX=mipsel-linux-gnu FORMAT=elf32-tradlittlemips
+        run: |
+          make -j4 LOADER=cdrom PREFIX=mipsel-linux-gnu FORMAT=elf32-tradlittlemips
+          # make clean deletes every *.ps-exe, so park the CD-ROM build elsewhere.
+          mv psxsplash.ps-exe ../psxsplash-cdrom
+          make clean
+          make -j4 PREFIX=mipsel-linux-gnu FORMAT=elf32-tradlittlemips
+          mv ../psxsplash-cdrom psxsplash-cdrom.ps-exe
+          test -f psxsplash.ps-exe && test -f psxsplash-cdrom.ps-exe
       - uses: actions/upload-artifact@v4
         with:
           name: engine
-          path: psxsplash.ps-exe
+          path: |
+            psxsplash.ps-exe
+            psxsplash-cdrom.ps-exe
 
   build:
     needs: engine
@@ -61,6 +71,7 @@ jobs:
           "$py" tests/lightcheck.py "$cli"
           "$py" tests/interactcheck.py "$cli"
           "$py" tests/importcheck.py "$cli"
+          "$py" tests/disccheck.py "$cli"
       - name: Editor tests
         run: ctest --test-dir build -C Release --output-on-failure
       # One download: the editor with its assets, the example project, the
@@ -100,6 +111,7 @@ jobs:
           cp -R examples/courtyard pkg/examples/
           ls -R pkg | head -40
           test -f pkg/engine/psxsplash.ps-exe
+          test -f pkg/engine/psxsplash-cdrom.ps-exe
           test -f pkg/redux/pcsx-redux.exe || test -f pkg/redux/pcsx-redux || test -d pkg/redux/PCSX-Redux.app
           # upload-artifact drops the executable bit, so Linux and macOS ship a tarball.
           mv pkg splashedit

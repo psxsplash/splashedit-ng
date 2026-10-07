@@ -677,10 +677,11 @@ void testPlay() {
     editor::PlayTools t;
     t.redux = fs::path(u8"/opt/rédux/pcsx-redux");
     t.psxsplash = "/x/psxsplash.ps-exe";
+    t.disc = "/x/psxsplash-cdrom.ps-exe";
     CHECK(editor::savePlayTools(cfg, t));
     { std::ofstream(cfg, std::ios::app) << "colour=blue\nnot a pair\n"; }
     editor::PlayTools l = editor::loadPlayTools(cfg);
-    CHECK(l.redux == t.redux && l.psxsplash == t.psxsplash && l.bios.empty());
+    CHECK(l.redux == t.redux && l.psxsplash == t.psxsplash && l.bios.empty() && l.disc == t.disc);
     editor::PlayTools none = editor::loadPlayTools(dir / "absent.cfg");
     CHECK(none.redux.empty() && none.psxsplash.empty());
 
@@ -699,14 +700,21 @@ void testPlay() {
     fs::create_directories(bundle / "engine");
     std::ofstream(bundle / "redux" / "pcsx-redux") << "x";
     std::ofstream(bundle / "engine" / "psxsplash.ps-exe") << "x";
+    CHECK(!editor::missingDiscTools(editor::withDefaults({}, bundle)).empty());
+    std::ofstream(bundle / "engine" / "psxsplash-cdrom.ps-exe") << "x";
+    setEnv("SPLASHEDIT_DISC_ENGINE", "/env/psxsplash-cdrom.ps-exe");
     editor::PlayTools envWins = editor::withDefaults({}, bundle);
-    CHECK(envWins.redux == fs::path("/env/pcsx-redux") && envWins.psxsplash == fs::path("/env/psxsplash.ps-exe"));
+    CHECK(envWins.redux == fs::path("/env/pcsx-redux") && envWins.psxsplash == fs::path("/env/psxsplash.ps-exe") &&
+          envWins.disc == fs::path("/env/psxsplash-cdrom.ps-exe"));
     setEnv("SPLASHEDIT_PSXSPLASH", "");
     setEnv("SPLASHEDIT_REDUX", "");
+    setEnv("SPLASHEDIT_DISC_ENGINE", "");
     editor::PlayTools fromBundle = editor::withDefaults({}, bundle);
     CHECK(fromBundle.redux == bundle / "redux" / "pcsx-redux" &&
-          fromBundle.psxsplash == bundle / "engine" / "psxsplash.ps-exe");
+          fromBundle.psxsplash == bundle / "engine" / "psxsplash.ps-exe" &&
+          fromBundle.disc == bundle / "engine" / "psxsplash-cdrom.ps-exe");
     CHECK(editor::missingTools(fromBundle).empty());
+    CHECK(editor::missingDiscTools(fromBundle).empty());
     editor::PlayTools empty = editor::withDefaults({}, dir / "nothing-here");
     CHECK(empty.psxsplash.empty());
 
