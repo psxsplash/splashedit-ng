@@ -35,14 +35,22 @@ enum : uint16_t {
     Stopped = 0x81,
 };
 
+// PONG capability bit: the monitor is entered from slot 4 of the kernel's
+// exception handler, so it still sees a program's `break` after psyqo has
+// emptied the kernel's handler chains. psxsplash uses break calls for its
+// files exactly when this is set (pcdrv_handler.hh), and its own SIO1
+// protocol otherwise.
+constexpr uint16_t kCapSlot = 0x0004;
+
 uint32_t fletcher(const uint16_t* words, size_t count);
 // The whole frame as it goes on the wire, leading 0x00 included.
 std::vector<uint8_t> encode(uint16_t type, const std::vector<uint16_t>& payload);
 
 }  // namespace psxmon
 
-// PINGs for up to `timeoutMs`; true once the console answers PONG.
-bool psxmonPresent(Link& link, int timeoutMs);
+// PINGs for up to `timeoutMs`; true once the console answers PONG, with its
+// capability bits in *caps.
+bool psxmonPresent(Link& link, int timeoutMs, uint16_t* caps = nullptr);
 
 // Loads `exe` (a whole PS-X EXE file) and runs it. The console must already
 // have answered a PING. False with *err when a frame is refused or not answered.

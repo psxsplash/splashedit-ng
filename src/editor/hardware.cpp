@@ -81,7 +81,8 @@ void HardwareRun::start(Opener open, std::filesystem::path exe, std::filesystem:
         phase_ = Phase::Uploading;
         // psxmon answers a PING; anything else is taken to be the Unirom shell,
         // which ignores the PING frames as unknown command text.
-        const bool monitor = psxmonPresent(*link, 1500);
+        uint16_t caps = 0;
+        const bool monitor = psxmonPresent(*link, 1500, &caps);
         add(monitor ? "Uploading psxsplash through psxmon..." : "Uploading psxsplash through Unirom...");
         auto progress = [this](int p) { progress_ = p; };
         if (!(monitor ? psxmonUpload(*link, bytes, &err, progress, &cancel_)
@@ -97,10 +98,12 @@ void HardwareRun::start(Opener open, std::filesystem::path exe, std::filesystem:
         PcdrvHost host(dir);
         auto line = [this](const std::string& l) { add(l); };
         auto event = [this](const std::string& e) { add("[file] " + e); };
-        // Under psxmon the program asks for files with break calls the monitor
-        // stops on; at the Unirom shell it speaks psxsplash's own SIO1 protocol.
-        const bool ok = monitor ? psxmonServe(*link, host, cancel_, line, event, &err)
-                                : host.serve(*link, cancel_, line, event, &err);
+        // Under a psxmon entered from the exception handler's slot, psxsplash
+        // asks for files with break calls the monitor stops on; anywhere else
+        // it speaks its own SIO1 protocol.
+        const bool breaks = monitor && (caps & psxmon::kCapSlot);
+        const bool ok = breaks ? psxmonServe(*link, host, cancel_, line, event, &err)
+                               : host.serve(*link, cancel_, line, event, &err);
         if (!ok && !cancel_) return fail(err);
         phase_ = Phase::Stopped;
     });

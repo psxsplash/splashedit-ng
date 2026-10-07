@@ -1243,6 +1243,7 @@ struct FakeMonitor {
     uint32_t pc = 0, gp = 0, sp = 0;
     int pings = 0;
     bool refuseFirstLoad = false;
+    uint16_t caps = 0x0007;
 
     bool frame(uint16_t* type, std::vector<uint16_t>* words) {
         uint8_t b = 1;
@@ -1279,7 +1280,7 @@ struct FakeMonitor {
             auto u32 = [&](size_t i) { return uint32_t(w[i]) | uint32_t(w[i + 1]) << 16; };
             if (type == editor::psxmon::Ping) {
                 ++pings;
-                reply(editor::psxmon::Pong, {2, 0x0003, 0x1234, 0x5678});
+                reply(editor::psxmon::Pong, {2, caps, 0x1234, 0x5678});
             } else if (type == editor::psxmon::Load) {
                 if (refuseFirstLoad) {
                     refuseFirstLoad = false;
@@ -1436,7 +1437,8 @@ void testPsxmon() {
     });
     std::string err;
     std::vector<int> progress;
-    CHECK(editor::psxmonPresent(hostEnd, 2000));
+    uint16_t caps = 0;
+    CHECK(editor::psxmonPresent(hostEnd, 2000, &caps) && caps == 0x0007);
     CHECK(editor::psxmonUpload(hostEnd, exe, &err, [&](int p) { progress.push_back(p); }));
     if (!err.empty()) std::fprintf(stderr, "psxmon upload: %s\n", err.c_str());
     std::vector<std::string> lines, events;
@@ -1520,6 +1522,48 @@ class Borrowed : public editor::Link {
   private:
     editor::Link& l_;
 };
+
+// HardwareRun picks the file protocol from the monitor's caps: break calls
+// with the slot, psxsplash's SIO1 protocol without it.
+void runHardwarePsxmon(uint16_t caps) {
+    namespace fs = std::filesystem;
+    const fs::path dir = g_outDir / "hwrun-psxmon";
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+    std::ofstream(dir / "scene_0.splashpack", std::ios::binary) << "scene";
+    std::vector<uint8_t> exe(0x800 + 64);
+    std::memcpy(exe.data(), "PS-X EXE", 8);
+    const fs::path exePath = dir / "engine.ps-exe";
+    std::ofstream(exePath, std::ios::binary).write(reinterpret_cast<const char*>(exe.data()), exe.size());
+
+    Pipe toConsole, toHost;
+    PipeEnd hostEnd(toHost, toConsole), consoleEnd(toConsole, toHost);
+    FakeMonitor mon{FakeConsole{consoleEnd, 1, {}, {}, 0, 0}};
+    mon.caps = caps;
+    int32_t h = -9;
+    std::thread console([&] {
+        if (!mon.session("")) return;
+        if (caps & editor::psxmon::kCapSlot) {
+            h = mon.pcOpen("scene_0.splashpack");
+        } else {
+            uint32_t u = 0;
+            if (mon.con.open("scene_0.splashpack", &u)) h = int32_t(u);
+        }
+    });
+    editor::HardwareRun run;
+    run.start([&](std::string*) { return std::make_unique<Borrowed>(hostEnd); }, exePath, dir);
+    console.join();
+    for (int i = 0; i < 300; ++i) {
+        auto l = run.lines();
+        if (std::find(l.begin(), l.end(), "[file] open scene_0.splashpack -> 3") != l.end()) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    auto l = run.lines();
+    CHECK(h == 3 && std::find(l.begin(), l.end(), "Uploading psxsplash through psxmon...") != l.end());
+    CHECK(mon.con.problems.empty());
+    run.stop();
+    consoleEnd.close();
+}
 
 void testHardwareRun() {
     namespace fs = std::filesystem;
@@ -1617,6 +1661,8 @@ int main(int argc, char** argv) {
     testUnirom();
     testPsxmon();
     testHardwareRun();
+    runHardwarePsxmon(0x0007);
+    runHardwarePsxmon(0x0001);
     if (g_failures) {
         std::fprintf(stderr, "editor_tests: %d of %d checks failed\n", g_failures, g_checks);
         return 1;

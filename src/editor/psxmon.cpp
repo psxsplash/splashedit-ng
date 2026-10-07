@@ -154,14 +154,17 @@ bool command(Reader& r, uint16_t type, const std::vector<uint16_t>& payload, int
 
 }  // namespace
 
-bool psxmonPresent(Link& link, int timeoutMs) {
+bool psxmonPresent(Link& link, int timeoutMs, uint16_t* caps) {
     Reader r{link, {}, false, false, {}};
     const auto deadline = Clock::now() + std::chrono::milliseconds(timeoutMs);
     while (Clock::now() < deadline && !r.closed) {
         if (!send(link, psxmon::Ping, {})) return false;
         Frame f;
         const auto slice = std::min(deadline, Clock::now() + std::chrono::milliseconds(500));
-        if (r.wait({psxmon::Pong}, slice, &f) && f.ok) return true;
+        if (r.wait({psxmon::Pong}, slice, &f) && f.ok) {
+            if (caps) *caps = f.words.size() > 1 ? f.words[1] : 0;
+            return true;
+        }
     }
     return false;
 }
