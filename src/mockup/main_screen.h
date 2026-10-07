@@ -101,6 +101,20 @@ struct State {
     // Object > Align with View, done where the viewport has the camera.
     bool alignRequest = false;
 
+    // Scene panel: the filter text and a request to put the caret in it
+    // (Ctrl+F); a row being dragged onto a new parent; the context menu to
+    // open next frame (1 = the object at treeMenuPath, 2 = the panel's own
+    // menu) and where, with treeMenuRight anchoring its right edge there.
+    std::string treeFilter;
+    bool focusTreeFilter = false;
+    bool treeDragging = false;
+    std::vector<int> treeDragPath;
+    int treeMenu = 0;
+    int treeMenuShown = 0;
+    std::vector<int> treeMenuPath;
+    ImVec2 treeMenuPos;
+    bool treeMenuRight = false;
+
     // The title-bar menu that is open (index into File..Help), or -1.
     int menuOpen = -1;
     // Recently opened scenes (File menu), and an action held behind the

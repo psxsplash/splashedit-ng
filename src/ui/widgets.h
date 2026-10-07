@@ -50,7 +50,11 @@ bool iconButton(const char* id, ImRect r, const char* icon, bool toggled = false
 // Segmented control; returns new selection.
 int segmented(const char* id, ImVec2 pos, std::initializer_list<const char*> items, int selected, float* outWidth = nullptr);
 
-void searchField(const char* id, ImRect r, const char* placeholder, const char* shortcut = nullptr);
+// A text field with a search icon. With `query` it is editable: click to
+// type, Escape clears (a second one leaves), the x clears; `focus` puts the caret in it
+// this frame. Returns true while it has the keyboard.
+bool searchField(const char* id, ImRect r, const char* placeholder, const char* shortcut = nullptr, std::string* query = nullptr,
+                 bool focus = false);
 
 struct TreeRow {
     int depth = 0;
@@ -68,7 +72,8 @@ struct TreeRow {
 // With `visibilityClicked` the row draws an eye that sets it when clicked; the eye wins over the row.
 Hit treeRow(const char* id, ImRect r, const TreeRow& row, bool* visibilityClicked = nullptr);
 
-// Collapsible inspector section. Returns open state.
+// Collapsible inspector section: clicking the header opens or closes it. The
+// state is kept per id; `open` is how a section starts. Returns whether it is open.
 // A removable section's ellipsis opens a menu; `removed` is set when its
 // Remove component item is picked.
 bool section(const char* id, ImRect r, const char* icon, ImU32 iconColor, const char* title, bool open, bool enabled = true,

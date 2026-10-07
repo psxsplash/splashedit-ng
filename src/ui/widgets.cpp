@@ -182,22 +182,82 @@ int segmented(const char* id, ImVec2 pos, std::initializer_list<const char*> ite
     return result;
 }
 
-void searchField(const char* id, ImRect r, const char* placeholder, const char* shortcut) {
+static int resizeString(ImGuiInputTextCallbackData* d) {
+    if (d->EventFlag == ImGuiInputTextFlags_CallbackResize) {
+        auto* str = static_cast<std::string*>(d->UserData);
+        str->resize(static_cast<size_t>(d->BufTextLen));
+        d->Buf = str->data();
+    }
+    return 0;
+}
+
+bool searchField(const char* id, ImRect r, const char* placeholder, const char* shortcut, std::string* query, bool focus) {
     Fonts& f = fonts();
-    Hit h = interact(id, r);
     ImDrawList* dl = ImGui::GetWindowDrawList();
+    const float textX = r.Min.x + space::sm + 22;
+    // The clear button registers first so it wins over the field.
+    const bool hasText = query && !query->empty();
+    ImRect clear(ImVec2(r.Max.x - space::xs - 22, r.Min.y + 3), ImVec2(r.Max.x - space::xs, r.Max.y - 3));
+    Hit c{};
+    if (hasText) {
+        c = interact((std::string(id) + "#clear").c_str(), clear);
+        if (c.clicked) query->clear();
+    }
+    ImGuiID inputId = 0;
+    bool editing = false;
+    if (query) {
+        ImGui::PushID(id);
+        inputId = ImGui::GetID("##input");
+        ImGui::PopID();
+        editing = ImGui::GetActiveID() == inputId;
+    }
+    Hit h{};
+    if (!query) h = interact(id, r);
+    const bool hovered = query ? ImGui::IsMouseHoveringRect(r.Min, r.Max) : h.hovered;
     dl->AddRectFilled(r.Min, r.Max, color::field, radius::field + 1);
-    dl->AddRect(r.Min, r.Max, lerpColor(color::border, color::borderStrong, h.hover), radius::field + 1);
-    text(dl, ImVec2(r.Min.x + space::sm, centerY(f.medium, type::icon, r.Min.y, r.Max.y)), f.medium, type::icon - 1, color::textFaint,
-         icon::search);
-    text(dl, ImVec2(r.Min.x + space::sm + 22, centerY(f.regular, type::body, r.Min.y, r.Max.y)), f.regular, type::body,
-         color::textFaint, placeholder);
-    if (shortcut) {
+    dl->AddRect(r.Min, r.Max, editing ? color::accent : lerpColor(color::border, color::borderStrong, hovered ? 1.0f : h.hover),
+                radius::field + 1);
+    text(dl, ImVec2(r.Min.x + space::sm, centerY(f.medium, type::icon, r.Min.y, r.Max.y)), f.medium, type::icon - 1,
+         hasText || editing ? color::textDim : color::textFaint, icon::search);
+    if (query) {
+        const float right = hasText ? clear.Min.x : r.Max.x - space::sm;
+        float padY = centerY(f.regular, type::body, r.Min.y, r.Max.y) - r.Min.y;
+        ImGui::SetCursorScreenPos(ImVec2(textX, r.Min.y));
+        ImGui::PushFont(f.regular, type::body);
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0, padY));
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0.0f);
+        ImGui::PushStyleColor(ImGuiCol_FrameBg, 0u);
+        ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, 0u);
+        ImGui::PushStyleColor(ImGuiCol_FrameBgActive, 0u);
+        ImGui::PushStyleColor(ImGuiCol_Text, color::text);
+        ImGui::PushStyleColor(ImGuiCol_TextSelectedBg, rgb(0x8b7bff, 110));
+        ImGui::PushStyleColor(ImGuiCol_InputTextCursor, color::accentHover);
+        ImGui::PushStyleColor(ImGuiCol_NavCursor, 0u);
+        ImGui::SetNextItemWidth(std::max(8.0f, right - textX));
+        if (focus) ImGui::SetKeyboardFocusHere();
+        ImGui::PushID(id);
+        // Escape clears the text, then a second Escape leaves the field.
+        ImGui::InputText("##input", query->data(), query->capacity() + 1,
+                         ImGuiInputTextFlags_CallbackResize | ImGuiInputTextFlags_EscapeClearsAll, resizeString, query);
+        interactiveRects().push_back(r);
+        ImGui::PopID();
+        ImGui::PopStyleColor(7);
+        ImGui::PopStyleVar(2);
+        ImGui::PopFont();
+        editing = ImGui::GetActiveID() == inputId;
+    }
+    if (!query || (query->empty() && !editing))
+        text(dl, ImVec2(textX, centerY(f.regular, type::body, r.Min.y, r.Max.y)), f.regular, type::body, color::textFaint,
+             placeholder);
+    if (hasText) {
+        textCentered(dl, clear, f.medium, type::icon - 2, lerpColor(color::textFaint, color::text, c.hover), icon::x);
+    } else if (shortcut && !editing) {
         ImVec2 s = measure(f.medium, type::caption, shortcut);
         ImRect k(ImVec2(r.Max.x - space::sm - s.x - 10, r.Min.y + 5), ImVec2(r.Max.x - space::sm, r.Max.y - 5));
         dl->AddRect(k.Min, k.Max, color::borderStrong, radius::field);
         textCentered(dl, k, f.medium, type::caption, color::textFaint, shortcut);
     }
+    return editing;
 }
 
 Hit treeRow(const char* id, ImRect r, const TreeRow& row, bool* visibilityClicked) {
@@ -277,6 +337,13 @@ bool section(const char* id, ImRect r, const char* ic, ImU32 iconColor, const ch
         if (s.clicked) *toggled = true;
     }
     Hit h = interact(id, r);
+    ImGuiStorage* store = ImGui::GetStateStorage();
+    const ImGuiID openKey = ImGui::GetID((std::string(id) + "#open").c_str());
+    open = store->GetBool(openKey, open);
+    if (h.clicked) {
+        open = !open;
+        store->SetBool(openKey, open);
+    }
     dl->AddRectFilled(r.Min, r.Max, lerpColor(color::raised, color::hover, h.hover * 0.6f), radius::card,
                       open ? ImDrawFlags_RoundCornersTop : ImDrawFlags_RoundCornersAll);
     float x = r.Min.x + space::sm;
