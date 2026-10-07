@@ -175,13 +175,13 @@ static void updatePlay(State& st) {
     }
     p.linesSeen = p.emu.lineCount();
     if (p.emu.running()) {
-        if (!p.game.attached() && p.game.attach(p.emu.pid())) p.showGame = true;
+        if (!p.game.attached() && p.game.attach(p.emu.pid())) p.gameFocus = true;
         p.game.update();
         if (!p.game.attached() && p.message.empty() && SDL_GetTicks() - p.startedAt > 10000)
             p.message = "pcsx-redux started but shows nothing here; it needs -shmdisplay support";
     } else if (p.game.attached()) {
         p.game.detach();
-        p.showGame = false;
+        p.gameFocus = false;
     }
     if (!p.build.valid() || p.build.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return;
     splash::ExportResult r = p.build.get();
@@ -907,7 +907,7 @@ static bool openScene(State& st, editor::Document& doc, const std::filesystem::p
         return false;
     }
     st.play.emu.stop();
-    st.play.showGame = false;
+    st.play.gameFocus = false;
     if (auto err = doc.load(abs.parent_path(), abs.filename())) {
         notify(st, "Could not open " + name + ": " + *err, true);
         return false;
@@ -2427,7 +2427,7 @@ static void viewportInput(State& st, ImRect r, editor::Document& doc, viewport::
         st.followAt[0] = selAt.x, st.followAt[1] = selAt.y, st.followAt[2] = selAt.z;
     }
 
-    const bool keys = !io.WantTextInput && !(st.play.showGame && st.play.game.attached());
+    const bool keys = !io.WantTextInput && !(st.play.gameFocus && st.play.game.attached());
     if ((keys && io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_F, false)) || st.alignRequest) alignWithView(doc, view, flats);
     st.alignRequest = false;
     if ((keys && !io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_F, false)) || st.frameRequest) {
@@ -2453,8 +2453,8 @@ static void viewportInput(State& st, ImRect r, editor::Document& doc, viewport::
 }
 
 // The controller on port 1, from the keyboard and the first connected gamepad,
-// while the game has the viewport.
-static uint16_t hostPad() {
+// the keyboard only while the Game view has focus.
+static uint16_t hostPad(bool keyboard) {
     struct Map {
         ImGuiKey key;
         uint16_t bit;
@@ -2480,7 +2480,7 @@ static uint16_t hostPad() {
     uint16_t pad = 0xffff;
     for (const Map& m : gamepad)
         if (ImGui::IsKeyDown(m.key)) pad &= (uint16_t)~m.bit;
-    if (ImGui::GetIO().WantTextInput) return pad;
+    if (!keyboard || ImGui::GetIO().WantTextInput) return pad;
     for (const Map& m : map)
         if (ImGui::IsKeyDown(m.key)) pad &= (uint16_t)~m.bit;
     return pad;
@@ -2499,31 +2499,60 @@ static void gamePanel(State& st, ImDrawList* dl, ImRect r) {
         dl->AddImage((ImTextureID)(intptr_t)tex, g.Min, g.Max);
     else
         textCentered(dl, r, f.regular, type::body, color::textDim, "Waiting for pcsx-redux...");
-    p.game.setPads(hostPad(), 0xffff);
-    const char* info = "Arrows  ·  Z X A S  ·  Q W 1 2  ·  Enter Start  ·  Backspace Select";
+    // The keyboard is the controller only while the Game view has focus; a gamepad always is.
+    p.game.setPads(hostPad(p.gameFocus), 0xffff);
+    const char* label = "Game";
+    ImVec2 ls = measure(f.medium, type::label, label);
+    ImRect tag(r.Min + ImVec2(space::md, space::md), r.Min + ImVec2(space::md + ls.x + 20, space::md + 24));
+    dl->AddRectFilled(tag.Min, tag.Max, rgb(0x0e1014, 190), radius::pill);
+    textCentered(dl, tag, f.medium, type::label, p.gameFocus ? color::text : color::textDim, label);
+    const char* info = p.gameFocus ? "Arrows  ·  Z X A S  ·  Q W 1 2  ·  Enter Start  ·  Backspace Select"
+                                   : "Click to control the game with the keyboard";
     ImVec2 is = measure(f.regular, type::caption, info);
     ImRect chip(ImVec2(r.Min.x + space::md, r.Max.y - space::md - 24), ImVec2(r.Min.x + space::md + is.x + 20, r.Max.y - space::md));
     dl->AddRectFilled(chip.Min, chip.Max, rgb(0x0e1014, 190), radius::pill);
     textCentered(dl, chip, f.regular, type::caption, color::textDim, info);
+    if (p.gameFocus) dl->AddRect(r.Min, r.Max, color::accent, radius::window, 0, 2.0f);
 }
 
-// Scene / Game switch, top centre, while a game is running.
-static void viewSwitch(State& st, ImRect r) {
+// While a game runs the viewport splits in two, Scene and Game, both live: the
+// scene stays editable while the game plays. Side by side when there is room,
+// stacked otherwise; the bar between them drags. A click in either one gives it
+// the keyboard. Returns the Scene part.
+static ImRect splitViewport(State& st, ImDrawList* dl, ImRect r) {
     State::Play& p = st.play;
-    if (!p.game.attached()) return;
-    Fonts& f = fonts();
-    float sw = measure(f.medium, type::label, "Scene").x + measure(f.medium, type::label, "Game").x + space::md * 4 + 4;
-    ImVec2 pos(r.GetCenter().x - sw / 2, r.Min.y + space::md + 2);
-    p.showGame = segmented("sceneorgame", pos, {"Scene", "Game"}, p.showGame ? 1 : 0) == 1;
+    // Whichever way gives the 4:3 game the bigger picture at an even split.
+    const float g = size::gutter, w = r.GetWidth(), h = r.GetHeight();
+    const bool across = std::min((w - g) / 2, h * 4 / 3) > std::min(w, (h - g) / 2 * 4 / 3);
+    const float len = across ? w : h;
+    const float lo = 160, hi = std::max(lo, len - g - 160);
+    float at = std::clamp(len * p.split, lo, hi);
+    ImRect bar = across ? ImRect(ImVec2(r.Min.x + at, r.Min.y), ImVec2(r.Min.x + at + g, r.Max.y))
+                        : ImRect(ImVec2(r.Min.x, r.Min.y + at), ImVec2(r.Max.x, r.Min.y + at + g));
+    ImGui::SetCursorScreenPos(bar.Min);
+    ImGui::InvisibleButton("##vpsplit", ImMax(bar.GetSize(), ImVec2(1, 1)));
+    if (ImGui::IsItemHovered() || ImGui::IsItemActive())
+        ImGui::SetMouseCursor(across ? ImGuiMouseCursor_ResizeEW : ImGuiMouseCursor_ResizeNS);
+    if (ImGui::IsItemActive()) {
+        float d = across ? ImGui::GetIO().MouseDelta.x : ImGui::GetIO().MouseDelta.y;
+        at = std::clamp(at + d, lo, hi);
+        p.split = at / len;
+    }
+    ImRect scene = across ? ImRect(r.Min, ImVec2(r.Min.x + at, r.Max.y)) : ImRect(r.Min, ImVec2(r.Max.x, r.Min.y + at));
+    ImRect game = across ? ImRect(ImVec2(bar.Max.x, r.Min.y), r.Max) : ImRect(ImVec2(r.Min.x, bar.Max.y), r.Max);
+    if (ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem) &&
+        (ImGui::IsMouseClicked(ImGuiMouseButton_Left) || ImGui::IsMouseClicked(ImGuiMouseButton_Right) ||
+         ImGui::IsMouseClicked(ImGuiMouseButton_Middle))) {
+        if (game.Contains(ImGui::GetMousePos())) p.gameFocus = true;
+        if (scene.Contains(ImGui::GetMousePos())) p.gameFocus = false;
+    }
+    gamePanel(st, dl, game);
+    return scene;
 }
 
 static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document& doc, viewport::Ps1View& view) {
     Fonts& f = fonts();
-    if (st.play.showGame && st.play.game.attached()) {
-        gamePanel(st, dl, r);
-        viewSwitch(st, r);
-        return;
-    }
+    if (st.play.game.attached()) r = splitViewport(st, dl, r);
     view.clean = st.viewMode == 1;
     unsigned tex = view.render((int)r.GetWidth(), (int)r.GetHeight(), 240);
     dl->AddImageRounded((ImTextureID)(intptr_t)tex, r.Min, r.Max, ImVec2(0, 1), ImVec2(1, 0), IM_COL32_WHITE, radius::window);
@@ -2635,7 +2664,6 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
     dl->ChannelsMerge();
 
     viewportInput(st, r, doc, view, flats);
-    viewSwitch(st, r);
     ImGui::PopClipRect();
 }
 
@@ -3530,7 +3558,7 @@ static void shortcuts(State& st, editor::Document& doc) {
     auto repeat = [](ImGuiKey k) { return ImGui::IsKeyPressed(k, true); };
     const bool ctrl = io.KeyCtrl, shift = io.KeyShift;
     // While the game has the viewport its keys are the controller; only Play/Stop stays.
-    if (st.play.showGame && st.play.game.attached()) {
+    if (st.play.gameFocus && st.play.game.attached()) {
         if (!ctrl && pressed(ImGuiKey_F5)) togglePlay(st, doc);
         return;
     }
