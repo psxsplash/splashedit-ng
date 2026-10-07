@@ -171,6 +171,38 @@ std::vector<Vec3> smoothNormals(const Mesh& m) {
     return out;
 }
 
+SceneLight sceneLight(const FlatObject& fo) {
+    const LightComponent& l = *fo.object->light;
+    return {l.kind,       fo.worldPosition, rotate(fo.worldRotation, {0, 0, 1}), l.color[0], l.color[1], l.color[2],
+            l.intensity, l.spotAngle,      l.innerSpotAngle};
+}
+
+// World-space positions and lighting normals, then one colour per vertex as
+// the mesh component's colour mode picks it.
+std::vector<Color> meshColors(const FlatObject& fo, const MeshComponent& mc, const Mesh& m,
+                              const std::vector<SceneLight>& lights) {
+    std::vector<Color> out(m.positions.size());
+    bool hasColors = mc.vertexColors == VertexColorMode::Mesh && m.colors.size() == m.positions.size();
+    std::vector<Vec3> lightNormals;
+    if (mc.vertexColors != VertexColorMode::Flat && mc.vertexColors != VertexColorMode::Mesh)
+        lightNormals = mc.smoothNormals ? smoothNormals(m) : m.normals;
+    for (size_t i = 0; i < m.positions.size(); i++) {
+        switch (mc.vertexColors) {
+            case VertexColorMode::Flat:
+                out[i] = {mc.flatColor[0] / 255.f, mc.flatColor[1] / 255.f, mc.flatColor[2] / 255.f};
+                break;
+            case VertexColorMode::Mesh:
+                out[i] = hasColors ? Color{m.colors[i][0], m.colors[i][1], m.colors[i][2]} : Color{0.5f, 0.5f, 0.5f};
+                break;
+            default:
+                out[i] = bake(fo.localToWorld.point(m.positions[i]),
+                              normalized(rotate(fo.worldRotation, lightNormals[i])), lights);
+                break;
+        }
+    }
+    return out;
+}
+
 PsxVert toPsxVertex(Vec3 vertex, float gte, Vec3 normal, Vec2 uv, int width, int height, Color c) {
     PsxVert p;
     p.vx = toPsxCoord(vertex.x, gte);
@@ -201,13 +233,7 @@ void buildTris(ExpObject& e, float gte, const std::vector<SceneLight>& lights, E
         res.errors.push_back(e.obj->name + ": mesh component has no materials");
         return;
     }
-    std::vector<Vec3> lightNormals = mc.smoothNormals ? smoothNormals(m) : m.normals;
-    bool hasColors = mc.vertexColors == VertexColorMode::Mesh && m.colors.size() == m.positions.size();
-    std::vector<Vec3> wv(m.positions.size()), wn(m.positions.size());
-    for (size_t i = 0; i < m.positions.size(); i++) {
-        wv[i] = fo.localToWorld.point(m.positions[i]);
-        wn[i] = normalized(rotate(fo.worldRotation, lightNormals[i]));
-    }
+    const std::vector<Color> colors = meshColors(fo, mc, m, lights);
     std::vector<Vec2> uvs = m.uv;
     if (uvs.empty()) uvs.assign(m.positions.size(), {});
 
@@ -224,21 +250,7 @@ void buildTris(ExpObject& e, float gte, const std::vector<SceneLight>& lights, E
         auto convert = [&](int idx) {
             size_t i = size_t(idx);
             Vec3 v = scale(m.positions[i], fo.lossyScale);
-            Color c;
-            switch (mc.vertexColors) {
-                case VertexColorMode::Flat:
-                    c = {mc.flatColor[0] / 255.f, mc.flatColor[1] / 255.f, mc.flatColor[2] / 255.f};
-                    break;
-                case VertexColorMode::Mesh:
-                    if (hasColors)
-                        c = {m.colors[i][0], m.colors[i][1], m.colors[i][2]};
-                    else
-                        c = {0.5f, 0.5f, 0.5f};
-                    break;
-                default:
-                    c = bake(wv[i], wn[i], lights);
-                    break;
-            }
+            Color c = colors[i];
             if (texIndex == -1) {
                 c = {c.r * mat.color[0], c.g * mat.color[1], c.b * mat.color[2]};
                 return toPsxVertex(v, gte, m.normals[i], {}, 0, 0, c);
@@ -1009,8 +1021,7 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
         // Disabled runtime lights are still exported so Lua can switch them on.
         if (l.runtime && fo.activeInHierarchy) runtimeLights.push_back({&fo, &l});
         if (!l.enabled) continue;
-        SceneLight sl{l.kind, fo.worldPosition, rotate(fo.worldRotation, {0, 0, 1}), l.color[0], l.color[1],
-                      l.color[2], l.intensity, l.spotAngle, l.innerSpotAngle};
+        SceneLight sl = sceneLight(fo);
         lights.push_back(sl);
         if (!l.runtime) bakedOnlyLights.push_back(sl);
     }
@@ -1890,6 +1901,17 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     for (const std::vector<uint8_t>& d : audioData) st.spuEnd = ((st.spuEnd + 15) & ~size_t(15)) + ((d.size() + 15) & ~size_t(15));
     for (const ExpObject& e : exporters) st.triangles += int(e.tris.size());
     return res;
+}
+
+std::vector<Vec3> exportVertexColors(const std::vector<FlatObject>& flat, const FlatObject& object,
+                                     const Mesh& mesh) {
+    std::vector<Vec3> out;
+    if (!object.object->mesh || mesh.normals.size() != mesh.positions.size()) return out;
+    std::vector<SceneLight> lights;
+    for (const FlatObject& fo : flat)
+        if (fo.object->light && fo.object->light->enabled) lights.push_back(sceneLight(fo));
+    for (const Color& c : meshColors(object, *object.object->mesh, mesh, lights)) out.push_back({c.r, c.g, c.b});
+    return out;
 }
 
 }  // namespace splash

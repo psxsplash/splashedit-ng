@@ -65,4 +65,12 @@ struct ExportResult {
 ExportResult exportSplashpack(const Scene& scene, const std::filesystem::path& projectRoot,
                               const std::filesystem::path& out, const ExportOptions& options = {});
 
+// The vertex colours the exporter writes for `object`'s mesh, in mesh vertex
+// order, 0..1 per channel (the shipped byte is the value * 255, truncated).
+// Material colour on untextured submeshes is not included. Baked meshes get
+// every enabled light; on a runtime-lit mesh the console adds the runtime
+// lights itself, which this approximates by baking them too.
+std::vector<Vec3> exportVertexColors(const std::vector<FlatObject>& flat, const FlatObject& object,
+                                     const Mesh& mesh);
+
 }  // namespace splash
