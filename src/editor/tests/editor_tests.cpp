@@ -6,6 +6,7 @@
 #include <condition_variable>
 #include <cstring>
 #include <deque>
+#include <map>
 #include <mutex>
 #include <thread>
 #include <cmath>
@@ -25,6 +26,7 @@
 #include "editor/pick.hh"
 #include "editor/play.hh"
 #include "editor/project.hh"
+#include "editor/psxmon.hh"
 #include "editor/serial.hh"
 #include "editor/unirom.hh"
 #include "budget.hh"
@@ -1040,11 +1042,22 @@ struct FakeConsole {
         uint8_t b[4] = {uint8_t(v), uint8_t(v >> 8), uint8_t(v >> 16), uint8_t(v >> 24)};
         put(b, 4);
     }
-    std::string command() {  // the shell echoes what it reads
+    // The shell matches the last four bytes it read against its commands and
+    // echoes a match, so anything else in front (a psxmon PING) is skipped.
+    std::string command() {
         char c[5] = {};
-        if (!get(c, 4)) return {};
-        put(c, 4);
-        return c;
+        for (int have = 0;;) {
+            uint8_t b;
+            if (!get(&b, 1)) return {};
+            std::memmove(c, c + 1, 3);
+            c[3] = char(b);
+            if (++have < 4) continue;
+            for (const char* known : {"SEXE", "UPV2", "UPV3"})
+                if (!std::memcmp(c, known, 4)) {
+                    put(c, 4);
+                    return c;
+                }
+        }
     }
     static uint32_t sum(const uint8_t* p, size_t n) {
         uint32_t s = 0;
@@ -1222,6 +1235,162 @@ void runUnirom(int offer) {
     CHECK(!fs::exists(base.parent_path() / "outside"));
 }
 
+// psxmon's half (nugget monitor/PROTOCOL.md): frames in, ACK/PONG/ERROR out,
+// then RUN hands the link to the program, here the same psxsplash file calls.
+struct FakeMonitor {
+    FakeConsole con;
+    std::map<uint32_t, uint8_t> mem;
+    uint32_t pc = 0, gp = 0, sp = 0;
+    int pings = 0;
+    bool refuseFirstLoad = false;
+
+    bool frame(uint16_t* type, std::vector<uint16_t>* words) {
+        uint8_t b = 1;
+        while (b != 0)
+            if (!con.get(&b, 1)) return false;
+        uint8_t h[6];
+        if (!con.get(h, 6)) return false;
+        if (h[0] != 0xaa || h[1] != 0x55) {
+            con.fail("monitor: bad sync");
+            return false;
+        }
+        *type = uint16_t(h[2] | h[3] << 8);
+        const uint16_t len = uint16_t(h[4] | h[5] << 8);
+        std::vector<uint8_t> raw(2 * size_t(len) + 4);
+        if (!con.get(raw.data(), raw.size())) return false;
+        std::vector<uint16_t> all{*type, len};
+        for (size_t i = 0; i < len; ++i) all.push_back(uint16_t(raw[2 * i] | raw[2 * i + 1] << 8));
+        const size_t c = 2 * size_t(len);
+        const uint32_t ck = uint32_t(raw[c] | raw[c + 1] << 8) | uint32_t(raw[c + 2] | raw[c + 3] << 8) << 16;
+        if (ck != editor::psxmon::fletcher(all.data(), all.size())) con.fail("monitor: bad checksum");
+        words->assign(all.begin() + 2, all.end());
+        return true;
+    }
+    void reply(uint16_t type, const std::vector<uint16_t>& words = {}) {
+        const std::vector<uint8_t> f = editor::psxmon::encode(type, words);
+        con.put(f.data(), f.size());
+    }
+    // Serves commands until RUN. `afterRun` is written in the same burst as RUN's ACK.
+    bool session(const std::string& afterRun) {
+        for (;;) {
+            uint16_t type;
+            std::vector<uint16_t> w;
+            if (!frame(&type, &w)) return false;
+            auto u32 = [&](size_t i) { return uint32_t(w[i]) | uint32_t(w[i + 1]) << 16; };
+            if (type == editor::psxmon::Ping) {
+                ++pings;
+                reply(editor::psxmon::Pong, {2, 0x0003, 0x1234, 0x5678});
+            } else if (type == editor::psxmon::Load) {
+                if (refuseFirstLoad) {
+                    refuseFirstLoad = false;
+                    reply(editor::psxmon::Error, {3});
+                    return false;
+                }
+                const uint32_t addr = u32(0), n = u32(2);
+                if (w.size() != 4 + (n + 1) / 2) con.fail("monitor: LOAD length");
+                for (uint32_t i = 0; i < n; ++i) mem[addr + i] = uint8_t(w[4 + i / 2] >> (i & 1 ? 8 : 0));
+                reply(editor::psxmon::Ack);
+            } else if (type == editor::psxmon::Run) {
+                pc = u32(0), gp = u32(2), sp = u32(4);
+                std::vector<uint8_t> burst = editor::psxmon::encode(editor::psxmon::Ack, {});
+                burst.insert(burst.end(), afterRun.begin(), afterRun.end());
+                con.put(burst.data(), burst.size());
+                return true;
+            } else {
+                reply(editor::psxmon::Error, {1});
+            }
+        }
+    }
+};
+
+void testPsxmon() {
+    namespace fs = std::filesystem;
+    // Frames byte for byte as the farm's TypeScript host encodes them (encodeFrame).
+    const std::vector<uint8_t> ping = editor::psxmon::encode(editor::psxmon::Ping, {});
+    const std::vector<uint8_t> load = editor::psxmon::encode(editor::psxmon::Load, {0x10, 0x8001, 3, 0, 0x0201, 0x03});
+    CHECK(ping == std::vector<uint8_t>({0x00, 0xaa, 0x55, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x02, 0x00}));
+    CHECK(load == std::vector<uint8_t>({0x00, 0xaa, 0x55, 0x08, 0x00, 0x06, 0x00, 0x10, 0x00, 0x01, 0x80, 0x03, 0x00,
+                                        0x00, 0x00, 0x01, 0x02, 0x03, 0x00, 0x26, 0x82, 0xe2, 0x84}));
+
+    const fs::path base = g_outDir / "psxmon";
+    std::error_code ec;
+    fs::remove_all(base, ec);
+    fs::create_directories(base, ec);
+    std::vector<uint8_t> scene(2500);
+    for (size_t i = 0; i < scene.size(); ++i) scene[i] = uint8_t(i * 5 + 3);
+    std::ofstream(base / "scene_0.splashpack", std::ios::binary).write(reinterpret_cast<const char*>(scene.data()), scene.size());
+    // A program over two LOAD frames, odd-sized, with a stack in the header.
+    std::vector<uint8_t> exe(0x800 + 9001);
+    std::memcpy(exe.data(), "PS-X EXE", 8);
+    const uint32_t pc = 0x80010000, gp = 0x8001f000, addr = 0x80010000, tsize = 9001, sbase = 0x801fff00, ssize = 0xf0;
+    std::memcpy(&exe[0x10], &pc, 4);
+    std::memcpy(&exe[0x14], &gp, 4);
+    std::memcpy(&exe[0x18], &addr, 4);
+    std::memcpy(&exe[0x1c], &tsize, 4);
+    std::memcpy(&exe[0x30], &sbase, 4);
+    std::memcpy(&exe[0x34], &ssize, 4);
+    for (size_t i = 0x800; i < exe.size(); ++i) exe[i] = uint8_t(i * 11 + 1);
+
+    Pipe toConsole, toHost;
+    PipeEnd hostEnd(toHost, toConsole), consoleEnd(toConsole, toHost);
+    FakeMonitor mon{FakeConsole{consoleEnd, 1, {}, {}, 0, 0}, {}, 0, 0, 0, 0, false};
+    std::vector<uint8_t> readBack;
+    bool inited = false;
+    std::thread console([&] {
+        // psxsplash talks straight after RUN's ACK, in the same burst.
+        if (mon.session("psxsplash: boot\r\n")) {
+            uint32_t h = 0;
+            inited = mon.con.init();
+            if (mon.con.open("scene_0.splashpack", &h)) readBack = mon.con.read(h, 4096);
+            mon.con.say("done\n");
+        }
+        consoleEnd.close();
+    });
+    std::string err;
+    std::vector<int> progress;
+    CHECK(editor::psxmonPresent(hostEnd, 2000));
+    CHECK(editor::psxmonUpload(hostEnd, exe, &err, [&](int p) { progress.push_back(p); }));
+    if (!err.empty()) std::fprintf(stderr, "psxmon upload: %s\n", err.c_str());
+    std::vector<std::string> lines, events;
+    std::atomic<bool> cancel{false};
+    editor::PcdrvHost host(base);
+    host.serve(hostEnd, cancel, [&](const std::string& l) { lines.push_back(l); },
+               [&](const std::string& e) { events.push_back(e); }, &err);
+    console.join();
+    for (const std::string& p : mon.con.problems) std::fprintf(stderr, "psxmon: %s\n", p.c_str());
+    CHECK(mon.con.problems.empty());
+    CHECK(mon.pings >= 1);
+    CHECK(mon.pc == pc && mon.gp == gp && mon.sp == sbase + ssize);
+    bool same = mon.mem.size() == tsize;
+    for (uint32_t i = 0; same && i < tsize; ++i) same = mon.mem[addr + i] == exe[0x800 + i];
+    CHECK(same);
+    CHECK(progress.size() == 2 && progress.back() == 100);
+    CHECK(std::find(lines.begin(), lines.end(), "psxsplash: boot") != lines.end());
+    CHECK(inited);
+    CHECK(readBack.size() == 2500 && std::equal(scene.begin(), scene.end(), readBack.begin()));
+    CHECK(std::find(lines.begin(), lines.end(), "done") != lines.end());
+
+    // A refused LOAD stops the upload with the monitor's error code.
+    {
+        Pipe a, b;
+        PipeEnd h(a, b), c(b, a);
+        FakeMonitor m{FakeConsole{c, 1, {}, {}, 0, 0}, {}, 0, 0, 0, 0, true};
+        std::thread t([&] {
+            m.session("");
+            c.close();
+        });
+        CHECK(!editor::psxmonUpload(h, exe, &err) && err.find("refused LOAD") != std::string::npos &&
+              err.find("error 3") != std::string::npos);
+        t.join();
+    }
+    // Nothing answers the PING: not present, so Unirom gets its turn.
+    {
+        Pipe a, b;
+        PipeEnd h(a, b);
+        CHECK(!editor::psxmonPresent(h, 600));
+    }
+}
+
 // HardwareRun: the editor's session, over a pipe to the same fake console.
 class Borrowed : public editor::Link {
   public:
@@ -1327,6 +1496,7 @@ int main(int argc, char** argv) {
     testProject();
     testAdoptAsset();
     testUnirom();
+    testPsxmon();
     testHardwareRun();
     if (g_failures) {
         std::fprintf(stderr, "editor_tests: %d of %d checks failed\n", g_failures, g_checks);

@@ -3,6 +3,7 @@
 #include <fstream>
 #include <iterator>
 
+#include "editor/psxmon.hh"
 #include "editor/unirom.hh"
 
 namespace editor {
@@ -78,8 +79,13 @@ void HardwareRun::start(Opener open, std::filesystem::path exe, std::filesystem:
             return;
         }
         phase_ = Phase::Uploading;
-        add("Uploading psxsplash...");
-        if (!uniromUpload(*link, bytes, &err, [this](int p) { progress_ = p; }, &cancel_)) {
+        // psxmon answers a PING; anything else is taken to be the Unirom shell,
+        // which ignores the PING frames as unknown command text.
+        const bool monitor = psxmonPresent(*link, 1500);
+        add(monitor ? "Uploading psxsplash through psxmon..." : "Uploading psxsplash through Unirom...");
+        auto progress = [this](int p) { progress_ = p; };
+        if (!(monitor ? psxmonUpload(*link, bytes, &err, progress, &cancel_)
+                      : uniromUpload(*link, bytes, &err, progress, &cancel_))) {
             if (cancel_) {
                 phase_ = Phase::Stopped;
                 return;
