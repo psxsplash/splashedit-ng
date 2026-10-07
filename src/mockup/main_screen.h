@@ -87,6 +87,12 @@ struct State {
         std::optional<editor::RenderPeak> peak;
         unsigned peakScene = 0;
         uint64_t linesSeen = 0;
+        // Live edits: the document revision the running game was last sent,
+        // the revision seen last frame and since when, the export in flight,
+        // and the count written to reload.flag.
+        std::future<splash::ExportResult> reload;
+        unsigned sentRev = 0, seenRev = 0, reloadGeneration = 0;
+        double seenAt = 0;
     } play;
 
     // F2 rename in the tree: the object's path, and whether the editor still has to open.

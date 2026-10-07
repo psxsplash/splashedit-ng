@@ -110,6 +110,7 @@ static void togglePlay(State& st, const editor::Document& doc) {
         return;
     }
     if (p.build.valid()) return;
+    if (p.reload.valid()) p.reload.wait();  // a live edit still writing the folder
     p.message.clear();
     p.peak.reset();
     p.peakScene = doc.loadId();
@@ -118,8 +119,13 @@ static void togglePlay(State& st, const editor::Document& doc) {
         p.setupFor = 0;
         return;
     }
+    p.sentRev = p.seenRev = doc.revision();
+    p.reloadGeneration = 0;
     p.build = std::async(std::launch::async, [scene = doc.scene(), root = doc.projectRoot()] {
-        return editor::exportForPlay(scene, root, playDir());
+        splash::ExportResult r = editor::exportForPlay(scene, root, playDir());
+        // Its presence at boot is what makes the game watch for live edits.
+        if (r.ok() && !editor::writeReloadFlag(playDir(), 0)) r.errors.push_back("Cannot write reload.flag");
+        return r;
     });
 }
 
@@ -153,8 +159,32 @@ static void toggleRun(State& st, const editor::Document& doc) {
 // Ctrl+B and the Export button: ask where the disc image goes, then build it.
 static void startExport(State& st, const editor::Document& doc);
 
-static void updatePlay(State& st) {
+// Edits made while the game runs: once the document has stayed unchanged for
+// a moment, export it again and tell the running game to reload the scene.
+static void sendEdits(State& st, const editor::Document& doc) {
     State::Play& p = st.play;
+    const double now = ImGui::GetTime();
+    if (p.reload.valid()) {
+        if (p.reload.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return;
+        splash::ExportResult r = p.reload.get();
+        p.message = r.ok() ? std::string() : "Live edit not sent: " + r.errors.front();
+    }
+    if (!p.emu.running() || p.build.valid() || doc.loadId() != p.peakScene) return;
+    if (doc.revision() != p.seenRev) {
+        p.seenRev = doc.revision();
+        p.seenAt = now;
+    }
+    if (doc.revision() == p.sentRev || now - p.seenAt < 0.3) return;
+    p.sentRev = doc.revision();
+    const unsigned gen = ++p.reloadGeneration;
+    p.reload = std::async(std::launch::async, [scene = doc.scene(), root = doc.projectRoot(), gen] {
+        return editor::reloadForPlay(scene, root, playDir(), gen);
+    });
+}
+
+static void updatePlay(State& st, const editor::Document& doc) {
+    State::Play& p = st.play;
+    sendEdits(st, doc);
     if (p.hwBuild.valid() && p.hwBuild.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
         splash::ExportResult r = p.hwBuild.get();
         const editor::PlayTools eff = editor::withDefaults(p.tools, p.bundleDir);
@@ -3597,7 +3627,7 @@ ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view,
     filesPending(st, doc);
     shortcuts(st, doc);
     st.live.update(doc, ImGui::GetTime());
-    updatePlay(st);
+    updatePlay(st, doc);
     updateExport(st);
     ImGui::SetNextWindowPos(ImVec2(0, 0));
     ImGui::SetNextWindowSize(size);
