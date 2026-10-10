@@ -91,7 +91,27 @@ static void fromBundle(fs::path& p, const fs::path& bundle, std::initializer_lis
     }
 }
 
+// A saved path that no longer exists (an old build, a moved folder) must not
+// hide the copy the package carries.
+static void dropMissing(fs::path& p) {
+    std::error_code ec;
+    if (!p.empty() && !fs::is_regular_file(p, ec)) p.clear();
+}
+
+// On Windows pcsx-redux.exe only relaunches pcsx-redux.main through the shell and
+// exits, so its pid never owns the display block and its output is lost. Run
+// the real binary when it sits beside the launcher.
+static void skipLauncher(fs::path& p) {
+    std::error_code ec;
+    if (p.filename() != "pcsx-redux.exe") return;
+    fs::path main = p.parent_path() / "pcsx-redux.main";
+    if (fs::is_regular_file(main, ec)) p = main;
+}
+
 PlayTools withDefaults(PlayTools t, const fs::path& bundle) {
+    dropMissing(t.redux);
+    dropMissing(t.psxsplash);
+    dropMissing(t.disc);
     fromEnv(t.redux, "SPLASHEDIT_REDUX");
     fromEnv(t.psxsplash, "SPLASHEDIT_PSXSPLASH");
     fromEnv(t.bios, "SPLASHEDIT_BIOS");
@@ -103,6 +123,7 @@ PlayTools withDefaults(PlayTools t, const fs::path& bundle) {
     fromBundle(t.psxsplash, bundle, {"engine/psxsplash.ps-exe"});
     fromBundle(t.disc, bundle, {"engine/psxsplash-cdrom.ps-exe"});
     if (t.redux.empty()) t.redux = onPath("pcsx-redux");
+    skipLauncher(t.redux);
     return t;
 }
 
