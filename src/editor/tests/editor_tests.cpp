@@ -723,8 +723,14 @@ void testPlay() {
     // Environment fills only what the settings left empty.
     setEnv("SPLASHEDIT_PSXSPLASH", "/env/psxsplash.ps-exe");
     setEnv("SPLASHEDIT_REDUX", "/env/pcsx-redux");
-    editor::PlayTools e = editor::withDefaults(l);
-    CHECK(e.redux == t.redux && e.psxsplash == t.psxsplash);
+    editor::PlayTools onDisk = l;
+    onDisk.redux = cfg;  // an existing file stands in for the programs
+    onDisk.psxsplash = cfg;
+    editor::PlayTools e = editor::withDefaults(onDisk);
+    CHECK(e.redux == cfg && e.psxsplash == cfg);
+    // A saved path that is gone falls through to what is there now.
+    editor::PlayTools gone = editor::withDefaults(l);
+    CHECK(gone.redux == fs::path("/env/pcsx-redux") && gone.psxsplash == fs::path("/env/psxsplash.ps-exe"));
     editor::PlayTools e2 = editor::withDefaults({});
     CHECK(e2.redux == fs::path("/env/pcsx-redux") && e2.psxsplash == fs::path("/env/psxsplash.ps-exe"));
 
@@ -752,6 +758,22 @@ void testPlay() {
     CHECK(editor::missingDiscTools(fromBundle).empty());
     editor::PlayTools empty = editor::withDefaults({}, dir / "nothing-here");
     CHECK(empty.psxsplash.empty());
+    // A stale saved build loses to the packaged one.
+    editor::PlayTools stale;
+    stale.psxsplash = dir / "old-build" / "psxsplash.ps-exe";
+    CHECK(editor::withDefaults(stale, bundle).psxsplash == bundle / "engine" / "psxsplash.ps-exe");
+
+    // Windows: the pcsx-redux.exe launcher hands off to pcsx-redux.main, so
+    // Play runs .main directly when it is there.
+    fs::path win = dir / "winbundle";
+    fs::create_directories(win / "redux");
+    std::ofstream(win / "redux" / "pcsx-redux.exe") << "x";
+    CHECK(editor::withDefaults({}, win).redux == win / "redux" / "pcsx-redux.exe");
+    std::ofstream(win / "redux" / "pcsx-redux.main") << "x";
+    CHECK(editor::withDefaults({}, win).redux == win / "redux" / "pcsx-redux.main");
+    editor::PlayTools picked;
+    picked.redux = win / "redux" / "pcsx-redux.exe";
+    CHECK(editor::withDefaults(picked).redux == win / "redux" / "pcsx-redux.main");
 
     // What is missing, and the command once nothing is.
     CHECK(editor::missingTools({}).size() == 2);
