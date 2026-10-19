@@ -12462,6 +12462,21 @@ void testUnityPrimitives() {
     const std::optional<Primitive> plane = builtinMesh(10209);
     CHECK(plane && plane->exact && plane->mesh.positions.size() == 121 && plane->mesh.submeshes[0].size() == 600 && outward(plane->mesh));
     if (plane) CHECK(plane->mesh.bounds().size() == (splash::Vec3{10, 0, 10}));
+    // UVs as Unity 6000.3's own meshes have them (Mesh.uv dumped from the editor,
+    // and every triangle's UVs equal in a SplashEdit 2.4.0 splashpack).
+    auto uvAt = [](const splash::Mesh& m, splash::Vec3 p) -> std::optional<splash::Vec2> {
+        for (size_t i = 0; i < m.positions.size(); i++)
+            if (m.positions[i] == p) return m.uv[i];
+        return std::nullopt;
+    };
+    auto uvIs = [&](const std::optional<Primitive>& prim, splash::Vec3 p, float u, float v) {
+        const std::optional<splash::Vec2> got = prim ? uvAt(prim->mesh, p) : std::nullopt;
+        return got && std::fabs(got->x - u) < 1e-6f && std::fabs(got->y - v) < 1e-6f;
+    };
+    CHECK(uvIs(plane, {5, 0, 5}, 0, 0) && uvIs(plane, {-5, 0, 5}, 1, 0) && uvIs(plane, {5, 0, -5}, 0, 1) && uvIs(plane, {-5, 0, -5}, 1, 1));
+    CHECK(uvIs(plane, {4, 0, 5}, 0.1f, 0));
+    CHECK(uvIs(quad, {-0.5f, -0.5f, 0}, 0, 0) && uvIs(quad, {0.5f, -0.5f, 0}, 1, 0) && uvIs(quad, {-0.5f, 0.5f, 0}, 0, 1) &&
+          uvIs(quad, {0.5f, 0.5f, 0}, 1, 1));
     for (long long id : {10207LL, 10206LL, 10208LL}) {
         const std::optional<Primitive> p = builtinMesh(id);
         CHECK(p && !p->exact && outward(p->mesh));
