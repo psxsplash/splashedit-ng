@@ -1091,6 +1091,20 @@ void testBuildScenes() {
     CHECK(fs::file_size(dir / "scene_0.splashpack", ec) == r.stats.splashpackBytes);
     CHECK(!bytes("scene_1.splashpack").empty() && bytes("scene_1.splashpack") != bytes("scene_0.splashpack"));
 
+    // psxsplash allocates its render buffers once, from scene 0: Play gives it
+    // the largest of the build. Scene 1 asking for a bigger ordering table
+    // raises scene 0's; scene 0 alone keeps its own.
+    {
+        splash::Scene deep = b.scenes[1];
+        deep.settings.orderingTableSize = int(r.stats.orderingTableSize) + 1000;
+        const splash::ExportResult raised = editor::exportForPlay({&b.scenes[0], &deep}, project, g_outDir / "multiplay-buffers", b.names);
+        CHECK(raised.ok() && raised.stats.orderingTableSize == r.stats.orderingTableSize + 1000 && raised.stats.renderBuffersRaised());
+        CHECK(raised.stats.ownOrderingTableSize == r.stats.orderingTableSize && raised.stats.bumpAllocatorSize >= r.stats.bumpAllocatorSize);
+        CHECK(!r.stats.renderBuffersRaised() || r.stats.orderingTableSize >= r.stats.ownOrderingTableSize);
+        const splash::ExportResult alone = editor::exportForPlay(b.scenes[0], project, g_outDir / "multiplay-alone");
+        CHECK(alone.ok() && !alone.stats.renderBuffersRaised());
+    }
+
     // An error names the scene it is in.
     splash::Scene broken = b.scenes[1];
     splash::Object o = named("broken");

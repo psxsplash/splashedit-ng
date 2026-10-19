@@ -211,6 +211,11 @@ static void reportBuild(State& st, const char* what, const State::Play::Launch& 
     scriptLine(nullptr, std::string("build report: ") + what + " scenes " + std::to_string(l.scenes) + " errors " +
                             std::to_string(st.play.built.errors.size()) + " warnings " +
                             std::to_string(st.play.built.warnings.size()));
+    // Scene 0 given the build's largest render buffers (splash::exportBuild).
+    if (r.stats.renderBuffersRaised())
+        scriptLine(nullptr, std::string("build buffers: ") + what + " scene 0 raised ot " + std::to_string(r.stats.ownOrderingTableSize) +
+                                " -> " + std::to_string(r.stats.orderingTableSize) + " bump " +
+                                std::to_string(r.stats.ownBumpAllocatorSize) + " -> " + std::to_string(r.stats.bumpAllocatorSize));
 }
 
 // F5 and the Play button: start, or stop what is running.
@@ -7093,6 +7098,30 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
                 buUsed && peak->bump > buUsed ? color::warn : color::accentHover);
     if (stats) caption(kb(stats->rendererBytes()) + " KB of RAM for both, double-buffered", color::textFaint);
     else caption("Sizes appear once the scene exports.", color::textFaint);
+    {
+        // psxsplash allocates the buffers once, from the scene it boots in, and
+        // Play/Export give that scene the build's largest (splash::exportBuild).
+        namespace fs = std::filesystem;
+        static fs::path cachedRoot, cachedOpen;
+        static std::vector<fs::path> build;
+        static double readAt = -1;
+        const double now = ImGui::GetTime();
+        const fs::path open = openSceneFile(doc);
+        if (doc.projectRoot() != cachedRoot || open != cachedOpen || now - readAt > 1.0) {
+            cachedRoot = doc.projectRoot();
+            cachedOpen = open;
+            readAt = now;
+            build = doc.projectRoot().empty() ? std::vector<fs::path>{} : editor::buildScenes(doc.projectRoot(), open);
+        }
+        if (build.size() > 1) {
+            const bool boot = !open.empty() && build.front().lexically_normal() == open.lexically_normal();
+            caption(boot ? "Boot scene: psxsplash allocates these once, from this scene, so Play and Export raise them to the "
+                           "largest any scene of the build needs."
+                         : "psxsplash keeps the boot scene's buffers for every scene; Play and Export raise those to fit "
+                           "this one.",
+                    color::textFaint);
+        }
+    }
     if (!renderOpen) {
         ImGui::PopClipRect();
         y = top + 34 + space::md;
