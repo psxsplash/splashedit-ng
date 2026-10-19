@@ -62,10 +62,14 @@ static int usage() {
                  "  writes models/<name>.mesh and its textures into the project, as the editor does;\n"
                  "  the settings start from <model>.import.json beside the model when there is one\n"
                  "usage: splashpack-cli import-unity <unityProject> <destDir> [--scenes Name1,Name2,...]\n"
+                 "    [--cd-track N=<audio file>]...\n"
                  "  makes a new project in <destDir> (new or empty) from the scenes of a Unity SplashEdit\n"
                  "  project, in the order given (default: every scene with a PSXSceneExporter, in Build\n"
                  "  Settings order, then by name); prints what it did not bring over and a summary line,\n"
                  "  and writes the same report to <destDir>/import-report.txt\n"
+                 "  --cd-track gives CD music track N (2 and up, no gaps; Audio.PlayCDDA(N) plays it): Unity\n"
+                 "    keeps that list in its editor preferences, not in the project; the files are copied\n"
+                 "    into <destDir>/music and listed in disc.json\n"
                  "usage: splashpack-cli resave <in.scene|in.mesh> <out>\n"
                  "  loads and saves a scene or mesh file\n"
                  "usage: splashpack-cli luac <in.lua> -o <out.luac>\n"
@@ -208,6 +212,17 @@ static int importUnity(int argc, char** argv) {
                 if (c > p) opt.scenes.push_back(list.substr(p, c - p));
                 p = c + 1;
             }
+        } else if (a == "--cd-track" && i + 1 < argc) {
+            // N=path: disc track N (2 and up) plays that audio file.
+            const std::string v = argv[++i];
+            const size_t eq = v.find('=');
+            char* end = nullptr;
+            const long n = eq == std::string::npos ? 0 : std::strtol(v.substr(0, eq).c_str(), &end, 10);
+            if (eq == std::string::npos || eq == 0 || !end || *end || eq + 1 >= v.size()) {
+                std::fprintf(stderr, "error: --cd-track wants N=path (N the disc track, 2 and up), not %s\n", v.c_str());
+                return 2;
+            }
+            opt.cdTracks.push_back({int(n), v.substr(eq + 1)});
         } else return usage();
     }
     try {

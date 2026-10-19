@@ -3,10 +3,12 @@
 # the project (Mini on, Empty off: it has no PSXSceneExporter), Import stays
 # off while the new project's folder is not empty, a scene switched on and
 # moved up comes first in scenes.list, and an import opens the new project
-# and shows the report (the UI canvas listed). Then the report is closed and
-# the imported scene is screenshotted. Controls are clicked by name.
+# and shows the report (the camera listed). The default import is given a CD
+# track (Add a CD track, its file typed), which lands in disc.json. Then the
+# report is closed and the imported scene is screenshotted. Controls are
+# clicked by name.
 # usage: python3 unityimportguicheck.py <splashedit> [screenshot dir]
-import os, shutil, subprocess, sys, tempfile
+import json, os, shutil, subprocess, sys, tempfile
 
 editor = os.path.abspath(sys.argv[1])
 here = os.path.dirname(os.path.abspath(__file__))
@@ -56,15 +58,16 @@ def imported(lines):
 OPEN = click('menu.file') + click('menu.file/Import Unity Project...')
 AWAY = ['--move', '800,120', '--wait', '3']
 
-# The form, ending on it: its controls, the scene list read, Import off while
-# the new project's folder (here the courtyard example) is not empty.
+# The form, ending on it: its controls (a CD track row added), the scene list
+# read, Import off while the new project's folder (here the courtyard example)
+# is not empty.
 work = tempfile.mkdtemp()
-lines, project = run(OPEN + typed('unity.source', mini) + typed('unity.dest', example) + click('unity.import') + AWAY,
+lines, project = run(OPEN + typed('unity.source', mini) + typed('unity.dest', example) + click('unity.cdadd') + click('unity.import') + AWAY,
                      os.path.join(shots, 'unityimport-refused.png'))
 have = controls(lines)
 for c in ['unity.source', 'unity.sourcebrowse', 'unity.dest', 'unity.destbrowse', 'unity.scenes', 'unity.scene.Mini',
           'unity.scene.Empty', 'unity.up.Mini', 'unity.down.Mini', 'unity.up.Empty', 'unity.down.Empty', 'unity.status',
-          'unity.import', 'unity.cancel']:
+          'unity.import', 'unity.cancel', 'unity.cdadd', 'unity.cdtrack.2', 'unity.cdbrowse.2', 'unity.cdremove.2']:
     check('the dialog draws ' + c, c in have, sorted(h for h in have if h.startswith('unity')))
 check('no import while the folder is not empty', imported(lines) == [], imported(lines))
 check('the dialog is still open', 'popups open: yes' in lines)
@@ -82,19 +85,24 @@ check('the courtyard project was left alone', sorted(os.listdir(example)) == sor
 lst = os.path.join(dest, 'scenes.list')
 check('the scene moved up comes first', os.path.exists(lst) and open(lst).read().split() == ['Empty.scene', 'Mini.scene'],
       open(lst).read() if os.path.exists(lst) else 'no scenes.list')
-check('the report lists the canvas', 'unityimport: report [later] Mini / HUD: UI canvas with 1 element (1 Text) not imported yet' in lines,
+check('the report lists the camera', 'unityimport: report [left out] Mini / Main Camera: Camera, AudioListener (no PS1 equivalent)' in lines,
       [l for l in lines if l.startswith('unityimport: report')])
 check('the new project opened', any(l.startswith('status: Imported 2 scenes from Unity') for l in lines),
       [l for l in lines if l.startswith('status:')])
 
-# The default choice (Mini alone): the report, then closed, the imported scene.
+# The default choice (Mini alone) and a CD track: the report, then closed, the imported scene.
 work = tempfile.mkdtemp()
 dest = os.path.join(work, 'mini')
-lines, _ = run(OPEN + typed('unity.source', mini) + typed('unity.dest', dest) + click('unity.import') + ['--wait', '20'] + AWAY +
+wav = os.path.join(mini, 'Assets', 'Audio', 'beep.wav')
+lines, _ = run(OPEN + typed('unity.source', mini) + typed('unity.dest', dest) + click('unity.cdadd') + typed('unity.cdtrack.2', wav) +
+               click('unity.import') + ['--wait', '20'] + AWAY +
                ['--shot', os.path.join(shots, 'unityimport-report.png'), '--wait', '2'] + click('unity.close') +
                click('tree.Cube') + ['--key', 'f', '--wait', '5'], os.path.join(shots, 'unityimport-result.png'))
 got = imported(lines)
-check('the default import brings Mini alone', got == ['unityimport: imported scenes=1 objects=10 meshes=4 scripts=2 textures=1 skipped=3'], got)
+check('the default import brings Mini alone', got == ['unityimport: imported scenes=1 objects=14 meshes=4 scripts=2 textures=1 skipped=2'], got)
+disc = os.path.join(dest, 'disc.json')
+check('the CD track is in disc.json', os.path.exists(disc) and json.load(open(disc)).get('tracks') == ['audio/beep.wav'],
+      open(disc).read() if os.path.exists(disc) else 'no disc.json')
 check('the report is closed at the end', 'popups open: no' in lines, [l for l in lines if l.startswith('popups')])
 check('the imported scene is open', any(l.startswith('status: Imported 1 scene from Unity') for l in lines),
       [l for l in lines if l.startswith('status:')])
