@@ -108,5 +108,21 @@ check('the imported scene is open', any(l.startswith('status: Imported 1 scene f
       [l for l in lines if l.startswith('status:')])
 check('the imported objects are in the tree', {'tree.Parent', 'tree.Cube', 'tree.Quad', 'tree.RenamedLamp'} <= controls(lines),
       sorted(c for c in controls(lines) if c.startswith('tree.')))
+
+# The imported scene's UI tab draws the canvases the game starts with: hud, not
+# the loading screen's canvas (hud_loading), which psxsplash draws alone while
+# the scene loads; picked, the loading canvas is drawn alone.
+def drawn(lines):
+    return [l for l in lines if l.startswith('uicanvas: drawn')]
+r = subprocess.run([editor, '--size', '1600x960', '--project', dest, '--scene', os.path.join(dest, 'Mini.scene'), '--ui', '--wait', '5',
+                    '--screenshot', os.path.join(shots, 'unityimport-ui.png')], capture_output=True, text=True, env=ENV, timeout=240)
+got = drawn((r.stdout + r.stderr).splitlines())
+check('the UI tab leaves the loading canvas out of the start screen', got[-1:] == ['uicanvas: drawn hud'], got)
+r = subprocess.run([editor, '--size', '1600x960', '--project', dest, '--scene', os.path.join(dest, 'Mini.scene'), '--ui', '--wait', '5'] +
+                   click('ui.canvas') + click('ui.canvas/hud_loading') + ['--screenshot', os.path.join(shots, 'unityimport-ui-loading.png')],
+                   capture_output=True, text=True, env=ENV, timeout=240)
+lines = (r.stdout + r.stderr).splitlines()
+got = drawn(lines)
+check('picked, the loading canvas is drawn alone', got[-1:] == ['uicanvas: drawn hud_loading'], (got, [l for l in lines if 'no such control' in l]))
 print('screenshots in ' + shots)
 sys.exit(1 if fails else 0)
