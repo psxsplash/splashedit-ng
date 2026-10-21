@@ -891,6 +891,18 @@ The viewport draws the vision cone, hearing square and patrol in pink only with 
 
     python3 agenteditcheck.py <splashedit> [keep.png]
 
+`fixedcameracheck.py` adds a Fixed camera from the Add component picker to an empty object (Yard cam)
+on a copy of the courtyard example, types Layers (`obj.fclayers`), turns on Show at start
+(`obj.fcstart`) and presses Bake (`fcbake`): `bakes/courtyard-Yard_cam.bgbake` and its image and layer
+mask must exist at 320x240, the mask hold no more layers than asked for with the file's pixel counts,
+and the editor print `fixedcam: baked <file> layers N ...` and `fixedcam: Yard cam h 120 fov 90 ...
+status Baked, N layers`. Look through (`fclook`) prints `fixedcam: look through Yard cam`. The Crate's
+Keep 3D in fixed cameras switch (`obj.keep3d`, only drawn once a Fixed camera exists) saves on its mesh.
+After a Pillar moves in the saved scene, the next load says the scene changed since the bake and
+Problems counts a warning.
+
+    python3 fixedcameracheck.py <splashedit> [keep.png]
+
 `cliploopcheck.py` opens a copy of `tests/skin` (bend.anim loops, raise.anim plays once) with an Agent
 on Arm whose Patrol plays raise. The Skinned animation section's switch per clip
 (`obj.skinloop.<i>`) rewrites the clip's `.anim` loop as one undo step: the file must say so, the
