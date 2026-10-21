@@ -1683,6 +1683,31 @@ function Light.SetIntensity(light, intensity) end
 ---@return any
 function Light.SetEnabled(light, enabled) end
 
+---@class Background
+Background = {}
+
+--- Shows the baked background of the Fixed camera named name: the camera jumps to its pose and
+--- stops following, and the objects baked into it are not drawn (they still collide). Returns true,
+--- or false when there is no such background.
+---
+--- `Background.Show(name)`
+---@param name any
+---@return any
+function Background.Show(name) end
+
+--- Back to the 3D scene: the baked objects draw again and the camera follows as it did before the
+--- first Show.
+---
+--- `Background.Hide()`
+---@return any
+function Background.Hide() end
+
+--- The name of the background showing, or nil.
+---
+--- `Background.Current()`
+---@return any
+function Background.Current() end
+
 ---@class Tile
 Tile = {}
 
