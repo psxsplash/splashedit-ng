@@ -553,39 +553,36 @@ unsigned Ps1View::render(int panelW, int panelH, int lines) {
     return m_color;
 }
 
-// Each triangle of a bake where psxsplash would put it: the corners through
-// the engine's fixed-point path (whole screen coordinates), at NDC
+// Each corner of a bake where psxsplash would put it: through the engine's
+// fixed-point path (whole screen coordinates), at NDC
 // x = (SX + 0.5 - 1/16 - 160) / 160 and y = (120 - SY - 0.5 + 1/16) / 120. A
 // whole SX sits on a pixel centre as the PS1 rasteriser samples, and the
 // sixteenth keeps edges off GL's sample points, so a pixel is drawn when
-// left <= x < right and top <= y < bottom, the PS1 rule. A triangle the GTE
-// cannot project (a corner under H / 2 or behind the camera) goes through
-// bgClipMatrix and GL's clipping instead.
+// left <= x < right and top <= y < bottom, the PS1 rule. A corner the GTE
+// cannot project (under H / 2 or behind the camera) goes through
+// bgClipMatrix and GL's clipping instead. The choice is per corner, never per
+// triangle: two triangles sharing an edge then share its ends exactly, where
+// a per-triangle choice moved the shared edge on one side only and opened
+// cracks onto the floor's dark underside.
 void Ps1View::bakeClip(const splash::FlatObject& fo, const splash::Mesh& mesh, const std::vector<int>& tri, Vertex* out) const {
     const float gte = m_bakeCam->gte;
     const splash::BgFixedObject fixed = splash::bgFixedObject(fo, gte);
     const std::array<float, 16> m = splash::bgClipMatrix(*m_bakeCam, kBakeNear, kBakeFar);
     const float a = (kBakeFar + kBakeNear) / (kBakeFar - kBakeNear), b = -2 * kBakeFar * kBakeNear / (kBakeFar - kBakeNear);
-    for (size_t k = 0; k + 2 < tri.size(); k += 3) {
-        splash::BgFixedPoint p[3];
-        bool fixedOk = true;
-        for (size_t j = 0; j < 3; ++j)
-            fixedOk = fixedOk && splash::bgEngineProject(m_bakeEngine, fixed,
-                                                         splash::bgFixedVertex(mesh.positions[size_t(tri[k + j])], fo.lossyScale, gte), &p[j]);
-        for (size_t j = 0; j < 3; ++j) {
-            Vertex& v = out[k + j];
-            if (fixedOk) {
-                const float w = float(p[j].sz) * gte / 4096.f;
-                const float nx = (float(p[j].sx) + 0.5f - 0.0625f - splash::kBgCenterX) / splash::kBgCenterX;
-                const float ny = (splash::kBgCenterY - float(p[j].sy) - 0.5f + 0.0625f) / splash::kBgCenterY;
-                v.px = nx * w, v.py = ny * w, v.pz = a * w + b, v.pw = w;
-            } else {
-                const float g[4] = {v.px, v.py, v.pz, 1};
-                float c[4] = {};
-                for (int r = 0; r < 4; r++)
-                    for (int i = 0; i < 4; i++) c[r] += m[size_t(i * 4 + r)] * g[i];
-                v.px = c[0], v.py = c[1], v.pz = c[2], v.pw = c[3];
-            }
+    for (size_t k = 0; k < tri.size(); ++k) {
+        Vertex& v = out[k];
+        splash::BgFixedPoint p;
+        if (splash::bgEngineProject(m_bakeEngine, fixed, splash::bgFixedVertex(mesh.positions[size_t(tri[k])], fo.lossyScale, gte), &p)) {
+            const float w = float(p.sz) * gte / 4096.f;
+            const float nx = (float(p.sx) + 0.5f - 0.0625f - splash::kBgCenterX) / splash::kBgCenterX;
+            const float ny = (splash::kBgCenterY - float(p.sy) - 0.5f + 0.0625f) / splash::kBgCenterY;
+            v.px = nx * w, v.py = ny * w, v.pz = a * w + b, v.pw = w;
+        } else {
+            const float g[4] = {v.px, v.py, v.pz, 1};
+            float c[4] = {};
+            for (int r = 0; r < 4; r++)
+                for (int i = 0; i < 4; i++) c[r] += m[size_t(i * 4 + r)] * g[i];
+            v.px = c[0], v.py = c[1], v.pz = c[2], v.pw = c[3];
         }
     }
 }
