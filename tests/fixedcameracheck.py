@@ -140,7 +140,7 @@ check('the bake reports its file, occluders and layer tiles', len(baked) == 1, [
 rep = [l for l in out if l.startswith('fixedcam: Yard cam ')]
 check('the inspector line reports the settings and Baked',
       rep and re.match(r'fixedcam: Yard cam h 120 fov 90 layers 2 bpp 16 start on bake ' + re.escape(BAKE) +
-                       r' status Baked, [1-9]\d* layer tiles, \d+ KB VRAM$', rep[-1]) is not None, rep[-1:])
+                       r' status Baked, [1-9]\d* layer tiles, \d+ KB VRAM \(\d+% of it\)$', rep[-1]) is not None, rep[-1:])
 check('Look through moved the viewport', 'fixedcam: look through Yard cam' in out, [l for l in out if 'look through' in l])
 
 # 4. Keep 3D is offered on a mesh once there is a Fixed camera.

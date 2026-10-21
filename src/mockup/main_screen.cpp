@@ -10168,7 +10168,8 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                     for (const splash::ExportStats::BackgroundInfo& bi : res->stats.backgroundInfo)
                         if (bi.object == name)
                             line += ", " + std::to_string(bi.layerTiles) + " layer tiles, " + std::to_string((bi.vramBytes + 1023) / 1024) +
-                                    " KB VRAM" + (bi.droppedTiles ? ", " + std::to_string(bi.droppedTiles) + " over the limit" : std::string());
+                                    " KB VRAM (" + std::to_string((bi.vramBytes * 100 + 524288) / 1048576) + "% of it)" +
+                                    (bi.droppedTiles ? ", " + std::to_string(bi.droppedTiles) + " over the limit" : std::string());
                 tone = color::textDim;
                 thumbFile = (std::filesystem::path(fc.bake).parent_path() / b.image).generic_string();
             } catch (const std::exception& ex) {

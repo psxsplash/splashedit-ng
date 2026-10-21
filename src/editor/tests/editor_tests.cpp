@@ -12948,11 +12948,12 @@ void testFixedCameraPack() {
 
     const int W = splash::kBgWidth, H = splash::kBgHeight;
     // Occluders: the top-left 16x16 cell at 250, and the cell right of it
-    // with two depths 300 and 600 (two tiles). Everything else is image only.
+    // with a top half from 300 to 315 (one tile, drawn at its nearest, 300)
+    // over 600 (a second tile). Everything else is image only.
     std::vector<uint8_t> rgba(size_t(W) * H * 4, 90);
     std::vector<uint16_t> depth(size_t(W) * H, 0);
     for (int y = 0; y < 16; y++)
-        for (int x = 0; x < 32; x++) depth[size_t(y) * W + x] = uint16_t(x < 16 ? 250 : y < 8 ? 300 : 600);
+        for (int x = 0; x < 32; x++) depth[size_t(y) * W + x] = uint16_t(x < 16 ? 250 : y < 8 ? 300 + (x - 16) : 600);
     auto bake = [&]() {
         const std::vector<splash::FlatObject> flats = splash::flatten(scene);
         const splash::FlatObject* fo = nullptr;

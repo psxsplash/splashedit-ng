@@ -896,7 +896,7 @@ on a copy of the courtyard example, types Layers (`obj.fclayers`), turns on Show
 (`obj.fcstart`) and presses Bake (`fcbake`): `bakes/courtyard-Yard_cam.bgbake` and its image and
 occluder depth must exist at 320x240, the depth file's occluder count match the bake file's, and the
 editor print `fixedcam: baked <file> occluders N layer tiles M` and `fixedcam: Yard cam h 120 fov 90
-... status Baked, M layer tiles, K KB VRAM`. Look through (`fclook`) prints `fixedcam: look through Yard cam`. The Crate's
+... status Baked, M layer tiles, K KB VRAM (P% of it)`. Look through (`fclook`) prints `fixedcam: look through Yard cam`. The Crate's
 Keep 3D in fixed cameras switch (`obj.keep3d`, only drawn once a Fixed camera exists) saves on its mesh.
 After a Pillar moves in the saved scene, the next load says the scene changed since the bake and
 Problems counts a warning.
