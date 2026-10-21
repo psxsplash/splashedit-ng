@@ -46,7 +46,9 @@ struct ExportStats {
         std::string object;
         int layerTiles = 0;    // cut from the bake (before the kBgMaxLayerTiles cap)
         int droppedTiles = 0;  // over the cap, left out
-        int vramBytes = 0;     // image columns, layer sheets and their CLUTs
+        int vramBytes = 0;     // the whole atlases its image columns and layer sheets sit in, and their CLUTs
+        // Static meshes kept 3D because a script names them: (object, script).
+        std::vector<std::pair<std::string, std::string>> keptForScripts;
     };
     std::vector<BackgroundInfo> backgroundInfo;
     size_t splashpackBytes = 0, vramFileBytes = 0, spuFileBytes = 0;

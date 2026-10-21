@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <map>
 #include <optional>
 #include <string>
 #include <vector>
@@ -29,12 +30,20 @@ constexpr float kBgLayerSpanMetres = 0.5f;
 // frame. Over it the export keeps the tiles with the most pixels and warns.
 constexpr int kBgMaxLayerTiles = 1024;
 
+// Objects a script can reach by name: object name -> the project path of a
+// script (scene, object or trigger script, active objects only) that has it
+// as a quoted string ("Crate" or 'Crate'), as Entity.Find takes it.
+// `luaSource` gives a script's Lua text, "" when it cannot be read.
+using ScriptNames = std::map<std::string, std::string>;
+ScriptNames scriptNamedObjects(const Scene& scene, const std::vector<FlatObject>& flats,
+                               const std::function<std::string(const std::string&)>& luaSource);
+
 // Objects the game stops drawing while a background shows, because the bake
 // drew them: active static meshes with no script, skin, agent, player or
-// interactable, not moved or switched by a cutscene or animation, shown from
-// the start, not a Dynamic collider, and not set to Keep 3D.
-bool bakesIntoBackground(const Scene& scene, const FlatObject& fo);
-std::vector<bool> bakedObjects(const Scene& scene, const std::vector<FlatObject>& flats);
+// interactable, not named by a script (`named`), not moved or switched by a
+// cutscene or animation, shown from the start, not a Dynamic collider, and
+// not set to Keep 3D.
+std::vector<bool> bakedObjects(const Scene& scene, const std::vector<FlatObject>& flats, const ScriptNames& named);
 
 // A Fixed camera as psxsplash sees it. Unity world point p (Y up) is at
 // SX = 160 + H * dot(right, d) / dot(forward, d), SY = 120 - H * dot(up, d) / dot(forward, d)
@@ -125,7 +134,7 @@ std::vector<uint8_t> groundPixels(const std::vector<float>& sz, const BgCamera& 
 // every baked object's mesh, materials, colours and transform, plus the
 // lights that colour them. `fileHash` hashes a project file's bytes (0 when
 // unreadable). A different value means the scene changed since the bake.
-uint32_t bakeHash(const Scene& scene, const std::vector<FlatObject>& flats, const FlatObject& camera,
+uint32_t bakeHash(const Scene& scene, const std::vector<FlatObject>& flats, const FlatObject& camera, const ScriptNames& named,
                   const std::function<uint32_t(const std::string&)>& fileHash);
 std::string hashHex(uint32_t h);
 

@@ -73,12 +73,35 @@ std::string safeName(const std::string& s) {
 
 }  // namespace
 
-bool bakesIntoBackground(const Scene& scene, const FlatObject& fo) { return staticMesh(fo, trackTargets(scene)); }
+ScriptNames scriptNamedObjects(const Scene& scene, const std::vector<FlatObject>& flats,
+                               const std::function<std::string(const std::string&)>& luaSource) {
+    std::vector<std::string> scripts;
+    auto add = [&](const std::string& p) {
+        if (!p.empty() && std::find(scripts.begin(), scripts.end(), p) == scripts.end()) scripts.push_back(p);
+    };
+    add(scene.settings.script);
+    for (const FlatObject& fo : flats) {
+        if (!fo.activeInHierarchy) continue;
+        if (fo.object->script) add(fo.object->script->lua);
+        if (fo.object->trigger) add(fo.object->trigger->lua);
+    }
+    ScriptNames out;
+    for (const std::string& p : scripts) {
+        const std::string src = luaSource(p);
+        if (src.empty()) continue;
+        for (const FlatObject& fo : flats) {
+            const std::string& n = fo.object->name;
+            if (n.empty() || out.count(n)) continue;
+            if (src.find('"' + n + '"') != std::string::npos || src.find('\'' + n + '\'') != std::string::npos) out[n] = p;
+        }
+    }
+    return out;
+}
 
-std::vector<bool> bakedObjects(const Scene& scene, const std::vector<FlatObject>& flats) {
+std::vector<bool> bakedObjects(const Scene& scene, const std::vector<FlatObject>& flats, const ScriptNames& named) {
     const std::set<std::string> moved = trackTargets(scene);
     std::vector<bool> out(flats.size());
-    for (size_t i = 0; i < flats.size(); i++) out[i] = staticMesh(flats[i], moved);
+    for (size_t i = 0; i < flats.size(); i++) out[i] = staticMesh(flats[i], moved) && !named.count(flats[i].object->name);
     return out;
 }
 
@@ -316,7 +339,7 @@ std::vector<uint8_t> groundPixels(const std::vector<float>& sz, const BgCamera& 
     return out;
 }
 
-uint32_t bakeHash(const Scene& scene, const std::vector<FlatObject>& flats, const FlatObject& camera,
+uint32_t bakeHash(const Scene& scene, const std::vector<FlatObject>& flats, const FlatObject& camera, const ScriptNames& named,
                   const std::function<uint32_t(const std::string&)>& fileHash) {
     Fnv f;
     f.str("bgbake 1");
@@ -330,7 +353,7 @@ uint32_t bakeHash(const Scene& scene, const std::vector<FlatObject>& flats, cons
     f.u32(fog.enabled ? 1 : 0);
     for (float c : fog.color) f.num(c);
     f.u32(uint32_t(fog.density));
-    const std::vector<bool> baked = bakedObjects(scene, flats);
+    const std::vector<bool> baked = bakedObjects(scene, flats, named);
     for (size_t i = 0; i < flats.size(); i++) {
         const FlatObject& fo = flats[i];
         if (baked[i]) {

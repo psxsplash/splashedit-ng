@@ -12681,9 +12681,22 @@ void testFixedCameraBakedSet() {
     t.target = "Door";
     cs.tracks.push_back(t);
     s.cutscenes.push_back(cs);
-    const std::vector<bool> b = splash::bakedObjects(s, splash::flatten(s));
+    const std::vector<bool> b = splash::bakedObjects(s, splash::flatten(s), {});
     const std::vector<bool> want = {true, false, false, false, false, false, false, true, false, false};
     CHECK(b == want);
+    // A script naming an object in quotes keeps it 3D (it can Entity.Find it and move it).
+    s.settings.script = "scripts/scene.lua";
+    s.objects[9].script.emplace();
+    s.objects[9].script->lua = "scripts/empty.lua";
+    const std::vector<splash::FlatObject> flats = splash::flatten(s);
+    const splash::ScriptNames named = splash::scriptNamedObjects(s, flats, [](const std::string& p) -> std::string {
+        if (p == "scripts/scene.lua") return "local w = Entity.Find('Wall')\nlocal f = 'Floorish'";
+        if (p == "scripts/empty.lua") return "print(\"Floor\")";
+        return {};
+    });
+    CHECK(named.size() == 2 && named.at("Wall") == "scripts/scene.lua" && named.at("Floor") == "scripts/empty.lua");
+    const std::vector<bool> b2 = splash::bakedObjects(s, flats, named);
+    CHECK(!b2[0] && !b2[7]);
 }
 
 // The bake's projection is psxsplash's: the GL clip matrix lands every point
@@ -12928,6 +12941,8 @@ void testFixedCameraPack() {
     fs::remove_all(dir);
     fs::create_directories(dir);
     fs::copy(src / "examples" / "courtyard", project, fs::copy_options::recursive);
+    // The scene's script can reach Crate (3) by name: it must stay 3D.
+    { std::ofstream(project / "scripts" / "game_logic.lua", std::ios::app) << "\nlocal kept = Entity.Find(\"Crate (3)\")\n"; }
     splash::Scene scene = splash::loadScene(project / "courtyard.scene");
 
     const splash::ExportResult plain = splash::exportSplashpack(scene, project, dir / "plain.splashpack");
@@ -12956,6 +12971,8 @@ void testFixedCameraPack() {
         for (int x = 0; x < 32; x++) depth[size_t(y) * W + x] = uint16_t(x < 16 ? 250 : y < 8 ? 300 + (x - 16) : 600);
     auto bake = [&]() {
         const std::vector<splash::FlatObject> flats = splash::flatten(scene);
+        const splash::ScriptNames named =
+            splash::scriptNamedObjects(scene, flats, [&](const std::string& p) { return bgtest::slurp(project / p); });
         const splash::FlatObject* fo = nullptr;
         for (const splash::FlatObject& f : flats)
             if (f.object->name == "Yard cam") fo = &f;
@@ -12963,7 +12980,7 @@ void testFixedCameraPack() {
         b.image = "yard.png";
         b.depth = "yard.depth";
         b.h = 120;
-        b.hash = splash::hashHex(splash::bakeHash(scene, flats, *fo, [&](const std::string& p) { return bgtest::fnvFile(project / p); }));
+        b.hash = splash::hashHex(splash::bakeHash(scene, flats, *fo, named, [&](const std::string& p) { return bgtest::fnvFile(project / p); }));
         splash::writeBake(project / "bakes" / "yard.bgbake", b, rgba, depth);
     };
     bake();
@@ -13005,12 +13022,14 @@ void testFixedCameraPack() {
     }
     CHECK(uint8_t(b[layersAt + 20 + 14]) == uint8_t(b[layersAt + 14]) + 16);  // the next spot in the sheet
     CHECK(rd16(b, tilesAt + 18) == 0);                                         // the image has no depth
+    CHECK(r.stats.backgroundInfo.size() == 1 && r.stats.backgroundInfo[0].keptForScripts.size() == 1 &&
+          r.stats.backgroundInfo[0].keptForScripts[0] == std::make_pair(std::string("Crate (3)"), std::string("scripts/game_logic.lua")));
     CHECK(r.stats.backgroundInfo.size() == 1 && r.stats.backgroundInfo[0].layerTiles == 3 &&
           r.stats.backgroundInfo[0].vramBytes == (256 * 240 + 64 * 240 + 256 * 16) * 2);
     // Hidden: every courtyard mesh but the kept crate, as game object indices.
     std::vector<uint16_t> hid;
     for (uint16_t i = 0; i < hidden; i++) hid.push_back(rd16(b, hiddenAt + 2 * i));
-    const std::vector<uint16_t> want = {0, 1, 2, 3, 4, 5, 6, 8};
+    const std::vector<uint16_t> want = {0, 1, 2, 3, 4, 5, 6};  // Crate (2) kept 3D, Crate (3) named by the script
     CHECK(hid == want);
     // Lua records start right after the 160-byte header.
     const size_t luaAt = 160;

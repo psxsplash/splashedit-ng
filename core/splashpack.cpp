@@ -2208,6 +2208,21 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
             return 0;
         }
     };
+    // Objects a script names stay 3D: the script may move or hide them.
+    const ScriptNames scriptNamed = scriptNamedObjects(scene, flat, [&](const std::string& p) -> std::string {
+        try {
+            std::string src = readFile(root / p);
+            return fs::path(p).extension() == ".blocks" ? blocksFileToLua(src, p) : src;
+        } catch (const std::exception&) {
+            return {};
+        }
+    });
+    std::vector<std::pair<std::string, std::string>> keptForScripts;
+    {
+        const std::vector<bool> without = bakedObjects(scene, flat, {}), with = bakedObjects(scene, flat, scriptNamed);
+        for (size_t i = 0; i < flat.size(); i++)
+            if (without[i] && !with[i]) keptForScripts.push_back({flat[i].object->name, scriptNamed.at(flat[i].object->name)});
+    }
     for (const FlatObject& fo : flat) {
         if (!fo.activeInHierarchy || !fo.object->fixedCamera) continue;
         const FixedCameraComponent& fc = *fo.object->fixedCamera;
@@ -2227,7 +2242,7 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
             res.errors.push_back(who + ": its bake did not load: " + ex.what());
             continue;
         }
-        if (bake.hash != hashHex(bakeHash(scene, flat, fo, fileHash)))
+        if (bake.hash != hashHex(bakeHash(scene, flat, fo, scriptNamed, fileHash)))
             res.warnings.push_back(who + ": the scene changed since the bake (a baked object, a light, the fog or the camera); "
                                          "press Bake again or the background shows the old scene");
         BgOut b;
@@ -2247,6 +2262,7 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
         ExportStats::BackgroundInfo info;
         info.object = fo.object->name;
         info.layerTiles = int(lt.size());
+        info.keptForScripts = keptForScripts;
         if (int(lt.size()) > kBgMaxLayerTiles) {
             // Keep the tiles that cover the most.
             std::stable_sort(lt.begin(), lt.end(), [](const BgLayerTile& a, const BgLayerTile& c) { return a.pixels > c.pixels; });
@@ -3209,7 +3225,7 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     // object lists, then the table {u16 count, u16 0} and its 64-byte records
     // (psxsplash backgroundmath.hh).
     if (!backgrounds.empty()) {
-        const std::vector<bool> baked = bakedObjects(scene, flat);
+        const std::vector<bool> baked = bakedObjects(scene, flat, scriptNamed);
         std::vector<uint16_t> hidden;
         for (size_t i = 0; i < exporters.size(); i++)
             if (baked[size_t(exporters[i].flat - flat.data())]) hidden.push_back(uint16_t(i));

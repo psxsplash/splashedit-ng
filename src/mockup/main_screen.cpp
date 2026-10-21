@@ -18,6 +18,7 @@
 #include <string>
 
 #include "audio.hh"
+#include "blocks.hh"
 #include "budget.hh"
 #include "disc.hh"
 #include "rooms.hh"
@@ -1098,7 +1099,18 @@ static void runBake(State& st, editor::Document& doc, viewport::Ps1View& view, c
     try {
         const splash::BgCamera bc = splash::bgCameraAsEngine(splash::bgCamera(*cam, scene.settings.gteScaling), cam->worldRotation);
         viewport::Ps1View::BakeShot shot;
-        if (!view.bake(bc, splash::bakedObjects(scene, flats), &shot)) throw std::runtime_error("no scene");
+        // As the export decides it: a mesh a script names stays 3D.
+        const splash::ScriptNames named = splash::scriptNamedObjects(scene, flats, [&](const std::string& p) -> std::string {
+            std::ifstream in(doc.resolve(p), std::ios::binary);
+            if (!in) return {};
+            std::string src((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+            try {
+                return std::filesystem::path(p).extension() == ".blocks" ? splash::blocksFileToLua(src, p) : src;
+            } catch (const std::exception&) {
+                return {};
+            }
+        });
+        if (!view.bake(bc, splash::bakedObjects(scene, flats, named), &shot)) throw std::runtime_error("no scene");
         const std::vector<uint16_t> depth = splash::occluderDepth(shot.sz, splash::groundPixels(shot.sz, bc));
         auto fileHash = [&](const std::string& p) -> uint32_t {
             std::ifstream in(doc.resolve(p), std::ios::binary);
@@ -1111,7 +1123,7 @@ static void runBake(State& st, editor::Document& doc, viewport::Ps1View& view, c
         const std::string stem = std::filesystem::path(rel).stem().string();
         b.image = stem + ".png";
         b.depth = stem + ".depth";
-        b.hash = splash::hashHex(splash::bakeHash(scene, flats, *cam, fileHash));
+        b.hash = splash::hashHex(splash::bakeHash(scene, flats, *cam, named, fileHash));
         b.h = fc.h;
         b.occluders = int(std::count_if(depth.begin(), depth.end(), [](uint16_t d) { return d != 0; }));
         splash::writeBake(doc.resolve(rel), b, shot.rgba, depth);
@@ -10195,6 +10207,22 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
             nameRect("obj.fcstatus", ImRect(at, at + ts));
             y += ts.y + space::sm;
         }
+        // Static meshes the bake leaves 3D because a script names them.
+        if (const std::optional<splash::ExportResult>& res = st.live.result(); res)
+            for (const splash::ExportStats::BackgroundInfo& bi : res->stats.backgroundInfo)
+                if (bi.object == name && !bi.keptForScripts.empty()) {
+                    std::string kept;
+                    for (const auto& [obj, script] : bi.keptForScripts)
+                        kept += (kept.empty() ? "" : ", ") + obj + " (named in " + std::filesystem::path(script).filename().string() + ")";
+                    kept = "Kept 3D, a script can move them: " + kept;
+                    const float tx = x0 + space::sm, w = x1 - space::sm - tx;
+                    const ImVec2 at(tx, y);
+                    const ImVec2 ts = f.regular->CalcTextSizeA(type::caption, FLT_MAX, w, kept.c_str());
+                    dl->AddText(f.regular, type::caption, at, color::textDim, kept.c_str(), nullptr, w);
+                    nameRect("obj.fckept", ImRect(at, at + ts));
+                    y += ts.y + space::sm;
+                    report("fixedcamkept", "fixedcam: " + name + " " + kept);
+                }
         if (!thumbFile.empty()) {
             BakeThumbView tv = bakeThumb(st, doc, thumbFile);
             if (tv.tex) {
