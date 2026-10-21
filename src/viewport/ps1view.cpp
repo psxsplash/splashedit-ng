@@ -927,6 +927,7 @@ void Ps1View::ray(ImVec2 screen, ImVec2 mn, ImVec2 sz, Vec3* origin, Vec3* dir) 
 }
 
 void Ps1View::orbit(float dx, float dy) {
+    m_fovY = kFovY;  // a Look through lens lasts until the view turns or zooms
     Vec3 off = m_eye - m_target;
     float r = std::sqrt(dot(off, off));
     if (r <= 0) return;
@@ -948,6 +949,7 @@ void Ps1View::pan(float dx, float dy, float panelH) {
 }
 
 void Ps1View::dolly(float steps) {
+    m_fovY = kFovY;  // a Look through lens lasts until the view turns or zooms
     Vec3 off = m_eye - m_target;
     float r = std::sqrt(dot(off, off));
     if (r <= 0) return;
@@ -956,6 +958,7 @@ void Ps1View::dolly(float steps) {
 }
 
 void Ps1View::frame(Vec3 center, float radius) {
+    m_fovY = kFovY;  // a Look through lens lasts until the view turns or zooms
     Vec3 dir = normalize(m_eye - m_target);
     if (dot(dir, dir) == 0) dir = {0, 0, 1};
     float r = std::max(radius, 0.1f) / std::sin(m_fovY * 0.5f) * 1.3f;
@@ -964,6 +967,7 @@ void Ps1View::frame(Vec3 center, float radius) {
 }
 
 void Ps1View::lookAround(float dx, float dy) {
+    m_fovY = kFovY;  // a Look through lens lasts until the view turns or zooms
     Vec3 f = normalize(m_target - m_eye);
     float r = distance();
     if (r <= 0) return;

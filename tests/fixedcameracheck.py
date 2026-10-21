@@ -7,7 +7,8 @@
 # and VRAM, and no "changed" warning shows. With a Fixed camera in the scene
 # a mesh offers Keep 3D in fixed cameras. Moving a pillar in the saved scene
 # makes the next load warn that the scene changed since the bake. Look
-# through prints where the viewport went.
+# through puts the viewport at the camera with its field of view: the clean
+# viewport's edges land where the bake's are.
 # usage: python3 fixedcameracheck.py <splashedit> [screenshot]   (needs a display: xvfb-run -a)
 import json, os, re, shutil, struct, subprocess, sys, tempfile, zlib
 
@@ -28,7 +29,7 @@ def check(name, ok, detail=''):
 
 
 def png_rgba(path):
-    """(width, height, flat list of RGBA tuples) of an 8-bit RGBA PNG."""
+    """(width, height, flat list of RGBA tuples) of an 8-bit RGBA or RGB PNG."""
     data = open(path, 'rb').read()
     pos, idat, w, h = 8, b'', 0, 0
     while pos < len(data):
@@ -36,12 +37,13 @@ def png_rgba(path):
         body = data[pos + 8:pos + 8 + n]
         if kind == b'IHDR':
             w, h, depth, ctype = struct.unpack('>IIBB', body[:10])
-            if depth != 8 or ctype != 6:
+            if depth != 8 or ctype not in (2, 6):
                 return w, h, []
+            bpp = 4 if ctype == 6 else 3
         elif kind == b'IDAT':
             idat += body
         pos += 12 + n
-    raw, bpp, stride, px, prev = zlib.decompress(idat), 4, w * 4, [], bytearray(w * 4)
+    raw, stride, px, prev = zlib.decompress(idat), w * bpp, [], bytearray(w * bpp)
     for y in range(h):
         f, line = raw[y * (stride + 1)], bytearray(raw[y * (stride + 1) + 1:(y + 1) * (stride + 1)])
         for i in range(stride):
@@ -54,7 +56,7 @@ def png_rgba(path):
                 p = a + b - c
                 pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
                 line[i] = (line[i] + (a if pa <= pb and pa <= pc else b if pb <= pc else c)) & 255
-        px += [tuple(line[i:i + 4]) for i in range(0, stride, 4)]
+        px += [tuple(line[i:i + 3]) + ((line[i + 3],) if bpp == 4 else (255,)) for i in range(0, stride, bpp)]
         prev = line
     return w, h, px
 
@@ -141,7 +143,63 @@ rep = [l for l in out if l.startswith('fixedcam: Yard cam ')]
 check('the inspector line reports the settings and Baked',
       rep and re.match(r'fixedcam: Yard cam h 120 fov 90 layers 2 bpp 16 start on bake ' + re.escape(BAKE) +
                        r' status Baked, [1-9]\d* layer tiles, \d+ KB VRAM \(\d+% of it\)$', rep[-1]) is not None, rep[-1:])
-check('Look through moved the viewport', 'fixedcam: look through Yard cam' in out, [l for l in out if 'look through' in l])
+check('Look through moved the viewport with the camera\'s 90 degrees', 'fixedcam: look through Yard cam fov 90' in out,
+      [l for l in out if 'look through' in l])
+
+# 3b. Look through frames what the bake shows: the clean viewport, scaled to
+# 240 rows and cut to the middle 320 columns, has its edges where the bake has
+# them (best match within a pixel of no shift).
+lt_shot = os.path.join(project, 'look.png')
+r = subprocess.run([editor, '--size', '1600x960', '--project', project, '--select', 'Yard cam', '--no-overlays', '--clean'] + W(20) +
+                   ['--scroll-to', '@fclook', '--click', '@fclook'] + W(10) + ['--move', '760,940'] + W(5) + ['--screenshot', lt_shot],
+                   capture_output=True, text=True, env=ENV, timeout=280)
+rect = None
+for l in (r.stdout + r.stderr).splitlines():
+    m = re.match(r'control vp\.view at (-?\d+),(-?\d+) (-?\d+),(-?\d+)$', l)
+    if m: rect = tuple(int(v) for v in m.groups())
+sw, sh, spx = png_rgba(lt_shot) if os.path.exists(lt_shot) else (0, 0, [])
+def luma_grid(px, w, x0, y0, x1, y1, ow, oh):
+    # Nearest sample of the rect onto ow x oh, as luma.
+    out = []
+    for oy in range(oh):
+        sy = y0 + (oy + 0.5) * (y1 - y0) / oh
+        row = []
+        for ox in range(ow):
+            sx = x0 + (ox + 0.5) * (x1 - x0) / ow
+            p = px[int(sy) * w + int(sx)]
+            row.append(0.3 * p[0] + 0.59 * p[1] + 0.11 * p[2])
+        out.append(row)
+    return out
+def edges(g):
+    h, w = len(g), len(g[0])
+    e = [[False] * w for _ in range(h)]
+    for y in range(1, h - 1):
+        for x in range(1, w - 1):
+            e[y][x] = abs(g[y][x + 1] - g[y][x - 1]) + abs(g[y + 1][x] - g[y - 1][x]) > 40
+    return e
+if rect and spx and px:
+    x0, y0, x1, y1 = rect
+    vh = y1 - y0
+    vw = vh * 320 / 240  # the bake's 4:3 in the middle of the panel
+    cx = (x0 + x1) / 2
+    view = edges(luma_grid(spx, sw, cx - vw / 2, y0, cx + vw / 2, y1, 320, 240))
+    bake_l = [[0.3 * p[0] + 0.59 * p[1] + 0.11 * p[2] for p in px[y * 320:(y + 1) * 320]] for y in range(240)]
+    be = edges(bake_l)
+    best, scores = None, {}
+    for dy in range(-3, 4):
+        for dx in range(-3, 4):
+            inter = uni = 0
+            for y in range(8, 232):
+                for x in range(8, 312):
+                    a, b = view[y][x], be[y + dy][x + dx]
+                    inter += a and b
+                    uni += a or b
+            scores[(dx, dy)] = inter / max(1, uni)
+    best = max(scores, key=scores.get)
+    check('Look through frames the bake: edges best aligned within a pixel', abs(best[0]) <= 1 and abs(best[1]) <= 1 and scores[best] > 0.3,
+          (best, round(scores[best], 3), round(scores[(0, 0)], 3)))
+else:
+    check('Look through screenshot and viewport rect', False, (rect, bool(spx), bool(px)))
 
 # 4. Keep 3D is offered on a mesh once there is a Fixed camera.
 s2, out2 = run(project, 'Crate', ['--scroll-to', '@obj.keep3d', '--click', '@obj.keep3d'] + W(3), os.path.join(project, 'keep.png'))

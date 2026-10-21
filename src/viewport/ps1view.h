@@ -97,7 +97,8 @@ class Ps1View {
     void setOrtho(bool on) { m_ortho = on; }
     bool ortho() const { return m_ortho; }
     // Vertical field of view in radians (kFovY unless the Player view sets
-    // the engine's, #356). Clamped to [0.05, 3.0].
+    // the engine's, #356, or a Fixed camera's after Look through until the
+    // view is turned, zoomed or framed). Clamped to [0.05, 3.0].
     void setFovY(float radians) { m_fovY = radians < 0.05f ? 0.05f : radians > 3.0f ? 3.0f : radians; }
     float fovY() const { return m_fovY; }
     // World units covered by one panel pixel at `depth` in front of the eye.
