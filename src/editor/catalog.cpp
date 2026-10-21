@@ -21,6 +21,7 @@ const std::vector<ComponentInfo>& components() {
         {ComponentKind::Portal, "Portal", "door doorway opening room link culling", "An opening between two Rooms the camera can see through."},
         {ComponentKind::Walkoff, "Nav walk-off zone", "ledge pit drop edge fall navigation", "Lets the player walk off nav edges inside this box."},
         {ComponentKind::Agent, "Agent (NPC)", "npc enemy guard ai patrol waypoint vision hearing chase", "A character that walks the nav regions, patrols and senses the player."},
+        {ComponentKind::FixedCamera, "Fixed camera", "baked background prerendered resident evil camera angle view", "A camera angle baked into a 2D background the characters walk in front of and behind."},
     };
     return list;
 }
@@ -47,6 +48,7 @@ bool hasComponent(const splash::Object& o, ComponentKind k) {
         case ComponentKind::Portal: return o.portal.has_value();
         case ComponentKind::Walkoff: return o.walkoff.has_value();
         case ComponentKind::Agent: return o.agent.has_value();
+        case ComponentKind::FixedCamera: return o.fixedCamera.has_value();
     }
     return false;
 }
@@ -75,6 +77,7 @@ bool addComponent(splash::Object& o, ComponentKind k) {
         case ComponentKind::Portal: o.portal.emplace(); break;
         case ComponentKind::Walkoff: o.walkoff.emplace(); break;
         case ComponentKind::Agent: o.agent.emplace(); break;
+        case ComponentKind::FixedCamera: o.fixedCamera.emplace(); break;
     }
     return true;
 }
@@ -100,6 +103,7 @@ bool removeComponent(splash::Object& o, ComponentKind k) {
         case ComponentKind::Portal: o.portal.reset(); break;
         case ComponentKind::Walkoff: o.walkoff.reset(); break;
         case ComponentKind::Agent: o.agent.reset(); break;
+        case ComponentKind::FixedCamera: o.fixedCamera.reset(); break;
     }
     return true;
 }
@@ -120,6 +124,7 @@ const std::vector<ObjectPreset>& presets() {
         {"Portal", "door doorway opening room link", "An opening between two Rooms the camera can see through.", {K::Portal}},
         {"Nav walk-off zone", "ledge pit drop edge fall navigation", "Lets the player walk off nav edges inside this box.", {K::Walkoff}},
         {"Agent (NPC)", "npc enemy guard ai patrol waypoint", "A character that walks the nav regions, patrols and senses the player.", {K::Agent}},
+        {"Fixed camera", "baked background prerendered camera angle", "A camera angle baked into a 2D background.", {K::FixedCamera}},
     };
     return list;
 }

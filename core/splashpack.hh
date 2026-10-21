@@ -40,6 +40,8 @@ struct StreamWarning {
 constexpr uint32_t kOtMin = 256, kOtMax = 65536;
 
 struct ExportStats {
+    // Fixed cameras whose bake went into the pack (v28 background table).
+    int backgrounds = 0;
     size_t splashpackBytes = 0, vramFileBytes = 0, spuFileBytes = 0;
     // VRAM: display and draw buffers, texture atlases (each width x 256 at
     // 16 bits per texel), CLUTs and font sheets.

@@ -15,6 +15,7 @@
 #include <sstream>
 
 #include "audio.hh"
+#include "background.hh"
 #include "binwriter.hh"
 #include "blocks.hh"
 #include "budget.hh"
@@ -2190,6 +2191,78 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     }
     if (!res.ok()) return res;
 
+    // Baked backgrounds: each Fixed camera with a bake, its image as 256- and
+    // 64-wide columns and each layer as the 64x64 cells it touches, packed
+    // after the sprites. The bake is checked against the scene as it is now.
+    struct BgTileOut {
+        int x, y;
+        PsxTexture* tex;
+    };
+    struct BgOut {
+        const FlatObject* flat;
+        BgEngineCamera cam;
+        bool showAtStart = false;
+        std::vector<BgTileOut> image;
+        std::vector<BgLayerBand> bands;
+        std::vector<std::vector<BgTileOut>> layers;
+    };
+    std::vector<BgOut> backgrounds;
+    auto fileHash = [&](const std::string& p) -> uint32_t {
+        try {
+            const std::string bytes = readFile(root / p);
+            uint32_t h = 2166136261u;
+            for (unsigned char c : bytes) h = (h ^ c) * 16777619u;
+            return h;
+        } catch (const std::exception&) {
+            return 0;
+        }
+    };
+    for (const FlatObject& fo : flat) {
+        if (!fo.activeInHierarchy || !fo.object->fixedCamera) continue;
+        const FixedCameraComponent& fc = *fo.object->fixedCamera;
+        const std::string who = "Fixed camera '" + fo.object->name + "'";
+        std::error_code ec;
+        if (fc.bake.empty() || !fs::exists(root / fc.bake, ec)) {
+            res.warnings.push_back(who + " is not baked" + (fc.bake.empty() ? std::string() : " (" + fc.bake + " is missing)") +
+                                   ": select it and press Bake, or Background.Show cannot show it");
+            continue;
+        }
+        BgBake bake;
+        BgBakePixels px;
+        try {
+            bake = readBake(root / fc.bake);
+            px = readBakePixels(root / fc.bake, bake);
+        } catch (const std::exception& ex) {
+            res.errors.push_back(who + ": its bake did not load: " + ex.what());
+            continue;
+        }
+        if (bake.hash != hashHex(bakeHash(scene, flat, fo, fileHash)))
+            res.warnings.push_back(who + ": the scene changed since the bake (a baked object, a light, the fog or the camera); "
+                                         "press Bake again or the background shows the old scene");
+        BgOut b;
+        b.flat = &fo;
+        BgCamera cam = bgCamera(fo, gte);
+        cam.h = float(bake.h);
+        b.cam = bgEngineCamera(cam, fo.worldRotation);
+        b.showAtStart = fc.showAtStart;
+        b.bands = bake.bands;
+        const std::string id = fc.bake + "#";
+        auto add = [&](const BgTileImage& t, bool cutout, const std::string& name, std::vector<BgTileOut>& into) {
+            textureStore.push_back(convertTexture(t.image, fc.bitDepth, cutout));
+            textureStore.back().source = id + name;
+            into.push_back({t.x, t.y, &textureStore.back()});
+        };
+        const std::vector<BgTileImage> tiles = backgroundTiles(px.image);
+        for (size_t i = 0; i < tiles.size(); i++) add(tiles[i], false, "image" + std::to_string(i), b.image);
+        b.layers.resize(bake.bands.size());
+        for (size_t k = 0; k < bake.bands.size(); k++) {
+            const std::vector<BgTileImage> lt = layerTiles(px.image, px.layerOf, int(k));
+            for (size_t i = 0; i < lt.size(); i++)
+                add(lt[i], true, "layer" + std::to_string(k) + "." + std::to_string(i), b.layers[k]);
+        }
+        backgrounds.push_back(std::move(b));
+    }
+
     // VRAM packing over every object's texture list in object order.
     std::vector<PsxTexture*> all;
     for (ExpObject& e : exporters) all.insert(all.end(), e.textures.begin(), e.textures.end());
@@ -2197,6 +2270,11 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
         for (PsxTexture* t : cv)
             if (t) all.push_back(t);
     for (PsxTexture* t : spriteTextures) all.push_back(t);
+    for (BgOut& b : backgrounds) {
+        for (BgTileOut& t : b.image) all.push_back(t.tex);
+        for (auto& l : b.layers)
+            for (BgTileOut& t : l) all.push_back(t.tex);
+    }
     // With fog on, psxsplash draws the fog over a 4bpp or 8bpp cutout texture
     // through a mask CLUT, so the texture's holes get no fog.
     bool fogMask4 = false, fogMask8 = false;
@@ -2208,6 +2286,21 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
                 if (t->bitDepth == BitDepth::Bpp8) fogMask8 = true;
             }
     VramLayout vram = packVram(all, options.vram, res.errors, fogMask4, fogMask8);
+    // A texture that did not fit keeps page 0,0 (framebuffer 0), where
+    // nothing is ever placed.
+    for (BgOut& b : backgrounds) {
+        size_t words = 0, unplaced = 0;
+        auto count = [&](const BgTileOut& t) {
+            words += size_t(t.tex->quantizedWidth) * t.tex->height + t.tex->palette.size();
+            if (t.tex->texpageX == 0 && t.tex->texpageY == 0) unplaced++;
+        };
+        for (const BgTileOut& t : b.image) count(t);
+        for (const auto& l : b.layers)
+            for (const BgTileOut& t : l) count(t);
+        if (unplaced)
+            res.errors.push_back("Fixed camera '" + b.flat->object->name + "': the baked background (" + std::to_string(words * 2 / 1024) +
+                                 " KB) does not fit in VRAM; set its Bit depth to 8, use fewer layers, or free VRAM");
+    }
     // psxsplash steps through a sheet's cells with 8-bit texture coordinates
     // from its top-left corner, so the whole grid must sit in one 256x256 page.
     const bool packed = res.ok();  // a texture that did not fit keeps 0,0: no page to check
@@ -2569,11 +2662,13 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     st.bumpAllocatorSize = scene.settings.bumpAllocatorSize > 0 ? (uint32_t(scene.settings.bumpAllocatorSize) + 3) & ~3u
                                                                  : st.bumpAllocatorNeed;
 
-    // ---- header (156 bytes, v25)
+    // ---- header (156 bytes, v25; 160 bytes, v28, with baked backgrounds).
+    // v27 stays the default: an engine that predates v28 reads a 156-byte
+    // header whatever the version says.
     bool hasLights = !runtimeLights.empty();
     w.u8('S');
     w.u8('P');
-    w.u16(27);
+    w.u16(backgrounds.empty() ? 27 : 28);
     w.u16(uint16_t(luaFiles.size()));
     w.u16(uint16_t(exporters.size()));
     res.stats.gameObjects = int(exporters.size());
@@ -2663,6 +2758,11 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     w.u32(0);
     w.u32(st.orderingTableSize);
     w.u32(st.bumpAllocatorSize);
+    size_t backgroundTableOffsetPos = 0;
+    if (!backgrounds.empty()) {
+        backgroundTableOffsetPos = w.pos();
+        w.u32(0);
+    }
 
     // ---- Lua metadata
     std::vector<size_t> luaOffsetPos;
@@ -3089,6 +3189,84 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
             w.bytes(name.data(), name.size());
             w.u8(0);
         }
+    }
+
+    // ---- baked backgrounds (v28): names, tiles, layers and hidden object
+    // lists, then the table {u16 count, u16 0} and its 64-byte records
+    // (psxsplash backgroundmath.hh).
+    if (!backgrounds.empty()) {
+        const std::vector<bool> baked = bakedObjects(scene, flat);
+        std::vector<uint16_t> hidden;
+        for (size_t i = 0; i < exporters.size(); i++)
+            if (baked[size_t(exporters[i].flat - flat.data())]) hidden.push_back(uint16_t(i));
+        auto writeTiles = [&](const std::vector<BgTileOut>& tiles) {
+            w.align4();
+            const uint32_t at = uint32_t(w.pos());
+            for (const BgTileOut& t : tiles) {
+                const PsxTexture& x = *t.tex;
+                w.i16(int16_t(t.x));
+                w.i16(int16_t(t.y));
+                w.u16(uint16_t(x.width));
+                w.u16(uint16_t(x.height));
+                w.u16(x.hasPalette ? x.clutPackingX : 0);
+                w.u16(x.hasPalette ? x.clutPackingY : 0);
+                w.u8(x.texpageX);
+                w.u8(x.texpageY);
+                w.u8(uint8_t(x.packingX * (16 / int(x.bitDepth))));
+                w.u8(x.packingY);
+                w.u8(x.bitDepth == BitDepth::Bpp4 ? 0 : x.bitDepth == BitDepth::Bpp8 ? 1 : 2);
+                w.u8(0);
+                w.u8(0);
+                w.u8(0);
+            }
+            return at;
+        };
+        struct Offsets {
+            uint32_t name = 0, tiles = 0, layers = 0, hiddenAt = 0;
+        };
+        std::vector<Offsets> offs(backgrounds.size());
+        for (size_t bi = 0; bi < backgrounds.size(); bi++) {
+            const BgOut& b = backgrounds[bi];
+            Offsets& o = offs[bi];
+            const std::string name = truncateBytes(b.flat->object->name, 31);
+            o.name = uint32_t(w.pos());
+            w.bytes(name.data(), name.size());
+            w.u8(0);
+            o.tiles = writeTiles(b.image);
+            std::vector<uint32_t> layerTilesAt;
+            for (const auto& l : b.layers) layerTilesAt.push_back(writeTiles(l));
+            w.align4();
+            o.layers = uint32_t(w.pos());
+            for (size_t k = 0; k < b.layers.size(); k++) {
+                w.u32(layerTilesAt[k]);
+                w.u16(uint16_t(b.layers[k].size()));
+                w.u16(uint16_t(clampv(b.bands[k].nearSZ, 0, 65535)));
+            }
+            o.hiddenAt = uint32_t(w.pos());
+            for (uint16_t h : hidden) w.u16(h);
+        }
+        w.align4();
+        w.patchU32(backgroundTableOffsetPos, uint32_t(w.pos()));
+        w.u16(uint16_t(backgrounds.size()));
+        w.u16(0);
+        for (size_t bi = 0; bi < backgrounds.size(); bi++) {
+            const BgOut& b = backgrounds[bi];
+            const Offsets& o = offs[bi];
+            w.u32(o.name);
+            for (int32_t v : b.cam.position) w.i32(v);
+            for (int16_t v : b.cam.rotation) w.i16(v);
+            for (int16_t v : b.cam.angles) w.i16(v);
+            w.u16(b.cam.h);
+            w.u16(uint16_t(b.image.size()));
+            w.u16(uint16_t(b.layers.size()));
+            w.u16(uint16_t(hidden.size()));
+            w.u16(b.showAtStart ? 1 : 0);
+            w.u16(0);
+            w.u32(o.tiles);
+            w.u32(o.layers);
+            w.u32(hidden.empty() ? 0 : o.hiddenAt);
+        }
+        res.stats.backgrounds = int(backgrounds.size());
     }
 
     // ---- memory card (v21): one 464-byte record, 0 in the header when off

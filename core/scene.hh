@@ -54,6 +54,10 @@ struct MeshComponent {
     int uvOffsetMaterial = 0;
     // Auto: lit by runtime lights whose range reaches the mesh bounds.
     DynamicLighting dynamicLighting = DynamicLighting::Auto;
+    // A static mesh is baked into every Fixed camera's background and not
+    // drawn while one shows; on, it stays 3D (it moves, or must sort with
+    // the characters).
+    bool keep3dInFixedCameras = false;
     ExtraKeys extra;
 };
 
@@ -208,6 +212,20 @@ struct AgentComponent {
     ExtraKeys extra;
 };
 
+// A fixed camera (Resident Evil, Final Fantasy VII): the editor renders its
+// view once (Bake) into a background image and depth layers; the game shows
+// that instead of drawing the scene's static meshes (Background.Show).
+// Looks along the object's +Z.
+constexpr int kFixedCameraMaxLayers = 8;
+struct FixedCameraComponent {
+    int h = 120;                         // projection distance (GTE H): 120 = 90 degrees tall
+    int layers = 4;                      // depth layers cut from the bake, 0..8
+    BitDepth bitDepth = BitDepth::Bpp16; // 16 or 8
+    bool showAtStart = false;
+    std::string bake;                    // project-relative bake file (.bgbake), empty = not baked
+    ExtraKeys extra;
+};
+
 struct Transform {
     Vec3 position;
     Quat rotation;
@@ -233,6 +251,7 @@ struct Object {
     std::optional<AudioComponent> audio;
     std::optional<SkinComponent> skin;
     std::optional<AgentComponent> agent;
+    std::optional<FixedCameraComponent> fixedCamera;
     std::vector<std::string> unknownComponents;  // components of an unknown type, as JSON text
     std::vector<Object> children;
     ExtraKeys extra;

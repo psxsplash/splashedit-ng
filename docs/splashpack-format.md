@@ -96,8 +96,9 @@ Field table (writer order = reader struct order; `writer.Write('S')` writes the 
 | 144 | 4 | u32 | lightTableOffset | v24+; backfilled after the light chunk, 0 if no runtime lights |
 | 148 | 4 | u32 | orderingTableSize | v25+; ordering table buckets, 0 = engine default |
 | 152 | 4 | u32 | bumpAllocatorSize | v25+; bump allocator bytes per frame, 0 = engine default |
+| 156 | 4 | u32 | backgroundTableOffset | v28 only: present (header 160 bytes) only when a Fixed camera's bake is exported; see 2.21b |
 
-Reader gating (R:splashpack.cpp): agentCount only used if `version>=22`; skin table `version>=18`; memcard `>=21`; sprite/sceneHash `>=22`; tilemap `>=23`; lights `>=24`; render buffer sizes `>=25`; skin bind positions and joint names `>=26`; interactable facing cosine (32-byte records) `>=27`; stream table `>=21`; per-cutscene/animation skin events `>=19`. The writer emits v27, so all gates are satisfied.
+Reader gating (R:splashpack.cpp): agentCount only used if `version>=22`; skin table `version>=18`; memcard `>=21`; sprite/sceneHash `>=22`; tilemap `>=23`; lights `>=24`; render buffer sizes `>=25`; skin bind positions and joint names `>=26`; interactable facing cosine (32-byte records) `>=27`; stream table `>=21`; per-cutscene/animation skin events `>=19`; baked backgrounds `>=28` (and a 160-byte header). The writer emits v27, or v28 when the scene exports a baked Fixed camera, so all gates are satisfied.
 
 ---
 
@@ -341,6 +342,9 @@ This exporter (`core/splashpack.cpp`, `writeUi`) writes the same records with th
 
 ### 2.21 Point lights (v24; header lightTableOffset) - `AlignToFourBytes` first
 `{u16 count, u16 0}` then `count` x 28 B `{i32 x = fp12(pos.x/gte), y = fp12(-pos.y/gte), z; i32 radius = fp12(range/gte); u16 intensity = Clamp(RoundToInt(intensity*4096),0,65535); u8 r,g,b = ColorUnityToPSX; u8 flags (bit0 enabled); u16 pad; u32 nameOffset}`, then names (<=24 chars). Reader `SPLASHPACKPointLight` 28 B, `count` capped to `MAX_SCENE_LIGHTS = 16`, records at `table + 4`.
+
+### 2.21b Baked backgrounds (v28; header backgroundTableOffset) - psxsplash `backgroundmath.hh`
+Per Fixed camera with a bake: its name (NUL-terminated, at most 31 bytes), `AlignToFourBytes` + image tiles, then per layer `AlignToFourBytes` + its tiles, `AlignToFourBytes` + layers, then the hidden list. Then `AlignToFourBytes` and the table `{u16 count, u16 0}` + `count` x 64 B records `{u32 nameOffset; i32 camX, camY, camZ = fp12(pos/gte) with Y negated; i16 rot[9] = rows S*right, -(S*up), S*forward in 4.12 (S negates Y: the world-to-view matrix psxsplash loads as the camera rotation); i16 angleX, angleY, angleZ (as a CameraRotation key, for Camera.GetRotation); u16 h; u16 tileCount, layerCount, hiddenCount; u16 flags (bit0 show at start); u16 0; u32 tilesOffset, layersOffset, hiddenOffset}`. Tile, 20 B: `{i16 x, y (screen); u16 w, h; u16 clutX (16-word units), clutY (0 for 16 bpp); u8 texpageX, texpageY, u = packingX * (16 / bpp), v = packingY; u8 bitDepth (0 4bpp, 1 8bpp, 2 16bpp); u8 pad[3]}`. Layer, 8 B: `{u32 tilesOffset; u16 tileCount; u16 nearSZ}`. Hidden: u16 GameObject indices of every object `bakesIntoBackground` (core/background.cpp), the same list in every record. The image is two columns (256 and 64 wide, 240 tall); a layer is its 64x64 cells that hold any of its pixels, cutout. Their texels are ordinary textures in `.vram`, packed after the sprite sheets. psxsplash draws the image at OT bucket otSize - 2 and each layer at clamp(nearSZ, WORLD_DEPTH_MIN, otSize - 2).
 
 ### 2.22 Memory card (header memcardTableOffset; only if enabled) - `AlignToFourBytes` first; fixed 464 B
 `char region[2]; char product[10]; char title[32] (ASCII, `& 0x7F`, zero padded); u8 frameCount (1..3); u8 0; u16 0; u16 clut[16] (BGR555, from frame 0); u8 pixels[3][128] (16x16 4bpp, top row first, low nibble = left pixel)`. Icons are quantised with `PSXTexture2D.CreateFromTexture2D(tex, TEX_4BIT)`. Reader `SPLASHPACKMemcard`, 464 B.
