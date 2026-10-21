@@ -1,9 +1,10 @@
 # Fixed camera, through the GUI: the Add component picker gives a camera the
 # defaults (H 120, 4 layers, 16 bpp); Layers and Show at start are edited;
 # Bake renders its view into bakes/<scene>-<object>.bgbake with the image and
-# the layer mask beside it (320x240, the image not one flat colour, the mask
-# no more layers than asked for) and points the component at it; the status
-# says Baked and no "changed" warning shows. With a Fixed camera in the scene
+# the occluder depth beside it (320x240, the image not one flat colour, the
+# depth file's occluder count the one in the .bgbake) and points the
+# component at it; the status says Baked with the last export's layer tiles
+# and VRAM, and no "changed" warning shows. With a Fixed camera in the scene
 # a mesh offers Keep 3D in fixed cameras. Moving a pillar in the saved scene
 # makes the next load warn that the scene changed since the bake. Look
 # through prints where the viewport went.
@@ -120,30 +121,26 @@ meta = json.load(open(bake)) if os.path.exists(bake) else {}
 check('the bake file is a background bake of 320x240',
       meta.get('format') == 'splashedit-ng/background-bake' and meta.get('width') == 320 and meta.get('height') == 240, meta)
 check('it carries an 8-digit scene hash', re.fullmatch(r'[0-9a-f]{8}', meta.get('hash', '')) is not None, meta.get('hash'))
-check('no more layers than asked for, each with pixels and an increasing depth',
-      1 <= len(meta.get('layers', [])) <= 2 and all(l['pixels'] > 0 and l['nearSZ'] <= l['farSZ'] for l in meta.get('layers', [])) and
-      [l['nearSZ'] for l in meta.get('layers', [])] == sorted(l['nearSZ'] for l in meta.get('layers', [])), meta.get('layers'))
 img = os.path.join(os.path.dirname(bake), meta.get('image', 'missing.png'))
 w, h, px = png_rgba(img) if os.path.exists(img) else (0, 0, [])
 check('the image is 320x240', (w, h) == (320, 240), (w, h))
 colours = len(set(p[:3] for p in px[::7]))
 check('the image is the scene, not one flat colour', colours > 200, colours)
-mask = os.path.join(os.path.dirname(bake), meta.get('layerMask', 'missing.png'))
-mw, mh, mpx = png_rgba(mask) if os.path.exists(mask) else (0, 0, [])
-levels = sorted(set(p[0] for p in mpx))
-check('the layer mask is 320x240 with layers 0 (image only) to 2', (mw, mh) == (320, 240) and levels and levels[0] == 0 and levels[-1] <= 2,
-      ((mw, mh), levels))
-inLayers = sum(1 for p in mpx if p[0])
-check('the layer pixel counts in the file match the mask', inLayers == sum(l['pixels'] for l in meta.get('layers', [])),
-      (inLayers, meta.get('layers')))
+depth = os.path.join(os.path.dirname(bake), meta.get('depth', 'missing.depth'))
+raw = open(depth, 'rb').read() if os.path.exists(depth) else b''
+check('the depth file is 320x240 16-bit', len(raw) == 320 * 240 * 2, len(raw))
+values = struct.unpack('<%dH' % (len(raw) // 2), raw) if raw else ()
+occ = sum(1 for v in values if v)
+check('its occluder count is the one in the bake file, and leaves sky and floor out',
+      occ == meta.get('occluders') and 0 < occ < 320 * 240 * 0.8, (occ, meta.get('occluders')))
 
 # 3. What the editor said.
-baked = [l for l in out if l.startswith('fixedcam: baked ' + BAKE)]
-check('the bake reports its file and layers', len(baked) == 1, [l for l in out if l.startswith('fixedcam:')])
+baked = [l for l in out if re.match(r'fixedcam: baked ' + re.escape(BAKE) + r' occluders \d+ layer tiles [1-9]\d*$', l)]
+check('the bake reports its file, occluders and layer tiles', len(baked) == 1, [l for l in out if l.startswith('fixedcam:')])
 rep = [l for l in out if l.startswith('fixedcam: Yard cam ')]
 check('the inspector line reports the settings and Baked',
-      rep and rep[-1].startswith('fixedcam: Yard cam h 120 fov 90 layers 2 bpp 16 start on bake ' + BAKE + ' status Baked, ') and
-      'changed' not in rep[-1], rep[-1:])
+      rep and re.match(r'fixedcam: Yard cam h 120 fov 90 layers 2 bpp 16 start on bake ' + re.escape(BAKE) +
+                       r' status Baked, [1-9]\d* layer tiles, \d+ KB VRAM$', rep[-1]) is not None, rep[-1:])
 check('Look through moved the viewport', 'fixedcam: look through Yard cam' in out, [l for l in out if 'look through' in l])
 
 # 4. Keep 3D is offered on a mesh once there is a Fixed camera.
