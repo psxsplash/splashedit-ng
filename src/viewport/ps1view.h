@@ -148,6 +148,7 @@ class Ps1View {
         float px, py, pz;
         float u, v;
         float r, g, b;
+        float pw = 1;  // bake: px, py, pz, pw are the clip position itself
     };
     // A run of vertices drawn with one GL texture bound.
     struct Batch {
@@ -164,6 +165,11 @@ class Ps1View {
     const editor::Document* m_doc = nullptr;
     uint32_t m_drawDistance = 0;
     const std::vector<bool>* m_include = nullptr;  // bake(): only these objects
+    // bake(): the camera; rebuild() then writes clip positions (see bakeClip).
+    const splash::BgCamera* m_bakeCam = nullptr;
+    splash::BgEngineCamera m_bakeEngine;
+    static constexpr float kBakeNear = 0.05f, kBakeFar = 2000.0f;
+    void bakeClip(const splash::FlatObject& fo, const splash::Mesh& mesh, const std::vector<int>& tri, Vertex* out) const;
     unsigned m_builtRevision = 0;
     editor::Preview m_preview;
     bool m_previewDirty = false;
