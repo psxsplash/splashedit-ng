@@ -13024,8 +13024,9 @@ void testFixedCameraPack() {
     CHECK(rd16(b, tilesAt + 18) == 0);                                         // the image has no depth
     CHECK(r.stats.backgroundInfo.size() == 1 && r.stats.backgroundInfo[0].keptForScripts.size() == 1 &&
           r.stats.backgroundInfo[0].keptForScripts[0] == std::make_pair(std::string("Crate (3)"), std::string("scripts/game_logic.lua")));
+    // Whole atlases: the 256 column in one, the 64 column with the 16-row sheet under it in another.
     CHECK(r.stats.backgroundInfo.size() == 1 && r.stats.backgroundInfo[0].layerTiles == 3 &&
-          r.stats.backgroundInfo[0].vramBytes == (256 * 240 + 64 * 240 + 256 * 16) * 2);
+          r.stats.backgroundInfo[0].vramBytes == 2 * 256 * 256 * 2);
     // Hidden: every courtyard mesh but the kept crate, as game object indices.
     std::vector<uint16_t> hid;
     for (uint16_t i = 0; i < hidden; i++) hid.push_back(rd16(b, hiddenAt + 2 * i));
@@ -13054,8 +13055,35 @@ void testFixedCameraPack() {
     const splash::ExportResult full = splash::exportSplashpack(scene, project, dir / "full.splashpack", tight);
     CHECK(!full.ok());
     CHECK(std::any_of(full.errors.begin(), full.errors.end(), [](const std::string& e) {
-        return e.rfind("Fixed camera 'Yard cam': the baked background (", 0) == 0 && e.find("does not fit in VRAM") != std::string::npos;
+        return e.rfind("Fixed camera 'Yard cam': the baked background does not fit in VRAM", 0) == 0;
     }));
+
+    // Every cell 16 depths 30 apart. At Layers 8 that is 2400 tiles, over
+    // the cap (checked at 8 bpp, where the 1024 kept fit).
+    for (int y = 0; y < H; y++)
+        for (int x = 0; x < W; x++) depth[size_t(y) * W + x] = uint16_t(100 + (y % 16) * 30);
+    auto has = [](const splash::ExportResult& e, const char* what) {
+        return std::any_of(e.warnings.begin(), e.warnings.end(), [&](const std::string& w) { return w.find(what) != std::string::npos; });
+    };
+    scene.objects.back().fixedCamera->layers = 8;
+    scene.objects.back().fixedCamera->bitDepth = splash::BitDepth::Bpp8;
+    bake();
+    const splash::ExportResult capped = splash::exportSplashpack(scene, project, dir / "capped.splashpack");
+    CHECK(capped.ok() && capped.stats.backgroundInfo.size() == 1 && capped.stats.backgroundInfo[0].layerTiles == 2400 &&
+          capped.stats.backgroundInfo[0].droppedTiles == 2400 - splash::kBgMaxLayerTiles && has(capped, "over the 1024 a background draws"));
+    // At Layers 1, 300 tiles: at 16 bpp the image and two sheets take four
+    // whole atlases, half of VRAM (the most 16 bpp atlases beside the
+    // framebuffers), which warns; 8 bpp takes a quarter and does not.
+    scene.objects.back().fixedCamera->layers = 1;
+    scene.objects.back().fixedCamera->bitDepth = splash::BitDepth::Bpp16;
+    const splash::ExportResult half = splash::exportSplashpack(scene, project, dir / "half.splashpack");
+    CHECK(half.ok() && half.stats.backgroundInfo.size() == 1 && half.stats.backgroundInfo[0].layerTiles == 300 &&
+          half.stats.backgroundInfo[0].vramBytes == 4 * 256 * 256 * 2 && has(half, "50% of VRAM; Bit depth 8 takes about half"));
+    scene.objects.back().fixedCamera->bitDepth = splash::BitDepth::Bpp8;
+    const splash::ExportResult half8 = splash::exportSplashpack(scene, project, dir / "half8.splashpack");
+    CHECK(half8.ok() && !has(half8, "% of VRAM") && half8.stats.backgroundInfo[0].vramBytes * 2 < half.stats.backgroundInfo[0].vramBytes + 16 * 1024);
+    scene.objects.back().fixedCamera->bitDepth = splash::BitDepth::Bpp16;
+    scene.objects.back().fixedCamera->layers = 2;
 
     // No bake: a warning, and the pack stays v27.
     scene.objects.back().fixedCamera->bake.clear();

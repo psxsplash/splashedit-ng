@@ -2310,19 +2310,35 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     VramLayout vram = packVram(all, options.vram, res.errors, fogMask4, fogMask8);
     // A texture that did not fit keeps page 0,0 (framebuffer 0), where
     // nothing is ever placed.
+    // What a background takes is the 256-row atlases its textures sit in
+    // (the packer allocates whole atlases, as --stats counts them) plus its
+    // CLUTs, not its texels alone.
     for (size_t bi = 0; bi < backgrounds.size(); bi++) {
         const BgOut& b = backgrounds[bi];
-        size_t words = 0, unplaced = 0;
+        std::set<const PsxTexture*> mine;
+        size_t clutWords = 0, unplaced = 0;
         auto count = [&](const PsxTexture* t) {
-            words += size_t(t->quantizedWidth) * t->height + t->palette.size();
+            mine.insert(t);
+            clutWords += t->palette.size();
             if (t->texpageX == 0 && t->texpageY == 0) unplaced++;
         };
         for (const BgSprite& t : b.image) count(t.tex);
         for (const PsxTexture* t : b.sheets) count(t);
-        res.stats.backgroundInfo[bi].vramBytes = int(words * 2);
+        size_t atlasWords = 0;
+        for (const Atlas& a : vram.atlases)
+            if (std::any_of(a.textures.begin(), a.textures.end(), [&](const PsxTexture* t) { return mine.count(t) > 0; }))
+                atlasWords += size_t(a.width) * Atlas::kHeight;
+        const size_t bytes = (atlasWords + clutWords) * 2;
+        res.stats.backgroundInfo[bi].vramBytes = int(bytes);
+        const std::string who = "Fixed camera '" + b.flat->object->name + "'";
         if (unplaced)
-            res.errors.push_back("Fixed camera '" + b.flat->object->name + "': the baked background (" + std::to_string(words * 2 / 1024) +
-                                 " KB) does not fit in VRAM; set its Bit depth to 8, lower Layers, or free VRAM");
+            res.errors.push_back(who + ": the baked background does not fit in VRAM; set its Bit depth to 8, lower Layers, or free VRAM");
+        // Half is as much as 16 bpp atlases can take beside the framebuffers.
+        else if (bytes * 2 >= size_t(kVramWidth) * kVramHeight * 2)
+            res.warnings.push_back(who + ": the baked background takes " + std::to_string((bytes + 1023) / 1024) + " KB, " +
+                                   std::to_string(bytes * 100 / (size_t(kVramWidth) * kVramHeight * 2)) +
+                                   "% of VRAM" + (b.image.front().tex->bitDepth == BitDepth::Bpp16 ? "; Bit depth 8 takes about half" : "") +
+                                   ", and lower Layers fewer tiles");
     }
     // psxsplash steps through a sheet's cells with 8-bit texture coordinates
     // from its top-left corner, so the whole grid must sit in one 256x256 page.
