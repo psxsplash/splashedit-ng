@@ -36,6 +36,8 @@
     X(PFNGLBINDRENDERBUFFERPROC, glBindRenderbuffer)                         \
     X(PFNGLRENDERBUFFERSTORAGEPROC, glRenderbufferStorage)                   \
     X(PFNGLFRAMEBUFFERRENDERBUFFERPROC, glFramebufferRenderbuffer)           \
+    X(PFNGLDELETEFRAMEBUFFERSPROC, glDeleteFramebuffers)                     \
+    X(PFNGLDELETERENDERBUFFERSPROC, glDeleteRenderbuffers)                   \
     X(PFNGLGENERATEMIPMAPPROC, glGenerateMipmap)                             \
     X(PFNGLBINDSAMPLERPROC, glBindSampler)                                   \
     X(PFNGLACTIVETEXTUREPROC, glActiveTexture_)

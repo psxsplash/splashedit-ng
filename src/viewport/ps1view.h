@@ -4,6 +4,7 @@
 
 #include "editor/pick.hh"
 #include "editor/timeline.hh"
+#include "background.hh"
 #include "scene.hh"
 
 #include <algorithm>
@@ -103,6 +104,17 @@ class Ps1View {
     };
     Pose pose() const { return {m_eye, m_target, m_ortho}; }
     void setPose(const Pose& p) { m_eye = p.eye, m_target = p.target, m_ortho = p.ortho; }
+    // A Fixed camera's bake: the objects marked in `include` (flatten order)
+    // drawn clean from `cam` with psxsplash's projection (centre 160,120,
+    // distance H, pixel centres on whole screen coordinates) at 320x240, in
+    // the scene's background colour and fog. rgba is top row first; sz is
+    // each pixel's GTE depth, < 0 where nothing was drawn. Leaves the view as
+    // it was (it rebuilds on its next render). False without a document.
+    struct BakeShot {
+        std::vector<uint8_t> rgba;
+        std::vector<float> sz;
+    };
+    bool bake(const splash::BgCamera& cam, const std::vector<bool>& include, BakeShot* out);
     static constexpr float kFovY = 0.95f;
     static constexpr float kOrthoBack = 150.0f;  // orthographic: render eye's distance behind the pivot
 
@@ -125,6 +137,7 @@ class Ps1View {
     unsigned textureFor(const std::string& projectPath);  // cached; white/fallback on empty/error
 
     const editor::Document* m_doc = nullptr;
+    const std::vector<bool>* m_include = nullptr;  // bake(): only these objects
     unsigned m_builtRevision = 0;
     editor::Preview m_preview;
     bool m_previewDirty = false;

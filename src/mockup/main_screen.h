@@ -316,6 +316,17 @@ struct State {
     } importPanel;
     // The inspector's nav Bake details disclosures (Player, Navigation).
     bool navBakeDetails[2] = {false, false};
+    // Fixed camera: Bake pressed (run by the viewport, which owns the GL
+    // view) and its outcome; Look through pressed; the bake's thumbnail.
+    std::optional<editor::ObjectPath> bakeRequest;
+    std::optional<editor::ObjectPath> lookThrough;
+    std::string bakeStatus;  // "baked <file> layers <n>" or "bake failed: <why>", shown under the button
+    struct BakeThumb {
+        std::string file;      // project path of the bake's image
+        long long stamp = -1;  // its write time when loaded
+        unsigned tex = 0;
+        int w = 0, h = 0;
+    } bakeThumb;
     // Models to import again next frame (a reimport can rebuild the object the
     // inspector is drawing), and the watcher polled about once a second.
     struct Reimport {

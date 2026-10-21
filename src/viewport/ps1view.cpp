@@ -1,9 +1,11 @@
 #include "viewport/ps1view.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdio>
+#include <cstring>
 #include <set>
 
 #include <stb_image.h>
@@ -292,6 +294,7 @@ void Ps1View::rebuild() {
         // Inactive objects ship switched off and the runtime skips them until a
         // script turns them on; their lights still bake, so only meshes drop out.
         if (!fo.activeInHierarchy || !fo.object->active || !fo.object->mesh) continue;
+        if (m_include && (fi >= m_include->size() || !(*m_include)[fi])) continue;
         const splash::MeshComponent& mc = *fo.object->mesh;
         if (mc.mesh.empty() || mc.materials.empty()) continue;
         const splash::Mesh* mesh = nullptr;
@@ -540,6 +543,97 @@ unsigned Ps1View::render(int panelW, int panelH, int lines) {
     glDisable(GL_DEPTH_TEST);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     return m_color;
+}
+
+bool Ps1View::bake(const splash::BgCamera& cam, const std::vector<bool>& include, BakeShot* out) {
+    if (!m_doc || !out) return false;
+    const editor::Preview saved = m_preview;
+    m_preview = {};
+    m_include = &include;
+    rebuild();
+    m_include = nullptr;
+    glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
+    glBufferData(GL_ARRAY_BUFFER, m_verts.size() * sizeof(Vertex), m_verts.data(), GL_STATIC_DRAW);
+    m_vboCap = m_verts.size();
+
+    const int w = splash::kBgWidth, h = splash::kBgHeight;
+    unsigned fbo = 0, tex = 0, rb = 0;
+    glGenFramebuffers(1, &fbo);
+    glGenTextures(1, &tex);
+    glGenRenderbuffers(1, &rb);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glBindRenderbuffer(GL_RENDERBUFFER, rb);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, w, h);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, rb);
+
+    // The game's background: the fog colour, fog on or off (as render()).
+    const splash::SceneSettings& set = m_doc->scene().settings;
+    float fog[3];
+    for (int i = 0; i < 3; i++) fog[i] = std::clamp(set.fog.color[i], 0.0f, 1.0f);
+    const float gte = set.gteScaling > 0 ? set.gteScaling : 100.f;
+    const float fogFar = set.fog.enabled ? 20000.0f / float(std::clamp(set.fog.density, 1, 10)) * gte / 4096.0f : 0.f;
+    const float zn = 0.05f, zf = 2000.0f;
+    Mat4 vp;
+    const std::array<float, 16> clip = splash::bgClipMatrix(cam, zn, zf);
+    std::copy(clip.begin(), clip.end(), vp.m);
+    glViewport(0, 0, w, h);
+    glClearColor(fog[0], fog[1], fog[2], 1);
+    glClearDepth(1.0);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glDisable(GL_BLEND);
+    glDisable(GL_CULL_FACE);
+    glDisable(GL_SCISSOR_TEST);
+    glEnable(GL_DEPTH_TEST);
+    glUseProgram(m_prog);
+    glUniformMatrix4fv(glGetUniformLocation(m_prog, "uViewProj"), 1, GL_FALSE, vp.m);
+    glUniform2f(glGetUniformLocation(m_prog, "uRes"), (float)w, (float)h);
+    glUniform1i(glGetUniformLocation(m_prog, "uClean"), 1);
+    glUniform3f(glGetUniformLocation(m_prog, "uFog"), fog[0], fog[1], fog[2]);
+    // No editor haze: the game only fogs with the scene's fog.
+    glUniform1f(glGetUniformLocation(m_prog, "uFogScale"), 1e9f);
+    glUniform1f(glGetUniformLocation(m_prog, "uFogFar"), fogFar);
+    glUniform1i(glGetUniformLocation(m_prog, "uTex"), 0);
+    glActiveTexture_(GL_TEXTURE0);
+    glBindVertexArray(m_vao);
+    for (const Batch& bt : m_batches) {
+        glBindTexture(GL_TEXTURE_2D, bt.tex);
+        glDrawArrays(GL_TRIANGLES, bt.start, bt.count);
+    }
+    glBindVertexArray(0);
+    glDisable(GL_DEPTH_TEST);
+
+    std::vector<uint8_t> rgba(size_t(w) * h * 4);
+    std::vector<float> depth(size_t(w) * h);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+    glReadPixels(0, 0, w, h, GL_DEPTH_COMPONENT, GL_FLOAT, depth.data());
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &fbo);
+    glDeleteTextures(1, &tex);
+    glDeleteRenderbuffers(1, &rb);
+
+    // GL rows are bottom-up; depth back to view distance, then GTE units.
+    out->rgba.assign(rgba.size(), 0);
+    out->sz.assign(depth.size(), -1.f);
+    const float a = (zf + zn) / (zf - zn), b = -2 * zf * zn / (zf - zn);
+    for (int y = 0; y < h; ++y) {
+        const int src = h - 1 - y;
+        std::memcpy(&out->rgba[size_t(y) * w * 4], &rgba[size_t(src) * w * 4], size_t(w) * 4);
+        for (int x = 0; x < w; ++x) {
+            const float d = depth[size_t(src) * w + x];
+            if (d >= 1.0f) continue;
+            const float view = b / ((2 * d - 1) - a);
+            out->sz[size_t(y) * w + x] = view * 4096.f / gte;
+        }
+    }
+    m_preview = saved;
+    m_built = false;
+    return true;
 }
 
 void Ps1View::basis(Vec3* right, Vec3* up, Vec3* forward) const {
