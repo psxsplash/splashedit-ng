@@ -483,10 +483,10 @@ unsigned Ps1View::render(int panelW, int panelH, int lines) {
     basis(&bRight, &bUp, &bFwd);
     const float aspect = (float)panelW / panelH;
     if (m_ortho) {
-        float hh = distance() * std::tan(kFovY * 0.5f);
+        float hh = distance() * std::tan(m_fovY * 0.5f);
         m_viewProj = Mat4::ortho(hh * aspect, hh, 0.1f, 2 * kOrthoBack) * Mat4::lookAt(eye(), m_target, bUp);
     } else {
-        m_viewProj = Mat4::perspective(kFovY, aspect, 0.1f * viewScale(), 200.0f * viewScale()) * Mat4::lookAt(m_eye, m_target, bUp);
+        m_viewProj = Mat4::perspective(m_fovY, aspect, 0.1f * viewScale(), 200.0f * viewScale()) * Mat4::lookAt(m_eye, m_target, bUp);
     }
 
     // The scene's background as psxsplash draws it: the screen clears to the
@@ -521,7 +521,7 @@ unsigned Ps1View::render(int panelW, int panelH, int lines) {
     glUniform3f(glGetUniformLocation(m_skyProg, "uRight"), sRight.x, sRight.y, sRight.z);
     glUniform3f(glGetUniformLocation(m_skyProg, "uUp"), sUp.x, sUp.y, sUp.z);
     glUniform3f(glGetUniformLocation(m_skyProg, "uForward"), sForward.x, sForward.y, sForward.z);
-    glUniform1f(glGetUniformLocation(m_skyProg, "uTanHalf"), std::tan(kFovY * 0.5f));
+    glUniform1f(glGetUniformLocation(m_skyProg, "uTanHalf"), std::tan(m_fovY * 0.5f));
     glUniform1f(glGetUniformLocation(m_skyProg, "uAspect"), (float)panelW / panelH);
     glUniform3f(glGetUniformLocation(m_skyProg, "uSkyLo"), kSkyLo[0], kSkyLo[1], kSkyLo[2]);
     glUniform3f(glGetUniformLocation(m_skyProg, "uSkyMid"), kSkyMid[0], kSkyMid[1], kSkyMid[2]);
@@ -704,7 +704,7 @@ Vec3 Ps1View::eye() const {
 }
 
 float Ps1View::worldPerPixel(float depth, float panelH) const {
-    return 2 * (m_ortho ? distance() : depth) * std::tan(kFovY * 0.5f) / std::max(panelH, 1.0f);
+    return 2 * (m_ortho ? distance() : depth) * std::tan(m_fovY * 0.5f) / std::max(panelH, 1.0f);
 }
 
 float Ps1View::distance() const {
@@ -717,7 +717,7 @@ void Ps1View::ray(ImVec2 screen, ImVec2 mn, ImVec2 sz, Vec3* origin, Vec3* dir) 
     basis(&s, &u, &f);
     float nx = (screen.x - mn.x) / sz.x * 2 - 1;
     float ny = 1 - (screen.y - mn.y) / sz.y * 2;
-    float th = std::tan(kFovY * 0.5f);
+    float th = std::tan(m_fovY * 0.5f);
     if (m_ortho) {
         float hh = distance() * th;
         *origin = eye() + s * (nx * hh * sz.x / sz.y) + u * (ny * hh);
@@ -729,6 +729,7 @@ void Ps1View::ray(ImVec2 screen, ImVec2 mn, ImVec2 sz, Vec3* origin, Vec3* dir) 
 }
 
 void Ps1View::orbit(float dx, float dy) {
+    m_fovY = kFovY;  // a Look through lens lasts until the view turns or zooms
     Vec3 off = m_eye - m_target;
     float r = std::sqrt(dot(off, off));
     if (r <= 0) return;
@@ -750,6 +751,7 @@ void Ps1View::pan(float dx, float dy, float panelH) {
 }
 
 void Ps1View::dolly(float steps) {
+    m_fovY = kFovY;  // a Look through lens lasts until the view turns or zooms
     Vec3 off = m_eye - m_target;
     float r = std::sqrt(dot(off, off));
     if (r <= 0) return;
@@ -758,14 +760,16 @@ void Ps1View::dolly(float steps) {
 }
 
 void Ps1View::frame(Vec3 center, float radius) {
+    m_fovY = kFovY;  // a Look through lens lasts until the view turns or zooms
     Vec3 dir = normalize(m_eye - m_target);
     if (dot(dir, dir) == 0) dir = {0, 0, 1};
-    float r = std::max(radius, 0.1f) / std::sin(kFovY * 0.5f) * 1.3f;
+    float r = std::max(radius, 0.1f) / std::sin(m_fovY * 0.5f) * 1.3f;
     m_target = center;
     m_eye = center + dir * std::max(r, 0.5f);
 }
 
 void Ps1View::lookAround(float dx, float dy) {
+    m_fovY = kFovY;  // a Look through lens lasts until the view turns or zooms
     Vec3 f = normalize(m_target - m_eye);
     float r = distance();
     if (r <= 0) return;

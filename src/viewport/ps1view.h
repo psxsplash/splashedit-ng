@@ -116,6 +116,10 @@ class Ps1View {
     };
     bool bake(const splash::BgCamera& cam, const std::vector<bool>& include, BakeShot* out);
     static constexpr float kFovY = 0.95f;
+    // The vertical field of view drawn with: kFovY, or a Fixed camera's after
+    // Look through until the view is turned, zoomed or framed.
+    float fovY() const { return m_fovY; }
+    void setFovY(float radians) { m_fovY = radians; }
     static constexpr float kOrthoBack = 150.0f;  // orthographic: render eye's distance behind the pivot
 
     bool clean = false;  // false = PS1 look, true = clean view
@@ -168,6 +172,7 @@ class Ps1View {
     int m_fboW = 0, m_fboH = 0;
     Vec3 m_eye{7.6f, 5.2f, 9.2f}, m_target{-0.9f, 0.9f, -2.0f};
     bool m_ortho = false;
+    float m_fovY = kFovY;
     Mat4 m_viewProj;
 };
 

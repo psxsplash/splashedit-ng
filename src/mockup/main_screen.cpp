@@ -1151,7 +1151,10 @@ static void lookThroughCamera(editor::Document& doc, viewport::Ps1View& view, co
             const viewport::Vec3 eye{fo.worldPosition.x, fo.worldPosition.y, -fo.worldPosition.z};
             const float d = std::max(1.0f, view.distance());
             view.setPose({eye, {eye.x + f.x * d, eye.y + f.y * d, eye.z - f.z * d}, false});
-            scriptLine(nullptr, "fixedcam: look through " + o->name);
+            // The camera's own lens, so the viewport frames what the bake shows.
+            const int h = o->fixedCamera ? o->fixedCamera->h : 120;
+            view.setFovY(2.0f * std::atan(splash::kBgCenterY / float(std::max(1, h))));
+            scriptLine(nullptr, "fixedcam: look through " + o->name + " fov " + std::to_string(std::lround(splash::fovForH(h))));
         }
 }
 
