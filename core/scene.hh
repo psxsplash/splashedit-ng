@@ -213,13 +213,13 @@ struct AgentComponent {
 };
 
 // A fixed camera (Resident Evil, Final Fantasy VII): the editor renders its
-// view once (Bake) into a background image and depth layers; the game shows
+// view once (Bake) into a background image and layer tiles; the game shows
 // that instead of drawing the scene's static meshes (Background.Show).
 // Looks along the object's +Z.
 constexpr int kFixedCameraMaxLayers = 8;
 struct FixedCameraComponent {
     int h = 120;                         // projection distance (GTE H): 120 = 90 degrees tall
-    int layers = 4;                      // depth layers cut from the bake, 0..8
+    int layers = 4;                      // most layer tiles per 16x16 cell (depth slices), 0..8; 0 = image only
     BitDepth bitDepth = BitDepth::Bpp16; // 16 or 8
     bool showAtStart = false;
     std::string bake;                    // project-relative bake file (.bgbake), empty = not baked

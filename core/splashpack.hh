@@ -42,6 +42,13 @@ constexpr uint32_t kOtMin = 256, kOtMax = 65536;
 struct ExportStats {
     // Fixed cameras whose bake went into the pack (v28 background table).
     int backgrounds = 0;
+    struct BackgroundInfo {
+        std::string object;
+        int layerTiles = 0;    // cut from the bake (before the kBgMaxLayerTiles cap)
+        int droppedTiles = 0;  // over the cap, left out
+        int vramBytes = 0;     // image columns, layer sheets and their CLUTs
+    };
+    std::vector<BackgroundInfo> backgroundInfo;
     size_t splashpackBytes = 0, vramFileBytes = 0, spuFileBytes = 0;
     // VRAM: display and draw buffers, texture atlases (each width x 256 at
     // 16 bits per texel), CLUTs and font sheets.

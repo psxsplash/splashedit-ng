@@ -217,42 +217,58 @@ bool bgEngineProject(const BgEngineCamera& cam, const BgFixedObject& o, std::arr
     return true;
 }
 
-BgLayerCut cutLayers(const std::vector<float>& sz, const std::vector<uint8_t>& ground, int count) {
-    BgLayerCut out;
-    out.layerOf.assign(sz.size(), 0);
-    if (count <= 0) return out;
-    std::vector<float> vals;
+std::vector<uint16_t> occluderDepth(const std::vector<float>& sz, const std::vector<uint8_t>& ground) {
+    std::vector<uint16_t> out(sz.size(), 0);
     for (size_t i = 0; i < sz.size(); i++)
-        if (sz[i] >= 0 && !(i < ground.size() && ground[i])) vals.push_back(sz[i]);
-    if (vals.empty()) return out;
-    std::sort(vals.begin(), vals.end());
-    // Band k holds depths in [cut[k-1], cut[k]): equal-count quantiles.
-    std::vector<float> cuts;
-    for (int k = 1; k < count; k++) cuts.push_back(vals[std::min(vals.size() - 1, vals.size() * size_t(k) / size_t(count))]);
-    const size_t n = size_t(count);
-    std::vector<BgLayerBand> bands(n);
-    std::vector<float> lo(n, 1e30f), hi(n, -1.f);
-    std::vector<int> bandOf(sz.size(), -1);
-    for (size_t i = 0; i < sz.size(); i++) {
-        if (sz[i] < 0 || (i < ground.size() && ground[i])) continue;
-        const int k = int(std::upper_bound(cuts.begin(), cuts.end(), sz[i]) - cuts.begin());
-        bandOf[i] = k;
-        bands[size_t(k)].pixels++;
-        lo[size_t(k)] = std::min(lo[size_t(k)], sz[i]);
-        hi[size_t(k)] = std::max(hi[size_t(k)], sz[i]);
-    }
-    // Equal cut values leave empty bands; the rest are renumbered near to far.
-    std::vector<int> renum(n, -1);
-    for (int k = 0; k < count; k++) {
-        if (!bands[size_t(k)].pixels) continue;
-        renum[size_t(k)] = int(out.bands.size());
-        BgLayerBand b = bands[size_t(k)];
-        b.nearSZ = int(std::floor(lo[size_t(k)]));
-        b.farSZ = int(std::ceil(hi[size_t(k)]));
-        out.bands.push_back(b);
-    }
-    for (size_t i = 0; i < sz.size(); i++)
-        if (bandOf[i] >= 0) out.layerOf[i] = uint8_t(renum[size_t(bandOf[i])] + 1);
+        if (sz[i] >= 0 && !(i < ground.size() && ground[i])) out[i] = uint16_t(std::clamp(std::lround(sz[i]), 1L, 65535L));
+    return out;
+}
+
+int layerSpanSZ(float gteScaling) {
+    return std::max(1, int(std::lround(kBgLayerSpanMetres * 4096.f / (gteScaling > 0 ? gteScaling : 100.f))));
+}
+
+std::vector<BgLayerTile> cutLayerTiles(const std::vector<uint16_t>& depth, int maxPerCell, int spanSZ) {
+    std::vector<BgLayerTile> out;
+    const int W = kBgWidth, H = kBgHeight, T = kBgLayerTile;
+    if (maxPerCell <= 0 || depth.size() != size_t(W) * H) return out;
+    struct Run {
+        int nearSZ, farSZ;
+        std::vector<int> px;  // index within the cell
+    };
+    std::vector<std::pair<int, int>> cell;  // (depth, index within the cell)
+    for (int cy = 0; cy < H; cy += T)
+        for (int cx = 0; cx < W; cx += T) {
+            cell.clear();
+            for (int y = 0; y < T && cy + y < H; y++)
+                for (int x = 0; x < T && cx + x < W; x++)
+                    if (const uint16_t d = depth[size_t(cy + y) * W + cx + x]) cell.push_back({d, y * T + x});
+            if (cell.empty()) continue;
+            std::sort(cell.begin(), cell.end());
+            // Near to far: a run takes pixels until one is more than spanSZ past its nearest.
+            std::vector<Run> runs;
+            for (const auto& [d, i] : cell) {
+                if (runs.empty() || d - runs.back().nearSZ > spanSZ) runs.push_back({d, d, {}});
+                runs.back().farSZ = d;
+                runs.back().px.push_back(i);
+            }
+            // Too many: merge the two neighbours closest in depth, at the nearer one's depth.
+            while (int(runs.size()) > maxPerCell) {
+                size_t best = 0;
+                for (size_t k = 1; k + 1 < runs.size(); k++)
+                    if (runs[k + 1].nearSZ - runs[k].farSZ < runs[best + 1].nearSZ - runs[best].farSZ) best = k;
+                runs[best].farSZ = runs[best + 1].farSZ;
+                runs[best].px.insert(runs[best].px.end(), runs[best + 1].px.begin(), runs[best + 1].px.end());
+                runs.erase(runs.begin() + long(best) + 1);
+            }
+            for (const Run& r : runs) {
+                BgLayerTile t;
+                t.x = cx, t.y = cy, t.nearSZ = r.nearSZ, t.farSZ = r.farSZ, t.pixels = int(r.px.size());
+                t.mask.assign(size_t(T) * T, 0);
+                for (int i : r.px) t.mask[size_t(i)] = 1;
+                out.push_back(std::move(t));
+            }
+        }
     return out;
 }
 
@@ -308,7 +324,6 @@ uint32_t bakeHash(const Scene& scene, const std::vector<FlatObject>& flats, cons
         for (int k = 0; k < 4; k++) f.num(camera.localToWorld.m[r][k]);
     if (const FixedCameraComponent* fc = camera.object->fixedCamera ? &*camera.object->fixedCamera : nullptr) {
         f.u32(uint32_t(fc->h));
-        f.u32(uint32_t(fc->layers));
     }
     f.num(scene.settings.gteScaling);
     const FogSettings& fog = scene.settings.fog;
@@ -361,37 +376,39 @@ std::string bakePathFor(const std::string& sceneStem, const std::string& objectN
     return "bakes/" + safeName(sceneStem) + "-" + safeName(objectName) + ".bgbake";
 }
 
-void writeBake(const fs::path& file, const BgBake& bake, const std::vector<uint8_t>& rgba, const std::vector<uint8_t>& layerOf) {
+void writeBake(const fs::path& file, const BgBake& bake, const std::vector<uint8_t>& rgba, const std::vector<uint16_t>& depth) {
     const int w = bake.width, h = bake.height;
-    if (rgba.size() != size_t(w) * h * 4 || layerOf.size() != size_t(w) * h) throw std::runtime_error("bake: pixel buffers do not match its size");
+    if (rgba.size() != size_t(w) * h * 4 || depth.size() != size_t(w) * h) throw std::runtime_error("bake: pixel buffers do not match its size");
     std::error_code ec;
     fs::create_directories(file.parent_path(), ec);
-    Image img, mask;
-    img.width = mask.width = w;
-    img.height = mask.height = h;
+    Image img;
+    img.width = w;
+    img.height = h;
     img.pixels.resize(size_t(w) * h);
-    mask.pixels.resize(size_t(w) * h);
     for (int y = 0; y < h; y++)
         for (int x = 0; x < w; x++) {
             const uint8_t* p = &rgba[(size_t(y) * w + x) * 4];
-            const size_t at = size_t(h - 1 - y) * w + x;
-            img.pixels[at] = {p[0] / 255.f, p[1] / 255.f, p[2] / 255.f, 1.f};
-            mask.pixels[at] = {layerOf[size_t(y) * w + x] / 255.f, 0.f, 0.f, 1.f};
+            img.pixels[size_t(h - 1 - y) * w + x] = {p[0] / 255.f, p[1] / 255.f, p[2] / 255.f, 1.f};
         }
     savePng(img, file.parent_path() / bake.image);
-    savePng(mask, file.parent_path() / bake.layerMask);
+    {
+        std::ofstream d(file.parent_path() / bake.depth, std::ios::binary);
+        for (uint16_t v : depth) {
+            const char b[2] = {char(v & 0xFF), char(v >> 8)};
+            d.write(b, 2);
+        }
+        if (!d) throw std::runtime_error("cannot write " + (file.parent_path() / bake.depth).string());
+    }
     json j;
     j["format"] = "splashedit-ng/background-bake";
     j["version"] = 1;
     j["width"] = w;
     j["height"] = h;
     j["image"] = bake.image;
-    j["layerMask"] = bake.layerMask;
+    j["depth"] = bake.depth;
     j["hash"] = bake.hash;
     j["h"] = bake.h;
-    json bands = json::array();
-    for (const BgLayerBand& b : bake.bands) bands.push_back({{"nearSZ", b.nearSZ}, {"farSZ", b.farSZ}, {"pixels", b.pixels}});
-    j["layers"] = bands;
+    j["occluders"] = bake.occluders;
     std::ofstream out(file, std::ios::binary);
     out << j.dump(2) << "\n";
     if (!out) throw std::runtime_error("cannot write " + file.string());
@@ -413,28 +430,23 @@ BgBake readBake(const fs::path& file) {
     b.height = j.value("height", 0);
     if (b.width != kBgWidth || b.height != kBgHeight) throw std::runtime_error(file.filename().string() + ": a bake is 320x240");
     b.image = j.value("image", "");
-    b.layerMask = j.value("layerMask", "");
+    b.depth = j.value("depth", "");
     b.hash = j.value("hash", "");
     b.h = j.value("h", 120);
-    for (const json& l : j.value("layers", json::array()))
-        b.bands.push_back({l.value("nearSZ", 0), l.value("farSZ", 0), l.value("pixels", 0)});
-    if (b.bands.size() > size_t(kFixedCameraMaxLayers)) throw std::runtime_error(file.filename().string() + ": more than 8 layers");
+    b.occluders = j.value("occluders", 0);
     return b;
 }
 
 BgBakePixels readBakePixels(const fs::path& file, const BgBake& bake) {
     BgBakePixels p;
     p.image = loadImage(file.parent_path() / bake.image);
-    const Image mask = loadImage(file.parent_path() / bake.layerMask);
     const int w = bake.width, h = bake.height;
-    if (p.image.width != w || p.image.height != h || mask.width != w || mask.height != h)
-        throw std::runtime_error(file.filename().string() + ": its images are not 320x240");
-    p.layerOf.resize(size_t(w) * h);
-    for (int y = 0; y < h; y++)
-        for (int x = 0; x < w; x++) {
-            const int k = int(std::lround(mask.pixels[size_t(h - 1 - y) * w + x].r * 255.f));
-            p.layerOf[size_t(y) * w + x] = uint8_t(k <= int(bake.bands.size()) ? k : 0);
-        }
+    if (p.image.width != w || p.image.height != h) throw std::runtime_error(file.filename().string() + ": its image is not 320x240");
+    std::ifstream d(file.parent_path() / bake.depth, std::ios::binary);
+    const std::string bytes((std::istreambuf_iterator<char>(d)), std::istreambuf_iterator<char>());
+    if (bytes.size() != size_t(w) * h * 2) throw std::runtime_error(file.filename().string() + ": its depth file is missing or not 320x240");
+    p.depth.resize(size_t(w) * h);
+    for (size_t i = 0; i < p.depth.size(); i++) p.depth[i] = uint16_t(uint8_t(bytes[2 * i]) | (uint8_t(bytes[2 * i + 1]) << 8));
     return p;
 }
 
@@ -473,17 +485,32 @@ std::vector<BgTileImage> backgroundTiles(const Image& image) {
     return out;
 }
 
-std::vector<BgTileImage> layerTiles(const Image& image, const std::vector<uint8_t>& layerOf, int layer) {
-    std::vector<BgTileImage> out;
-    for (int y = 0; y < image.height; y += kBgLayerTile)
-        for (int x = 0; x < image.width; x += kBgLayerTile) {
-            const int w = std::min(kBgLayerTile, image.width - x), h = std::min(kBgLayerTile, image.height - y);
-            bool any = false;
-            Image t = crop(
-                image, x, y, w, h, [&](int px, int py) { return layerOf[size_t(py) * image.width + px] == layer + 1; }, &any);
-            if (any) out.push_back({x, y, std::move(t)});
+std::vector<Image> layerSheets(const Image& image, const std::vector<BgLayerTile>& tiles, std::vector<BgSheetSpot>* at) {
+    const int T = kBgLayerTile, perRow = 256 / T, perSheet = perRow * (256 / T);
+    std::vector<Image> sheets;
+    at->assign(tiles.size(), {});
+    for (size_t i = 0; i < tiles.size(); i++) {
+        const int sheet = int(i) / perSheet, slot = int(i) % perSheet;
+        if (sheet >= int(sheets.size())) {
+            const int left = int(tiles.size()) - sheet * perSheet;
+            Image s;
+            s.width = 256;
+            s.height = std::min(256, (left + perRow - 1) / perRow * T);
+            s.pixels.assign(size_t(s.width) * s.height, {0, 0, 0, 0});
+            sheets.push_back(std::move(s));
         }
-    return out;
+        Image& s = sheets[size_t(sheet)];
+        const int u = slot % perRow * T, v = slot / perRow * T;
+        (*at)[i] = {sheet, u, v};
+        const BgLayerTile& t = tiles[i];
+        for (int y = 0; y < T; y++)
+            for (int x = 0; x < T; x++) {
+                if (!t.mask[size_t(y) * T + x]) continue;
+                const Image::Px& p = image.pixels[size_t(image.height - 1 - (t.y + y)) * image.width + (t.x + x)];
+                s.pixels[size_t(s.height - 1 - (v + y)) * s.width + (u + x)] = {p.r, p.g, p.b, 1.f};
+            }
+    }
+    return sheets;
 }
 
 }  // namespace splash

@@ -1081,7 +1081,7 @@ static BakeThumbView bakeThumb(State& st, const editor::Document& doc, const std
 }
 
 // Bake pressed: renders the Fixed camera at `path` and writes its bake files
-// (bakes/<scene>-<object>.bgbake, .png, .layers.png), then points the
+// (bakes/<scene>-<object>.bgbake, .png, .depth), then points the
 // component at them (one undo step, only when the path changes).
 static void runBake(State& st, editor::Document& doc, viewport::Ps1View& view, const editor::ObjectPath& path) {
     const splash::Object* o = doc.object(path);
@@ -1099,7 +1099,7 @@ static void runBake(State& st, editor::Document& doc, viewport::Ps1View& view, c
         const splash::BgCamera bc = splash::bgCameraAsEngine(splash::bgCamera(*cam, scene.settings.gteScaling), cam->worldRotation);
         viewport::Ps1View::BakeShot shot;
         if (!view.bake(bc, splash::bakedObjects(scene, flats), &shot)) throw std::runtime_error("no scene");
-        const splash::BgLayerCut cut = splash::cutLayers(shot.sz, splash::groundPixels(shot.sz, bc), fc.layers);
+        const std::vector<uint16_t> depth = splash::occluderDepth(shot.sz, splash::groundPixels(shot.sz, bc));
         auto fileHash = [&](const std::string& p) -> uint32_t {
             std::ifstream in(doc.resolve(p), std::ios::binary);
             if (!in) return 0;
@@ -1110,15 +1110,14 @@ static void runBake(State& st, editor::Document& doc, viewport::Ps1View& view, c
         splash::BgBake b;
         const std::string stem = std::filesystem::path(rel).stem().string();
         b.image = stem + ".png";
-        b.layerMask = stem + ".layers.png";
+        b.depth = stem + ".depth";
         b.hash = splash::hashHex(splash::bakeHash(scene, flats, *cam, fileHash));
         b.h = fc.h;
-        b.bands = cut.bands;
-        splash::writeBake(doc.resolve(rel), b, shot.rgba, cut.layerOf);
-        std::string bands;
-        for (const splash::BgLayerBand& l : b.bands)
-            bands += " " + std::to_string(l.nearSZ) + "-" + std::to_string(l.farSZ) + ":" + std::to_string(l.pixels);
-        st.bakeStatus = "baked " + rel + " layers " + std::to_string(b.bands.size()) + bands;
+        b.occluders = int(std::count_if(depth.begin(), depth.end(), [](uint16_t d) { return d != 0; }));
+        splash::writeBake(doc.resolve(rel), b, shot.rgba, depth);
+        const std::vector<splash::BgLayerTile> tiles =
+            splash::cutLayerTiles(depth, fc.layers, splash::layerSpanSZ(scene.settings.gteScaling));
+        st.bakeStatus = "baked " + rel + " occluders " + std::to_string(b.occluders) + " layer tiles " + std::to_string(tiles.size());
     } catch (const std::exception& ex) {
         st.bakeStatus = std::string("bake failed: ") + ex.what();
         scriptLine(nullptr, "fixedcam: " + st.bakeStatus);
@@ -10131,8 +10130,9 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
         number("fcfov", "Field of view", "How tall the view is, in degrees (stored as the projection distance H; 90 is H 120).", fov,
                "deg", "fcfov", 10, 170, [](splash::Object& ob, float v) { ob.fixedCamera->h = splash::hForFov(v); }, 1);
         number("fclayers", "Layers",
-               "Depth layers cut from the bake, 0 to 8. Each is drawn at its nearest depth, so a character farther away passes "
-               "behind it. More layers sort more finely and take more VRAM.",
+               "Depth slices per 16x16 tile of the bake, 0 to 8 (0: the image only). A tile's pixels within half a metre of "
+               "each other are one slice, drawn at its nearest depth, so a character farther away passes behind it. Over this "
+               "many, the closest slices merge. More take more VRAM and sprites.",
                float(fc.layers), "", "fclayers", 0, float(splash::kFixedCameraMaxLayers),
                [](splash::Object& ob, float v) { ob.fixedCamera->layers = int(std::lround(v)); }, 0);
         const int dCur = fc.bitDepth == splash::BitDepth::Bpp8 ? 1 : 0;
@@ -10162,7 +10162,13 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
         } else if (!fc.bake.empty()) {
             try {
                 const splash::BgBake b = splash::readBake(doc.resolve(fc.bake));
-                line = "Baked, " + std::to_string(b.bands.size()) + (b.bands.size() == 1 ? " layer" : " layers");
+                line = "Baked";
+                // What the last export made of it: layer tiles and VRAM.
+                if (const std::optional<splash::ExportResult>& res = st.live.result(); res)
+                    for (const splash::ExportStats::BackgroundInfo& bi : res->stats.backgroundInfo)
+                        if (bi.object == name)
+                            line += ", " + std::to_string(bi.layerTiles) + " layer tiles, " + std::to_string((bi.vramBytes + 1023) / 1024) +
+                                    " KB VRAM" + (bi.droppedTiles ? ", " + std::to_string(bi.droppedTiles) + " over the limit" : std::string());
                 tone = color::textDim;
                 thumbFile = (std::filesystem::path(fc.bake).parent_path() / b.image).generic_string();
             } catch (const std::exception& ex) {

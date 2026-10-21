@@ -12781,28 +12781,58 @@ void testFixedCameraProjection() {
 // Layers: equal-count bands over the pixels that are neither sky nor ground,
 // each at its nearest depth; ground from depth alone.
 void testFixedCameraLayers() {
-    const int W = splash::kBgWidth, H = splash::kBgHeight;
+    const int W = splash::kBgWidth, H = splash::kBgHeight, T = splash::kBgLayerTile;
+    // Occluder depth: sky (row 0) and ground (the last 10 rows) have none.
     std::vector<float> sz(size_t(W) * H);
     std::vector<uint8_t> ground(sz.size(), 0);
     for (int y = 0; y < H; y++)
         for (int x = 0; x < W; x++) {
-            float& d = sz[size_t(y) * W + x];
-            d = y == 0 ? -1.f : x < W / 2 ? 100.f : 300.f + float(x - W / 2) * 0.5f;
+            sz[size_t(y) * W + x] = y == 0 ? -1.f : 100.4f;
             if (y >= H - 10) ground[size_t(y) * W + x] = 1;
         }
-    const splash::BgLayerCut cut = splash::cutLayers(sz, ground, 2);
-    CHECK(cut.bands.size() == 2);
-    CHECK(cut.bands[0].nearSZ == 100 && cut.bands[0].farSZ == 100);
-    CHECK(cut.bands[1].nearSZ == 300 && cut.bands[1].farSZ == 380);
-    CHECK(cut.bands[0].pixels == (W / 2) * (H - 11) && cut.bands[1].pixels == (W / 2) * (H - 11));
-    CHECK(cut.layerOf[0] == 0);                                  // sky
-    CHECK(cut.layerOf[size_t(H - 1) * W + 5] == 0);              // ground
-    CHECK(cut.layerOf[size_t(50) * W + 5] == 1 && cut.layerOf[size_t(50) * W + W - 1] == 2);
-    // More bands than distinct depths: the empty ones go.
-    std::vector<float> flat(sz.size(), 100.f);
-    CHECK(splash::cutLayers(flat, {}, 4).bands.size() == 1);
-    CHECK(splash::cutLayers(flat, {}, 0).bands.empty());
-    CHECK(splash::cutLayers(std::vector<float>(sz.size(), -1.f), {}, 4).bands.empty());
+    const std::vector<uint16_t> occ = splash::occluderDepth(sz, ground);
+    CHECK(occ[0] == 0 && occ[size_t(H - 1) * W] == 0 && occ[size_t(50) * W] == 100);
+    CHECK(splash::layerSpanSZ(100) == 20 && splash::layerSpanSZ(50) == 41);
+
+    // One cell holding a pillar at 300 (left half) before a wall from 360 to
+    // 420 (right half, rising by row): the pillar is one tile at 300; the wall
+    // splits into tiles no deeper than the span, each at its nearest depth.
+    std::vector<uint16_t> d(size_t(W) * H, 0);
+    for (int y = 0; y < T; y++)
+        for (int x = 0; x < T; x++) d[size_t(y) * W + x] = uint16_t(x < 8 ? 300 : 360 + y * 4);
+    const std::vector<splash::BgLayerTile> tiles = splash::cutLayerTiles(d, 8, 20);
+    CHECK(tiles.size() == 4);
+    if (tiles.size() == 4) {
+        CHECK(tiles[0].nearSZ == 300 && tiles[0].farSZ == 300 && tiles[0].pixels == 8 * T);
+        CHECK(tiles[1].nearSZ == 360 && tiles[1].farSZ == 380 && tiles[2].nearSZ == 384 && tiles[3].farSZ == 420);
+        for (const splash::BgLayerTile& t : tiles) CHECK(t.x == 0 && t.y == 0 && t.farSZ - t.nearSZ <= 20);
+        CHECK(tiles[0].mask[0] == 1 && tiles[0].mask[8] == 0 && tiles[1].mask[8] == 1);
+        int px = 0;
+        for (const splash::BgLayerTile& t : tiles) px += t.pixels;
+        CHECK(px == T * T);
+    }
+    // A cap of 2: the closest neighbours merge (the three wall runs), at the nearer depth.
+    const std::vector<splash::BgLayerTile> two = splash::cutLayerTiles(d, 2, 20);
+    CHECK(two.size() == 2 && two[0].nearSZ == 300 && two[1].nearSZ == 360 && two[1].farSZ == 420 && two[1].pixels == 8 * T);
+    CHECK(splash::cutLayerTiles(d, 0, 20).empty());
+    CHECK(splash::cutLayerTiles(std::vector<uint16_t>(d.size(), 0), 4, 20).empty());
+    // A character 0.3 m deep standing 0.2 m in front of the wall (SZ 352..364 at
+    // gte 100) is behind no wall tile, and behind the pillar's.
+    for (const splash::BgLayerTile& t : tiles) CHECK((364 > t.nearSZ) == (t.nearSZ == 300 || t.nearSZ == 360));
+
+    // Sheets: 16 tiles a row, as tall as needed; each tile's texels at its spot.
+    splash::Image img;
+    img.width = W, img.height = H;
+    img.pixels.assign(size_t(W) * H, {0.25f, 0.5f, 0.75f, 1});
+    std::vector<splash::BgLayerTile> many(20, tiles[0]);
+    std::vector<splash::BgSheetSpot> at;
+    const std::vector<splash::Image> sheets = splash::layerSheets(img, many, &at);
+    CHECK(sheets.size() == 1 && sheets[0].width == 256 && sheets[0].height == 32);
+    CHECK(at[17].sheet == 0 && at[17].u == 16 && at[17].v == 16);
+    // Spot (16,16), texel (0,0) is the pillar's (opaque), texel (8,0) is not this tile's.
+    CHECK(sheets[0].pixels[size_t(32 - 1 - 16) * 256 + 16].a == 1.f && sheets[0].pixels[size_t(32 - 1 - 16) * 256 + 24].a == 0.f);
+    std::vector<splash::BgLayerTile> lots(300, tiles[0]);
+    CHECK(splash::layerSheets(img, lots, &at).size() == 2 && at[299].sheet == 1 && at[299].v == 32);
 
     // A floor 2 m under a camera pitched 30 degrees down is ground; a wall
     // 6 m ahead of a level camera is not.
@@ -12838,40 +12868,45 @@ void testFixedCameraLayers() {
 void testFixedCameraBakeFiles() {
     namespace fs = std::filesystem;
     const int W = splash::kBgWidth, H = splash::kBgHeight;
-    std::vector<uint8_t> rgba(size_t(W) * H * 4), layerOf(size_t(W) * H, 0);
+    std::vector<uint8_t> rgba(size_t(W) * H * 4);
+    std::vector<uint16_t> depth(size_t(W) * H, 0);
     for (int y = 0; y < H; y++)
         for (int x = 0; x < W; x++) {
             uint8_t* p = &rgba[(size_t(y) * W + x) * 4];
             p[0] = uint8_t(x), p[1] = uint8_t(y), p[2] = 7, p[3] = 255;
-            if (x >= 64 && x < 128 && y >= 64 && y < 100) layerOf[size_t(y) * W + x] = 1;
-            if (x >= 300 && y >= 230) layerOf[size_t(y) * W + x] = 2;
+            if (x >= 64 && x < 128 && y >= 64 && y < 100) depth[size_t(y) * W + x] = uint16_t(200 + x);
+            if (x >= 300 && y >= 230) depth[size_t(y) * W + x] = 65535;
         }
     const fs::path dir = g_outDir / "fixedcamfiles";
     fs::remove_all(dir);
     splash::BgBake b;
     b.image = "t.png";
-    b.layerMask = "t.layers.png";
+    b.depth = "t.depth";
     b.hash = "0badf00d";
     b.h = 130;
-    b.bands = {{200, 260, 2304}, {400, 420, 200}};
-    splash::writeBake(dir / "t.bgbake", b, rgba, layerOf);
-    CHECK(fs::exists(dir / "t.png") && fs::exists(dir / "t.layers.png"));
+    b.occluders = 64 * 36 + 20 * 10;
+    splash::writeBake(dir / "t.bgbake", b, rgba, depth);
+    std::error_code ec;
+    CHECK(fs::exists(dir / "t.png") && fs::file_size(dir / "t.depth", ec) == size_t(W) * H * 2);
     const splash::BgBake r = splash::readBake(dir / "t.bgbake");
-    CHECK(r.hash == "0badf00d" && r.h == 130 && r.bands.size() == 2 && r.bands[1].nearSZ == 400 && r.image == "t.png");
+    CHECK(r.hash == "0badf00d" && r.h == 130 && r.occluders == b.occluders && r.image == "t.png" && r.depth == "t.depth");
     const splash::BgBakePixels px = splash::readBakePixels(dir / "t.bgbake", r);
-    CHECK(px.layerOf == layerOf);
+    CHECK(px.depth == depth);
     // Image rows are bottom-up: the top-left pixel is the last row's first.
     CHECK(std::lround(px.image.pixels[size_t(H - 1) * W + 3].r * 255) == 3);
     const std::vector<splash::BgTileImage> cols = splash::backgroundTiles(px.image);
     CHECK(cols.size() == 2 && cols[0].image.width == 256 && cols[1].x == 256 && cols[1].image.width == 64 && cols[1].image.height == 240);
-    const std::vector<splash::BgTileImage> l0 = splash::layerTiles(px.image, px.layerOf, 0);
-    CHECK(l0.size() == 1 && l0[0].x == 64 && l0[0].y == 64 && l0[0].image.width == 64 && l0[0].image.height == 64);
-    // Texel (0,0) of that tile (top-left) is opaque, one under row 100 is not.
-    CHECK(l0[0].image.pixels[size_t(63) * 64].a == 1.f && l0[0].image.pixels[size_t(63 - 40) * 64].a == 0.f);
-    const std::vector<splash::BgTileImage> l1 = splash::layerTiles(px.image, px.layerOf, 1);
-    CHECK(l1.size() == 1 && l1[0].x == 256 && l1[0].y == 192 && l1[0].image.height == 48);
     CHECK(splash::bakePathFor("courtyard", "Hall cam/1") == "bakes/courtyard-Hall_cam_1.bgbake");
+    // A truncated depth file is refused.
+    { std::ofstream(dir / "t.depth", std::ios::binary) << "xx"; }
     bool threw = false;
+    try {
+        splash::readBakePixels(dir / "t.bgbake", r);
+    } catch (const std::exception&) {
+        threw = true;
+    }
+    CHECK(threw);
+    threw = false;
     try {
         splash::readBake(dir / "missing.bgbake");
     } catch (const std::exception&) {
@@ -12912,12 +12947,12 @@ void testFixedCameraPack() {
     scene.objects[1].children[1].mesh->keep3dInFixedCameras = true;
 
     const int W = splash::kBgWidth, H = splash::kBgHeight;
-    std::vector<uint8_t> rgba(size_t(W) * H * 4, 90), layerOf(size_t(W) * H, 0);
-    for (int y = 0; y < H; y++)
-        for (int x = 0; x < W; x++) {
-            if (x < 64 && y < 64) layerOf[size_t(y) * W + x] = 1;           // layer 0: one tile
-            if (x >= 128 && x < 256 && y >= 128) layerOf[size_t(y) * W + x] = 2;  // layer 1: 2 x 2 tiles
-        }
+    // Occluders: the top-left 16x16 cell at 250, and the cell right of it
+    // with two depths 300 and 600 (two tiles). Everything else is image only.
+    std::vector<uint8_t> rgba(size_t(W) * H * 4, 90);
+    std::vector<uint16_t> depth(size_t(W) * H, 0);
+    for (int y = 0; y < 16; y++)
+        for (int x = 0; x < 32; x++) depth[size_t(y) * W + x] = uint16_t(x < 16 ? 250 : y < 8 ? 300 : 600);
     auto bake = [&]() {
         const std::vector<splash::FlatObject> flats = splash::flatten(scene);
         const splash::FlatObject* fo = nullptr;
@@ -12925,11 +12960,10 @@ void testFixedCameraPack() {
             if (f.object->name == "Yard cam") fo = &f;
         splash::BgBake b;
         b.image = "yard.png";
-        b.layerMask = "yard.layers.png";
+        b.depth = "yard.depth";
         b.h = 120;
-        b.bands = {{250, 300, 4096}, {600, 900, 14336}};
         b.hash = splash::hashHex(splash::bakeHash(scene, flats, *fo, [&](const std::string& p) { return bgtest::fnvFile(project / p); }));
-        splash::writeBake(project / "bakes" / "yard.bgbake", b, rgba, layerOf);
+        splash::writeBake(project / "bakes" / "yard.bgbake", b, rgba, depth);
     };
     bake();
     const splash::ExportResult r = splash::exportSplashpack(scene, project, dir / "bg.splashpack");
@@ -12947,7 +12981,7 @@ void testFixedCameraPack() {
     CHECK(int32_t(rd32(b, rec + 4)) == 0 && int32_t(rd32(b, rec + 8)) == -82 && int32_t(rd32(b, rec + 12)) == -246);
     CHECK(rd16(b, rec + 40) == 120);
     const uint16_t tiles = rd16(b, rec + 42), layers = rd16(b, rec + 44), hidden = rd16(b, rec + 46);
-    CHECK(tiles == 2 && layers == 2);
+    CHECK(tiles == 2 && layers == 3);
     CHECK(rd16(b, rec + 48) == 1);  // show at start
     const size_t tilesAt = rd32(b, rec + 52), layersAt = rd32(b, rec + 56), hiddenAt = rd32(b, rec + 60);
     CHECK(rd16(b, tilesAt + 4) + rd16(b, tilesAt + 20 + 4) == 320);
@@ -12958,9 +12992,20 @@ void testFixedCameraPack() {
         CHECK(uint8_t(b[at + 12]) * 64 >= 320);                           // page past framebuffer 0
         CHECK(uint8_t(b[at + 14]) + rd16(b, at + 4) <= 256);              // u + w inside the page
     }
-    CHECK(rd16(b, layersAt + 4) == 1 && rd16(b, layersAt + 6) == 250);
-    CHECK(rd16(b, layersAt + 8 + 4) == 4 && rd16(b, layersAt + 8 + 6) == 600);
-    CHECK(rd16(b, rd32(b, layersAt) + 4) == 64);  // layer 0's tile is 64 wide
+    // Layer tiles: 16x16 sprites at their cells, each with its own nearest depth
+    // (offset 18), cut out of one sheet in a page past framebuffer 0.
+    const int wantSZ[3] = {250, 300, 600}, wantX[3] = {0, 16, 16};
+    for (int t = 0; t < 3; t++) {
+        const size_t at = layersAt + size_t(t) * 20;
+        CHECK(bgtest::rdi16(b, at) == wantX[t] && bgtest::rdi16(b, at + 2) == 0);
+        CHECK(rd16(b, at + 4) == 16 && rd16(b, at + 6) == 16);
+        CHECK(rd16(b, at + 18) == wantSZ[t]);
+        CHECK(uint8_t(b[at + 12]) * 64 >= 320 && uint8_t(b[at + 16]) == 2);
+    }
+    CHECK(uint8_t(b[layersAt + 20 + 14]) == uint8_t(b[layersAt + 14]) + 16);  // the next spot in the sheet
+    CHECK(rd16(b, tilesAt + 18) == 0);                                         // the image has no depth
+    CHECK(r.stats.backgroundInfo.size() == 1 && r.stats.backgroundInfo[0].layerTiles == 3 &&
+          r.stats.backgroundInfo[0].vramBytes == (256 * 240 + 64 * 240 + 256 * 16) * 2);
     // Hidden: every courtyard mesh but the kept crate, as game object indices.
     std::vector<uint16_t> hid;
     for (uint16_t i = 0; i < hidden; i++) hid.push_back(rd16(b, hiddenAt + 2 * i));
