@@ -118,6 +118,7 @@ uniform int uClean;
 uniform vec3 uFog;
 uniform float uFogScale;  // grows with the orbit distance, so a big world is not all fog
 uniform float uFogFar;    // > 0: the scene's fog wall, in view depth
+uniform int uUntextured;  // bake only: a vertex colour is the pixel, as the GPU draws untextured triangles
 out vec4 oColor;
 const float kDither[16] = float[16](-4, 0, -3, 1, 2, -2, 3, -1, -3, 1, -4, 0, 3, -1, 2, -2);
 void main() {
@@ -125,7 +126,7 @@ void main() {
     // Texels under half alpha export as word 0, which the console skips.
     vec4 t = texture(uTex, fract(uv));
     if (t.a < 0.5) discard;
-    vec3 c = t.rgb * vCol * 2.0;
+    vec3 c = uUntextured == 1 ? vCol : t.rgb * vCol * 2.0;
     if (uFogFar > 0.0) {
         float fogNear = uFogFar * 0.125;
         c = mix(c, uFog, clamp((vDepth - fogNear) / (uFogFar - fogNear), 0.0, 1.0));
@@ -533,6 +534,7 @@ unsigned Ps1View::render(int panelW, int panelH, int lines) {
     glUniform1f(glGetUniformLocation(m_prog, "uFogScale"), viewScale());
     glUniform1f(glGetUniformLocation(m_prog, "uFogFar"), fogFar);
     glUniform1i(glGetUniformLocation(m_prog, "uTex"), 0);
+    glUniform1i(glGetUniformLocation(m_prog, "uUntextured"), 0);
     glActiveTexture_(GL_TEXTURE0);
     glBindVertexArray(m_vao);
     for (const Batch& b : m_batches) {
@@ -600,10 +602,15 @@ bool Ps1View::bake(const splash::BgCamera& cam, const std::vector<bool>& include
     glUniform1i(glGetUniformLocation(m_prog, "uTex"), 0);
     glActiveTexture_(GL_TEXTURE0);
     glBindVertexArray(m_vao);
+    // Textured: texel x colour / 128, as the GPU modulates; untextured: the
+    // colour itself (the viewport draws those twice as bright).
+    const GLint untexturedAt = glGetUniformLocation(m_prog, "uUntextured");
     for (const Batch& bt : m_batches) {
+        glUniform1i(untexturedAt, bt.tex == m_white ? 1 : 0);
         glBindTexture(GL_TEXTURE_2D, bt.tex);
         glDrawArrays(GL_TRIANGLES, bt.start, bt.count);
     }
+    glUniform1i(untexturedAt, 0);
     glBindVertexArray(0);
     glDisable(GL_DEPTH_TEST);
 
