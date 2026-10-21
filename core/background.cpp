@@ -157,6 +157,66 @@ BgCamera bgCameraAsEngine(const BgCamera& c, Quat worldRotation) {
     return q;
 }
 
+std::array<int32_t, 9> psxRotation(Quat q) {
+    // PSXTrig.ConvertRotationToPSXMatrix, as the exporter writes it.
+    const float x = q.x, y = q.y, z = q.z, qw = q.w;
+    const float m00 = 1.f - 2.f * (y * y + z * z), m01 = 2.f * (x * y - z * qw), m02 = 2.f * (x * z + y * qw);
+    const float m10 = 2.f * (x * y + z * qw), m11 = 1.f - 2.f * (x * x + z * z), m12 = 2.f * (y * z - x * qw);
+    const float m20 = 2.f * (x * z - y * qw), m21 = 2.f * (y * z + x * qw), m22 = 1.f - 2.f * (x * x + y * y);
+    const float r[9] = {m00, -m01, m02, -m10, m11, -m12, m20, -m21, m22};
+    std::array<int32_t, 9> out{};
+    for (size_t i = 0; i < 9; i++) out[i] = toFixed12(r[i]);
+    return out;
+}
+
+BgFixedObject bgFixedObject(const FlatObject& fo, float gte) {
+    BgFixedObject o;
+    const Vec3 p = fo.localToWorld.position();
+    o.pos = {toWorldFixed12(p.x / gte), toWorldFixed12(-p.y / gte), toWorldFixed12(p.z / gte)};
+    o.rot = psxRotation(fo.worldRotation);
+    return o;
+}
+
+std::array<int16_t, 3> bgFixedVertex(Vec3 meshLocal, Vec3 lossyScale, float gte) {
+    const Vec3 v{meshLocal.x * lossyScale.x, meshLocal.y * lossyScale.y, meshLocal.z * lossyScale.z};
+    return {toPsxCoord(v.x, gte), toPsxCoord(-v.y, gte), toPsxCoord(v.z, gte)};
+}
+
+bool bgEngineProject(const BgEngineCamera& cam, const BgFixedObject& o, std::array<int16_t, 3> v, BgFixedPoint* out) {
+    // mvmva with sf=1: (sum) >> 12, an arithmetic shift (floor); IR saturates to 16 bits.
+    auto shr = [](int64_t x) { return int64_t(x >> 12); };
+    auto ir = [](int64_t x) { return std::clamp<int64_t>(x, -32768, 32767); };
+    const auto& R = cam.rotation;
+    int64_t camv[3], op[3], F[9];
+    for (int r = 0; r < 3; r++) {
+        int64_t s = 0, t = 0;
+        for (int k = 0; k < 3; k++) s += int64_t(R[size_t(r * 3 + k)]) * -int64_t(cam.position[size_t(k)]);
+        camv[r] = shr(s);
+        for (int k = 0; k < 3; k++) t += int64_t(R[size_t(r * 3 + k)]) * o.pos[size_t(k)];
+        op[r] = shr(t) + camv[r];
+    }
+    // GteMath::multiplyMatrix33(objRot, camRot): camRot * objRot, column by column.
+    for (int r = 0; r < 3; r++)
+        for (int c = 0; c < 3; c++) {
+            int64_t s = 0;
+            for (int k = 0; k < 3; k++) s += int64_t(R[size_t(r * 3 + k)]) * o.rot[size_t(k * 3 + c)];
+            F[r * 3 + c] = ir(shr(s));
+        }
+    int64_t mac[3];
+    for (int r = 0; r < 3; r++) {
+        int64_t s = op[r] << 12;
+        for (int k = 0; k < 3; k++) s += F[r * 3 + k] * v[size_t(k)];
+        mac[r] = shr(s);
+    }
+    const int64_t sz = std::clamp<int64_t>(mac[2], 0, 65535);
+    if (sz <= 0 || 2 * sz <= int64_t(cam.h)) return false;
+    const int64_t n = std::min<int64_t>(0x1ffff, (int64_t(cam.h) * 0x20000 / sz + 1) / 2);
+    out->sx = int(std::clamp<int64_t>(((int64_t(160) << 16) + ir(mac[0]) * n) >> 16, -1024, 1023));
+    out->sy = int(std::clamp<int64_t>(((int64_t(120) << 16) + ir(mac[1]) * n) >> 16, -1024, 1023));
+    out->sz = int(sz);
+    return true;
+}
+
 BgLayerCut cutLayers(const std::vector<float>& sz, const std::vector<uint8_t>& ground, int count) {
     BgLayerCut out;
     out.layerOf.assign(sz.size(), 0);

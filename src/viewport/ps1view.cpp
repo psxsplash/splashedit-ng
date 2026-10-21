@@ -85,15 +85,17 @@ static const char* kVert = R"(#version 330 core
 layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec2 aUv;
 layout(location = 2) in vec3 aCol;
+layout(location = 3) in float aW;
 uniform mat4 uViewProj;
 uniform vec2 uRes;
 uniform int uClean;
+uniform int uPreClip;  // bake: aPos, aW are the clip position (Ps1View::bakeClip)
 noperspective out vec2 vUvAffine;
 out vec2 vUvPersp;
 out vec3 vCol;
 out float vDepth;
 void main() {
-    vec4 clip = uViewProj * vec4(aPos, 1.0);
+    vec4 clip = uPreClip == 1 ? vec4(aPos, aW) : uViewProj * vec4(aPos, 1.0);
     if (uClean == 0) {
         // Snap to the integer pixel grid like the GTE's output does.
         vec2 ndc = clip.xy / clip.w;
@@ -346,6 +348,7 @@ void Ps1View::rebuild() {
             for (size_t k = 0; k + 2 < tri.size(); k += 3)
                 for (size_t j = 0; j < 3; ++j) m_pick.positions.push_back(wp[(size_t)tri[k + j]]);
             m_pick.ranges.push_back({(int)fi, firstTri, m_pick.positions.size() / 3 - firstTri});
+            const size_t firstVertex = bucket.size();
             for (int idx : tri) {
                 size_t i = (size_t)idx;
                 // The exporter's colour, so this view lights the scene the way the game does.
@@ -355,6 +358,7 @@ void Ps1View::rebuild() {
                 uv = {uv.x + duv.x, uv.y + duv.y};
                 bucket.push_back({wp[i].x, wp[i].y, -wp[i].z, uv.x, uv.y, col.x, col.y, col.z});
             }
+            if (m_bakeCam) bakeClip(fo, *mesh, tri, &bucket[firstVertex]);
         }
     }
 
@@ -425,7 +429,8 @@ bool Ps1View::init() {
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, px));
     glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, u));
     glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, r));
-    for (int i = 0; i < 3; ++i) glEnableVertexAttribArray(i);
+    glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, pw));
+    for (int i = 0; i < 4; ++i) glEnableVertexAttribArray(i);
     glBindVertexArray(0);
 
     const uint8_t whitePx[4] = {255, 255, 255, 255};
@@ -530,6 +535,7 @@ unsigned Ps1View::render(int panelW, int panelH, int lines) {
     glUniformMatrix4fv(glGetUniformLocation(m_prog, "uViewProj"), 1, GL_FALSE, m_viewProj.m);
     glUniform2f(glGetUniformLocation(m_prog, "uRes"), (float)w, (float)h);
     glUniform1i(glGetUniformLocation(m_prog, "uClean"), clean ? 1 : 0);
+    glUniform1i(glGetUniformLocation(m_prog, "uPreClip"), 0);
     glUniform3f(glGetUniformLocation(m_prog, "uFog"), fog[0], fog[1], fog[2]);
     glUniform1f(glGetUniformLocation(m_prog, "uFogScale"), viewScale());
     glUniform1f(glGetUniformLocation(m_prog, "uFogFar"), fogFar);
@@ -547,13 +553,53 @@ unsigned Ps1View::render(int panelW, int panelH, int lines) {
     return m_color;
 }
 
+// Each triangle of a bake where psxsplash would put it: the corners through
+// the engine's fixed-point path (whole screen coordinates), at NDC
+// x = (SX + 0.5 - 1/16 - 160) / 160 and y = (120 - SY - 0.5 + 1/16) / 120. A
+// whole SX sits on a pixel centre as the PS1 rasteriser samples, and the
+// sixteenth keeps edges off GL's sample points, so a pixel is drawn when
+// left <= x < right and top <= y < bottom, the PS1 rule. A triangle the GTE
+// cannot project (a corner under H / 2 or behind the camera) goes through
+// bgClipMatrix and GL's clipping instead.
+void Ps1View::bakeClip(const splash::FlatObject& fo, const splash::Mesh& mesh, const std::vector<int>& tri, Vertex* out) const {
+    const float gte = m_bakeCam->gte;
+    const splash::BgFixedObject fixed = splash::bgFixedObject(fo, gte);
+    const std::array<float, 16> m = splash::bgClipMatrix(*m_bakeCam, kBakeNear, kBakeFar);
+    const float a = (kBakeFar + kBakeNear) / (kBakeFar - kBakeNear), b = -2 * kBakeFar * kBakeNear / (kBakeFar - kBakeNear);
+    for (size_t k = 0; k + 2 < tri.size(); k += 3) {
+        splash::BgFixedPoint p[3];
+        bool fixedOk = true;
+        for (size_t j = 0; j < 3; ++j)
+            fixedOk = fixedOk && splash::bgEngineProject(m_bakeEngine, fixed,
+                                                         splash::bgFixedVertex(mesh.positions[size_t(tri[k + j])], fo.lossyScale, gte), &p[j]);
+        for (size_t j = 0; j < 3; ++j) {
+            Vertex& v = out[k + j];
+            if (fixedOk) {
+                const float w = float(p[j].sz) * gte / 4096.f;
+                const float nx = (float(p[j].sx) + 0.5f - 0.0625f - splash::kBgCenterX) / splash::kBgCenterX;
+                const float ny = (splash::kBgCenterY - float(p[j].sy) - 0.5f + 0.0625f) / splash::kBgCenterY;
+                v.px = nx * w, v.py = ny * w, v.pz = a * w + b, v.pw = w;
+            } else {
+                const float g[4] = {v.px, v.py, v.pz, 1};
+                float c[4] = {};
+                for (int r = 0; r < 4; r++)
+                    for (int i = 0; i < 4; i++) c[r] += m[size_t(i * 4 + r)] * g[i];
+                v.px = c[0], v.py = c[1], v.pz = c[2], v.pw = c[3];
+            }
+        }
+    }
+}
+
 bool Ps1View::bake(const splash::BgCamera& cam, const std::vector<bool>& include, BakeShot* out) {
     if (!m_doc || !out) return false;
     const editor::Preview saved = m_preview;
     m_preview = {};
     m_include = &include;
+    m_bakeCam = &cam;
+    m_bakeEngine = splash::bgEngineCamera(cam, {});
     rebuild();
     m_include = nullptr;
+    m_bakeCam = nullptr;
     glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
     glBufferData(GL_ARRAY_BUFFER, m_verts.size() * sizeof(Vertex), m_verts.data(), GL_STATIC_DRAW);
     m_vboCap = m_verts.size();
@@ -579,10 +625,8 @@ bool Ps1View::bake(const splash::BgCamera& cam, const std::vector<bool>& include
     for (int i = 0; i < 3; i++) fog[i] = std::clamp(set.fog.color[i], 0.0f, 1.0f);
     const float gte = set.gteScaling > 0 ? set.gteScaling : 100.f;
     const float fogFar = set.fog.enabled ? 20000.0f / float(std::clamp(set.fog.density, 1, 10)) * gte / 4096.0f : 0.f;
-    const float zn = 0.05f, zf = 2000.0f;
-    Mat4 vp;
-    const std::array<float, 16> clip = splash::bgClipMatrix(cam, zn, zf);
-    std::copy(clip.begin(), clip.end(), vp.m);
+    const float zn = kBakeNear, zf = kBakeFar;
+    Mat4 vp = Mat4::identity();
     glViewport(0, 0, w, h);
     glClearColor(fog[0], fog[1], fog[2], 1);
     glClearDepth(1.0);
@@ -595,6 +639,8 @@ bool Ps1View::bake(const splash::BgCamera& cam, const std::vector<bool>& include
     glUniformMatrix4fv(glGetUniformLocation(m_prog, "uViewProj"), 1, GL_FALSE, vp.m);
     glUniform2f(glGetUniformLocation(m_prog, "uRes"), (float)w, (float)h);
     glUniform1i(glGetUniformLocation(m_prog, "uClean"), 1);
+    // Corners come in projected by rebuild() (bakeClip).
+    glUniform1i(glGetUniformLocation(m_prog, "uPreClip"), 1);
     glUniform3f(glGetUniformLocation(m_prog, "uFog"), fog[0], fog[1], fog[2]);
     // No editor haze: the game only fogs with the scene's fog.
     glUniform1f(glGetUniformLocation(m_prog, "uFogScale"), 1e9f);
@@ -611,6 +657,7 @@ bool Ps1View::bake(const splash::BgCamera& cam, const std::vector<bool>& include
         glDrawArrays(GL_TRIANGLES, bt.start, bt.count);
     }
     glUniform1i(untexturedAt, 0);
+    glUniform1i(glGetUniformLocation(m_prog, "uPreClip"), 0);
     glBindVertexArray(0);
     glDisable(GL_DEPTH_TEST);
 

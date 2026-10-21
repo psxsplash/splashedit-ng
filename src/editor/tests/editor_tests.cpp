@@ -12751,6 +12751,31 @@ void testFixedCameraProjection() {
     const splash::BgEngineCamera e2 = splash::bgEngineCamera(c2, {});
     const std::array<int16_t, 9> rows = {4096, 0, 0, 0, 4096, 0, 0, 0, 4096};
     CHECK(e2.rotation == rows && e2.h == 120);
+
+    // The engine's fixed-point path (each mvmva floors, then RTPS floors SX,
+    // SY), against a separate emulation of the same rules for a courtyard
+    // camera record and the right pillar: a top corner the exact projection
+    // puts at 295.61, 55.47 lands at 295, 53, where Redux draws it.
+    splash::BgEngineCamera oc;
+    oc.position = {0, -66, -184};
+    oc.rotation = {3753, 0, 1642, 285, 4034, -652, -1617, 711, 3696};
+    oc.h = 120;
+    splash::BgFixedObject pillar;
+    pillar.pos = {123, -74, 164};
+    pillar.rot = {4096, 0, 0, 0, 4096, 0, 0, 0, 4096};
+    splash::BgFixedPoint fp;
+    CHECK(splash::bgEngineProject(oc, pillar, {16, -74, -16}, &fp) && fp.sx == 295 && fp.sy == 53 && fp.sz == 229);
+    CHECK(splash::bgEngineProject(oc, pillar, {-16, 74, 16}, &fp) && fp.sx == 258 && fp.sy == 125 && fp.sz == 296);
+    // Under H / 2 the GTE's divide overflows: not projected.
+    splash::BgFixedObject near = pillar;
+    near.pos = {0, -66, -160};
+    CHECK(!splash::bgEngineProject(oc, near, {0, 0, 0}, &fp));
+    // The exporter's vertex and object encodings.
+    CHECK((splash::bgFixedVertex({0.4f, 1.8f, -0.4f}, {1, 1, 1}, 100) == std::array<int16_t, 3>{16, -74, -16}));
+    splash::Object po;
+    po.name = "p";
+    const splash::BgFixedObject fpo = splash::bgFixedObject(bgtest::flatAt(po, {3, 1.8f, 4}, {}), 100);
+    CHECK((fpo.pos == std::array<int32_t, 3>{123, -74, 164}) && fpo.rot[0] == 4096 && fpo.rot[4] == 4096 && fpo.rot[1] == 0);
 }
 
 // Layers: equal-count bands over the pixels that are neither sky nor ground,

@@ -526,19 +526,7 @@ void writeWorldAabb(BinWriter& w, const Mat34& m, const Bounds& local, float gte
 
 // PSXTrig.ConvertRotationToPSXMatrix
 void writeRotation(BinWriter& w, Quat q) {
-    float x = q.x, y = q.y, z = q.z, qw = q.w;
-    float m00 = 1.f - 2.f * (y * y + z * z);
-    float m01 = 2.f * (x * y - z * qw);
-    float m02 = 2.f * (x * z + y * qw);
-    float m10 = 2.f * (x * y + z * qw);
-    float m11 = 1.f - 2.f * (x * x + z * z);
-    float m12 = 2.f * (y * z - x * qw);
-    float m20 = 2.f * (x * z - y * qw);
-    float m21 = 2.f * (y * z + x * qw);
-    float m22 = 1.f - 2.f * (x * x + y * y);
-    float r[3][3] = {{m00, -m01, m02}, {-m10, m11, -m12}, {m20, -m21, m22}};
-    for (auto& row : r)
-        for (float v : row) w.i32(toFixed12(v));
+    for (int32_t v : psxRotation(q)) w.i32(v);
 }
 
 // PSXPlayer.FindNavmesh: Physics.Raycast(transform.position, Vector3.down,

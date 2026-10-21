@@ -69,6 +69,26 @@ BgEngineCamera bgEngineCamera(const BgCamera& c, Quat worldRotation);
 // with the game to the pixel.
 BgCamera bgCameraAsEngine(const BgCamera& c, Quat worldRotation);
 
+// psxsplash's own arithmetic, for a bake that lands where the console draws:
+// an object as the exporter writes it (20.12 position, 4.12 rotation with
+// the Y flip), a mesh vertex as it writes it, and the engine's fixed-point
+// path to the screen (camera translation, object translation and rotation
+// through the GTE, each step floored, then RTPS). The engine's floors put a
+// corner up to about 2.5 px up and left of the exact projection.
+std::array<int32_t, 9> psxRotation(Quat q);
+struct BgFixedObject {
+    std::array<int32_t, 3> pos{};
+    std::array<int32_t, 9> rot{};
+};
+BgFixedObject bgFixedObject(const FlatObject& fo, float gte);
+std::array<int16_t, 3> bgFixedVertex(Vec3 meshLocal, Vec3 lossyScale, float gte);
+struct BgFixedPoint {
+    int sx = 0, sy = 0, sz = 0;
+};
+// False when the GTE cannot project it faithfully (SZ under H / 2, where its
+// divide overflows): draw that triangle with bgClipMatrix instead.
+bool bgEngineProject(const BgEngineCamera& cam, const BgFixedObject& o, std::array<int16_t, 3> v, BgFixedPoint* out);
+
 // Depth layers over a bake. `sz` is each pixel's depth in GTE units, top row
 // first, < 0 for sky; `ground` marks pixels of upward-facing surfaces, which
 // stay in the image only (a floor never covers a character standing on it).
