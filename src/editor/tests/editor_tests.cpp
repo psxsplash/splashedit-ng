@@ -8725,6 +8725,53 @@ void testScreenFx() {
     CHECK(!splash::blockNameError("Screen").empty());  // a variable may not hide the API table
 }
 
+// UI fonts stop at row 456: psxsplash's screen effects keep rows 456-463 of
+// the x = 960 column for their dither masks. Two bitmap fonts of 8x69 cells
+// (3 rows of 32 glyphs, 207 rows each): the first fills rows 0-206, the
+// second fits only the second bin, where it would reach row 463 under the old
+// end (464). It must be refused, and no font may reach row 456; two 8x66
+// fonts (198 rows) both fit, the second ending at row 453.
+void testScreenFxFontBin() {
+    namespace fs = std::filesystem;
+    using K = splash::ExportStats::VramKind;
+    const fs::path root = g_outDir / "screenfxfonts";
+    fs::remove_all(root);
+    fs::create_directories(root);
+    splash::Image img;
+    img.width = 256, img.height = 207;
+    img.pixels.assign(size_t(256) * 207, splash::Image::Px{1, 1, 1, 1});
+    splash::savePng(img, root / "font.png");
+    auto exportFonts = [&](int glyphH) {
+        splash::Scene sc;
+        for (const char* n : {"one", "two"}) {
+            splash::UIFont f;
+            f.name = n;
+            f.bitmap = "font.png";
+            f.glyphWidth = 8;
+            f.glyphHeight = glyphH;
+            sc.fonts.push_back(f);
+        }
+        splash::ExportOptions dry;
+        dry.dryRun = true;
+        return splash::exportSplashpack(sc, root, root / "fonts.splashpack", dry);
+    };
+    auto fontRects = [&](const splash::ExportResult& r) {
+        std::vector<std::pair<int, int>> v;  // first row, one past the last
+        for (const auto& m : r.stats.vramMap)
+            if (m.kind == K::Font) v.push_back({m.y, m.y + m.h});
+        return v;
+    };
+    const splash::ExportResult tall = exportFonts(69);
+    const auto t = fontRects(tall);
+    CHECK(std::all_of(t.begin(), t.end(), [](auto p) { return p.second <= 456; }));
+    CHECK(std::any_of(tall.errors.begin(), tall.errors.end(), [](const std::string& e) {
+        return e.find("font 'two' (207 rows) does not fit in the font column") != std::string::npos;
+    }));
+    const splash::ExportResult fits = exportFonts(66);
+    const auto f = fontRects(fits);
+    CHECK(fits.ok() && f.size() == 2 && f[0] == std::make_pair(0, 198) && f[1] == std::make_pair(256, 454));
+}
+
 void testTimelinePreview() {
     using splash::TrackType;
     auto keyed = [](TrackType type, const char* target, std::initializer_list<std::pair<int, std::array<float, 3>>> keys) {
@@ -14633,6 +14680,7 @@ int main(int argc, char** argv) {
     testTimelineSample();
     testTimelineEdit();
     testScreenFx();
+    testScreenFxFontBin();
     testTimelinePreview();
     testTimelineRenameDelete();
     testTimelineRetarget();
