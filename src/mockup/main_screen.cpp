@@ -18,6 +18,7 @@
 #include <string>
 
 #include "audio.hh"
+#include "blocks.hh"
 #include "budget.hh"
 #include "disc.hh"
 #include "rooms.hh"
@@ -1017,6 +1018,7 @@ static ObjectLook lookOf(editor::ComponentKind k) {
         case K::Portal: return {icon::link, kind::portal};
         case K::Walkoff: return {icon::maximize, kind::walkoff};
         case K::Agent: return {icon::eye, kind::agent};
+        case K::FixedCamera: return {icon::camera, kind::camera};
     }
     return {icon::box, color::textDim};
 }
@@ -1033,8 +1035,128 @@ static ObjectLook lookOf(const splash::Object& o, bool expanded) {
     if (o.portal) return lookOf(K::Portal);
     if (o.room) return lookOf(K::Room);
     if (o.walkoff) return lookOf(K::Walkoff);
+    if (o.fixedCamera) return lookOf(K::FixedCamera);
     if (!o.children.empty() && !o.collider) return {expanded ? icon::folderOpen : icon::folder, kind::folder};
     return {icon::box, color::textDim};
+}
+
+static bool sceneHasFixedCamera(const std::vector<splash::Object>& objs) {
+    for (const splash::Object& o : objs)
+        if (o.fixedCamera || sceneHasFixedCamera(o.children)) return true;
+    return false;
+}
+
+// A Fixed camera bake's image as a GL texture, reloaded when the file is rewritten.
+struct BakeThumbView {
+    unsigned tex = 0;
+    int w = 0, h = 0;
+};
+static BakeThumbView bakeThumb(State& st, const editor::Document& doc, const std::string& file) {
+    State::BakeThumb& t = st.bakeThumb;
+    std::error_code ec;
+    const auto when = std::filesystem::last_write_time(doc.resolve(file), ec);
+    const long long stamp = ec ? -2 : (long long)when.time_since_epoch().count();
+    if (t.file != file || t.stamp != stamp) {
+        t.file = file;
+        t.stamp = stamp;
+        t.w = t.h = 0;
+        try {
+            const splash::Image img = splash::loadImage(doc.resolve(file));
+            std::vector<uint8_t> px(size_t(img.width) * img.height * 4);
+            for (int y = 0; y < img.height; y++)
+                for (int x = 0; x < img.width; x++) {
+                    const splash::Image::Px& p = img.pixels[size_t(img.height - 1 - y) * img.width + x];
+                    uint8_t* o = &px[(size_t(y) * img.width + x) * 4];
+                    o[0] = uint8_t(std::lround(std::clamp(p.r, 0.f, 1.f) * 255)), o[1] = uint8_t(std::lround(std::clamp(p.g, 0.f, 1.f) * 255));
+                    o[2] = uint8_t(std::lround(std::clamp(p.b, 0.f, 1.f) * 255)), o[3] = 255;
+                }
+            if (!t.tex) glGenTextures(1, &t.tex);
+            glBindTexture(GL_TEXTURE_2D, t.tex);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, img.width, img.height, 0, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            t.w = img.width, t.h = img.height;
+        } catch (const std::exception&) {
+        }
+    }
+    return t.w ? BakeThumbView{t.tex, t.w, t.h} : BakeThumbView{};
+}
+
+// Bake pressed: renders the Fixed camera at `path` and writes its bake files
+// (bakes/<scene>-<object>.bgbake, .png, .depth), then points the
+// component at them (one undo step, only when the path changes).
+static void runBake(State& st, editor::Document& doc, viewport::Ps1View& view, const editor::ObjectPath& path) {
+    const splash::Object* o = doc.object(path);
+    if (!o || !o->fixedCamera) return;
+    const splash::Scene& scene = doc.scene();
+    const std::vector<splash::FlatObject> flats = splash::flatten(scene);
+    const splash::FlatObject* cam = nullptr;
+    for (const splash::FlatObject& fo : flats)
+        if (fo.object == o) cam = &fo;
+    if (!cam) return;
+    const splash::FixedCameraComponent fc = *o->fixedCamera;
+    const std::string name = o->name;
+    const std::string rel = fc.bake.empty() ? splash::bakePathFor(doc.sceneStem(), name) : fc.bake;
+    try {
+        const splash::BgCamera bc = splash::bgCameraAsEngine(splash::bgCamera(*cam, scene.settings.gteScaling), cam->worldRotation);
+        viewport::Ps1View::BakeShot shot;
+        // As the export decides it: a mesh a script names stays 3D.
+        const splash::ScriptNames named = splash::scriptNamedObjects(scene, flats, [&](const std::string& p) -> std::string {
+            std::ifstream in(doc.resolve(p), std::ios::binary);
+            if (!in) return {};
+            std::string src((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+            try {
+                return std::filesystem::path(p).extension() == ".blocks" ? splash::blocksFileToLua(src, p) : src;
+            } catch (const std::exception&) {
+                return {};
+            }
+        });
+        if (!view.bake(bc, splash::bakedObjects(scene, flats, named), &shot)) throw std::runtime_error("no scene");
+        const std::vector<uint16_t> depth = splash::occluderDepth(shot.sz, splash::groundPixels(shot.sz, bc));
+        auto fileHash = [&](const std::string& p) -> uint32_t {
+            std::ifstream in(doc.resolve(p), std::ios::binary);
+            if (!in) return 0;
+            uint32_t h = 2166136261u;
+            for (std::istreambuf_iterator<char> it(in), end; it != end; ++it) h = (h ^ uint8_t(*it)) * 16777619u;
+            return h;
+        };
+        splash::BgBake b;
+        const std::string stem = std::filesystem::path(rel).stem().string();
+        b.image = stem + ".png";
+        b.depth = stem + ".depth";
+        b.hash = splash::hashHex(splash::bakeHash(scene, flats, *cam, named, fileHash));
+        b.h = fc.h;
+        b.occluders = int(std::count_if(depth.begin(), depth.end(), [](uint16_t d) { return d != 0; }));
+        splash::writeBake(doc.resolve(rel), b, shot.rgba, depth);
+        const std::vector<splash::BgLayerTile> tiles =
+            splash::cutLayerTiles(depth, fc.layers, splash::layerSpanSZ(scene.settings.gteScaling));
+        st.bakeStatus = "baked " + rel + " occluders " + std::to_string(b.occluders) + " layer tiles " + std::to_string(tiles.size());
+    } catch (const std::exception& ex) {
+        st.bakeStatus = std::string("bake failed: ") + ex.what();
+        scriptLine(nullptr, "fixedcam: " + st.bakeStatus);
+        return;
+    }
+    scriptLine(nullptr, "fixedcam: " + st.bakeStatus);
+    // The files changed under the same names: views and the live export reload.
+    doc.refreshAssets({(std::filesystem::path(rel).parent_path() / (std::filesystem::path(rel).stem().string() + ".png")).generic_string()});
+    if (fc.bake != rel) doc.edit(path, [rel](splash::Object& ob) { ob.fixedCamera->bake = rel; });
+}
+
+// Look through pressed: the viewport camera at the Fixed camera, looking along its +Z.
+static void lookThroughCamera(editor::Document& doc, viewport::Ps1View& view, const editor::ObjectPath& path) {
+    const splash::Object* o = doc.object(path);
+    if (!o) return;
+    for (const splash::FlatObject& fo : splash::flatten(doc.scene()))
+        if (fo.object == o) {
+            const splash::Vec3 f = splash::rotate(fo.worldRotation, {0, 0, 1});
+            const viewport::Vec3 eye{fo.worldPosition.x, fo.worldPosition.y, -fo.worldPosition.z};
+            const float d = std::max(1.0f, view.distance());
+            view.setPose({eye, {eye.x + f.x * d, eye.y + f.y * d, eye.z - f.z * d}, false});
+            // The camera's own lens, so the viewport frames what the bake shows.
+            const int h = o->fixedCamera ? o->fixedCamera->h : 120;
+            view.setFovY(2.0f * std::atan(splash::kBgCenterY / float(std::max(1, h))));
+            scriptLine(nullptr, "fixedcam: look through " + o->name + " fov " + std::to_string(std::lround(splash::fovForH(h))));
+        }
 }
 
 static std::string fileName(const std::string& projectPath) {
@@ -5201,6 +5323,17 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
     }
     Fonts& f = fonts();
     if (st.play.cons[0].game.attached()) r = splitViewport(st, dl, r);
+    // Fixed camera buttons from the inspector's last frame: both need the GL view.
+    if (st.bakeRequest) {
+        const editor::ObjectPath p = *st.bakeRequest;
+        st.bakeRequest.reset();
+        runBake(st, doc, view, p);
+    }
+    if (st.lookThrough) {
+        const editor::ObjectPath p = *st.lookThrough;
+        st.lookThrough.reset();
+        lookThroughCamera(doc, view, p);
+    }
     view.clean = st.viewMode == 1;
     // In pixels, so the clean view stays sharp at any UI scale or pixel density.
     const ImVec2 fb = ImGui::GetIO().DisplayFramebufferScale;
@@ -8511,7 +8644,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
     // A component removed from its section menu goes once drawing is done,
     // since the sections below still read it this frame.
     std::optional<editor::ComponentKind> toRemove;
-    bool removedFlags[static_cast<int>(editor::ComponentKind::Agent) + 1] = {};
+    bool removedFlags[static_cast<int>(editor::ComponentKind::FixedCamera) + 1] = {};
     auto removeFlag = [&](editor::ComponentKind k) { return &removedFlags[static_cast<int>(k)]; };
     float pos[3] = {t.position.x, t.position.y, t.position.z};
     FieldEdit fe = vec3Field("pos", row("lpos", "Position", "Where the object sits, in metres, relative to its parent."),
@@ -9055,6 +9188,12 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                         : "Not used: only Baked vertex lighting uses it. Bakes the lighting as if the surface were smoothly curved.",
                   m.smoothNormals, [](splash::Object& ob) { ob.mesh->smoothNormals = !ob.mesh->smoothNormals; });
         if (!baked) dimFrom(smoothTop);
+        // Only asked once the scene has a Fixed camera to bake it into.
+        if (sceneHasFixedCamera(doc.scene().objects))
+            toggleRow("keep3d", "Keep 3D in fixed cameras",
+                      "Off, a static mesh is baked into each Fixed camera's background and not drawn while one shows. On, it stays "
+                      "3D there (it moves, or must sort with the characters around it).",
+                      m.keep3dInFixedCameras, [](splash::Object& ob) { ob.mesh->keep3dInFixedCameras = !ob.mesh->keep3dInFixedCameras; });
         // A blob shadow on the floor under the object (core/shadow.hh), drawn
         // by the console and previewed in the scene view.
         {
@@ -10168,6 +10307,112 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                             " hearing " + fmtShort(ag.hearingRange) + " alert " + std::to_string(ag.alertTimeout) + " waypoints " +
                             std::to_string(ag.waypoints.size()) + " clips " + clipLine + " bytes " + std::to_string(bytes) +
                             " warnings " + std::to_string(warns.size()));
+        sectionEnd(top);
+    }
+
+    if (o->fixedCamera) {
+        const splash::FixedCameraComponent fc = *o->fixedCamera;
+        const std::string name = o->name;
+        top = y;
+        compSection("s_fixedcam", editor::ComponentKind::FixedCamera);
+        const float fov = splash::fovForH(fc.h);
+        number("fcfov", "Field of view", "How tall the view is, in degrees (stored as the projection distance H; 90 is H 120).", fov,
+               "deg", "fcfov", 10, 170, [](splash::Object& ob, float v) { ob.fixedCamera->h = splash::hForFov(v); }, 1);
+        number("fclayers", "Layers",
+               "Depth slices per 16x16 tile of the bake, 0 to 8 (0: the image only). A tile's pixels within half a metre of "
+               "each other are one slice, drawn at its nearest depth, so a character farther away passes behind it. Over this "
+               "many, the closest slices merge. More take more VRAM and sprites.",
+               float(fc.layers), "", "fclayers", 0, float(splash::kFixedCameraMaxLayers),
+               [](splash::Object& ob, float v) { ob.fixedCamera->layers = int(std::lround(v)); }, 0);
+        const int dCur = fc.bitDepth == splash::BitDepth::Bpp8 ? 1 : 0;
+        const int dPick = dropdownMenu("fcdepth", row("lfcdepth", "Bit depth", "16 bpp keeps every colour; 8 bpp takes half the VRAM, 256 colours per tile."),
+                                       icon::image, dCur ? "8 bpp" : "16 bpp", {"16 bpp", "8 bpp"}, dCur);
+        if (dPick >= 0 && dPick != dCur)
+            doc.edit(path, [dPick](splash::Object& ob) { ob.fixedCamera->bitDepth = dPick ? splash::BitDepth::Bpp8 : splash::BitDepth::Bpp16; });
+        const std::string startTip = "On, the game starts on this background. Lua: Background.Show(\"" + name + "\") and Background.Hide().";
+        toggleRow("fcstart", "Show at start", startTip.c_str(), fc.showAtStart, [](splash::Object& ob) { ob.fixedCamera->showAtStart = !ob.fixedCamera->showAtStart; });
+        float bw = 0;
+        const ImVec2 bat(x0 + space::sm, y + space::xs);
+        if (button("fcbake", bat, icon::image, "Bake", ButtonKind::Primary, &bw,
+                   "Renders this camera's view into the background image and its depth layers, from the static meshes."))
+            st.bakeRequest = path;
+        if (button("fclook", bat + ImVec2(bw + space::sm, 0), icon::eye, "Look through", ButtonKind::Secondary, nullptr,
+                   "Puts the viewport camera where this camera is, looking the same way."))
+            st.lookThrough = path;
+        y += size::field + 6 + space::xs + space::sm;
+
+        // What the bake is, from its file, and whether the scene moved on since.
+        std::string line = "Not baked yet: press Bake";
+        ImU32 tone = color::textFaint;
+        std::string thumbFile;
+        std::error_code bakeEc;
+        if (!fc.bake.empty() && !std::filesystem::exists(doc.resolve(fc.bake), bakeEc)) {
+            line = "Not baked yet (" + fc.bake + " is missing): press Bake";
+        } else if (!fc.bake.empty()) {
+            try {
+                const splash::BgBake b = splash::readBake(doc.resolve(fc.bake));
+                line = "Baked";
+                // What the last export made of it: layer tiles and VRAM.
+                if (const std::optional<splash::ExportResult>& res = st.live.result(); res)
+                    for (const splash::ExportStats::BackgroundInfo& bi : res->stats.backgroundInfo)
+                        if (bi.object == name)
+                            line += ", " + std::to_string(bi.layerTiles) + " layer tiles, " + std::to_string((bi.vramBytes + 1023) / 1024) +
+                                    " KB VRAM (" + std::to_string((bi.vramBytes * 100 + 524288) / 1048576) + "% of it)" +
+                                    (bi.droppedTiles ? ", " + std::to_string(bi.droppedTiles) + " over the limit" : std::string());
+                tone = color::textDim;
+                thumbFile = (std::filesystem::path(fc.bake).parent_path() / b.image).generic_string();
+            } catch (const std::exception& ex) {
+                line = std::string("Bake unreadable: ") + ex.what();
+                tone = color::bad;
+            }
+            if (const std::optional<splash::ExportResult>& res = st.live.result(); res)
+                for (const std::string& w : res->warnings)
+                    if (w.rfind("Fixed camera '" + name + "': the scene changed", 0) == 0) {
+                        line += "; the scene changed since, bake again";
+                        tone = color::warn;
+                    }
+        }
+        if (!st.bakeStatus.empty() && st.bakeStatus.rfind("bake failed", 0) == 0) {
+            line = st.bakeStatus;
+            tone = color::bad;
+        }
+        {
+            const float tx = x0 + space::sm, w = x1 - space::sm - tx;
+            const ImVec2 at(tx, y);
+            const ImVec2 ts = f.regular->CalcTextSizeA(type::caption, FLT_MAX, w, line.c_str());
+            dl->AddText(f.regular, type::caption, at, tone, line.c_str(), nullptr, w);
+            nameRect("obj.fcstatus", ImRect(at, at + ts));
+            y += ts.y + space::sm;
+        }
+        // Static meshes the bake leaves 3D because a script names them.
+        if (const std::optional<splash::ExportResult>& res = st.live.result(); res)
+            for (const splash::ExportStats::BackgroundInfo& bi : res->stats.backgroundInfo)
+                if (bi.object == name && !bi.keptForScripts.empty()) {
+                    std::string kept;
+                    for (const auto& [obj, script] : bi.keptForScripts)
+                        kept += (kept.empty() ? "" : ", ") + obj + " (named in " + std::filesystem::path(script).filename().string() + ")";
+                    kept = "Kept 3D, a script can move them: " + kept;
+                    const float tx = x0 + space::sm, w = x1 - space::sm - tx;
+                    const ImVec2 at(tx, y);
+                    const ImVec2 ts = f.regular->CalcTextSizeA(type::caption, FLT_MAX, w, kept.c_str());
+                    dl->AddText(f.regular, type::caption, at, color::textDim, kept.c_str(), nullptr, w);
+                    nameRect("obj.fckept", ImRect(at, at + ts));
+                    y += ts.y + space::sm;
+                    report("fixedcamkept", "fixedcam: " + name + " " + kept);
+                }
+        if (!thumbFile.empty()) {
+            BakeThumbView tv = bakeThumb(st, doc, thumbFile);
+            if (tv.tex) {
+                const float w = x1 - x0 - space::sm * 2, h = w * 0.75f;
+                const ImRect tr(ImVec2(x0 + space::sm, y), ImVec2(x0 + space::sm + w, y + h));
+                ui::addTextureImage(dl, (ImTextureID)(intptr_t)tv.tex, tr.Min, tr.Max);
+                nameRect("obj.fcthumb", tr);
+                y += h + space::sm;
+            }
+        }
+        report("fixedcam", "fixedcam: " + name + " h " + std::to_string(fc.h) + " fov " + fmtShort(fov, 1) + " layers " +
+                               std::to_string(fc.layers) + " bpp " + std::to_string(int(fc.bitDepth)) + " start " +
+                               (fc.showAtStart ? "on" : "off") + " bake " + (fc.bake.empty() ? std::string("none") : fc.bake) + " status " + line);
         sectionEnd(top);
     }
 

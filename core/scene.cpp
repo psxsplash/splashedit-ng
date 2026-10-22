@@ -135,6 +135,7 @@ json writeMesh(const MeshComponent& m) {
               {"smoothNormals", m.smoothNormals},
               {"uvOffsetMaterial", m.uvOffsetMaterial},
               {"dynamicLighting", enumTo(m.dynamicLighting, kDynamicLighting)}};
+    if (m.keep3dInFixedCameras) j["keep3dInFixedCameras"] = true;
     // Written only when not the default, so scenes without shadows keep their bytes.
     const MeshComponent def;
     if (m.shadow != def.shadow) j["shadow"] = enumTo(m.shadow, kShadowModes);
@@ -212,6 +213,17 @@ json writeRoom(const RoomComponent& r) {
 json writeWalkoff(const WalkoffComponent& w) {
     json j = {{"type", "walkoff"}, {"size", vec3(w.size)}};
     putExtras(j, w.extra);
+    return j;
+}
+
+json writeFixedCamera(const FixedCameraComponent& fc) {
+    json j = {{"type", "fixedCamera"},
+              {"h", fc.h},
+              {"layers", fc.layers},
+              {"bitDepth", int(fc.bitDepth)},
+              {"showAtStart", fc.showAtStart},
+              {"bake", fc.bake.empty() ? json(nullptr) : json(fc.bake)}};
+    putExtras(j, fc.extra);
     return j;
 }
 
@@ -301,13 +313,16 @@ Object readObject(const json& j) {
             m.smoothNormals = c.value("smoothNormals", true);
             m.uvOffsetMaterial = c.value("uvOffsetMaterial", 0);
             if (c.contains("dynamicLighting")) m.dynamicLighting = enumFrom(c["dynamicLighting"], kDynamicLighting);
+            m.keep3dInFixedCameras = c.value("keep3dInFixedCameras", false);
             if (c.contains("shadow")) m.shadow = enumFrom(c["shadow"], kShadowModes);
             m.shadowSize = c.value("shadowSize", m.shadowSize);
             m.shadowDarkness = c.value("shadowDarkness", m.shadowDarkness);
             {
                 // The shadow keys are the mesh's own even when they hold the default.
                 json written = writeMesh(m);
-                for (const char* k : {"shadow", "shadowSize", "shadowDarkness"}) written[k] = nullptr;
+                // keep3dInFixedCameras is written only when on, so an explicit false is known too.
+                for (const char* k : {"shadow", "shadowSize", "shadowDarkness", "keep3dInFixedCameras"})
+                    written[k] = nullptr;
                 m.extra = extrasOf(c, written);
             }
             o.mesh = m;
@@ -367,6 +382,19 @@ Object readObject(const json& j) {
             if (c.contains("offset")) r.offset = vec3(c["offset"]);
             r.extra = extrasOf(c, writeRoom(r));
             o.room = r;
+        } else if (type == "fixedCamera") {
+            FixedCameraComponent fc;
+            fc.h = c.value("h", fc.h);
+            if (fc.h < 1 || fc.h > 1024) fail("object '" + o.name + "': fixed camera h must be 1..1024");
+            fc.layers = c.value("layers", fc.layers);
+            if (fc.layers < 0 || fc.layers > kFixedCameraMaxLayers) fail("object '" + o.name + "': fixed camera layers must be 0..8");
+            int bd = c.value("bitDepth", 16);
+            if (bd != 8 && bd != 16) fail("object '" + o.name + "': fixed camera bitDepth must be 8 or 16");
+            fc.bitDepth = BitDepth(bd);
+            fc.showAtStart = c.value("showAtStart", false);
+            if (c.contains("bake") && !c["bake"].is_null()) fc.bake = c["bake"].get<std::string>();
+            fc.extra = extrasOf(c, writeFixedCamera(fc));
+            o.fixedCamera = fc;
         } else if (type == "walkoff") {
             WalkoffComponent w;
             if (c.contains("size")) w.size = vec3(c["size"]);
@@ -486,6 +514,7 @@ json writeObject(const Object& o) {
     if (o.audio) comps.push_back(writeAudio(*o.audio));
     if (o.skin) comps.push_back(writeSkin(*o.skin));
     if (o.agent) comps.push_back(writeAgent(*o.agent));
+    if (o.fixedCamera) comps.push_back(writeFixedCamera(*o.fixedCamera));
     for (const std::string& c : o.unknownComponents) comps.push_back(json::parse(c));
     j["components"] = comps;
     json kids = json::array();

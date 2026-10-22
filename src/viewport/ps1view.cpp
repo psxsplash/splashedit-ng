@@ -1,9 +1,11 @@
 #include "viewport/ps1view.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdio>
+#include <cstring>
 #include <set>
 
 #include <stb_image.h>
@@ -83,15 +85,17 @@ static const char* kVert = R"(#version 330 core
 layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec2 aUv;
 layout(location = 2) in vec3 aCol;
+layout(location = 3) in float aW;
 uniform mat4 uViewProj;
 uniform vec2 uRes;
 uniform int uClean;
+uniform int uPreClip;  // bake: aPos, aW are the clip position (Ps1View::bakeClip)
 noperspective out vec2 vUvAffine;
 out vec2 vUvPersp;
 out vec3 vCol;
 out float vDepth;
 void main() {
-    vec4 clip = uViewProj * vec4(aPos, 1.0);
+    vec4 clip = uPreClip == 1 ? vec4(aPos, aW) : uViewProj * vec4(aPos, 1.0);
     if (uClean == 0) {
         // Snap to the integer pixel grid like the GTE's output does.
         vec2 ndc = clip.xy / clip.w;
@@ -116,6 +120,7 @@ uniform int uClean;
 uniform vec3 uFog;
 uniform float uFogScale;  // grows with the orbit distance, so a big world is not all fog
 uniform float uFogFar;    // > 0: the scene's fog wall, in view depth
+uniform int uUntextured;  // bake only: a vertex colour is the pixel, as the GPU draws untextured triangles
 out vec4 oColor;
 const float kDither[16] = float[16](-4, 0, -3, 1, 2, -2, 3, -1, -3, 1, -4, 0, 3, -1, 2, -2);
 void main() {
@@ -123,7 +128,7 @@ void main() {
     // Texels under half alpha export as word 0, which the console skips.
     vec4 t = texture(uTex, fract(uv));
     if (t.a < 0.5) discard;
-    vec3 c = t.rgb * vCol * 2.0;
+    vec3 c = uUntextured == 1 ? vCol : t.rgb * vCol * 2.0;
     if (uFogFar > 0.0) {
         float fogNear = uFogFar * 0.125;
         c = mix(c, uFog, clamp((vDepth - fogNear) / (uFogFar - fogNear), 0.0, 1.0));
@@ -292,6 +297,7 @@ void Ps1View::rebuild() {
         // Inactive objects ship switched off and the runtime skips them until a
         // script turns them on; their lights still bake, so only meshes drop out.
         if (!fo.activeInHierarchy || !fo.object->active || !fo.object->mesh) continue;
+        if (m_include && (fi >= m_include->size() || !(*m_include)[fi])) continue;
         const splash::MeshComponent& mc = *fo.object->mesh;
         if (mc.mesh.empty() || mc.materials.empty()) continue;
         const splash::Mesh* mesh = nullptr;
@@ -342,6 +348,7 @@ void Ps1View::rebuild() {
             for (size_t k = 0; k + 2 < tri.size(); k += 3)
                 for (size_t j = 0; j < 3; ++j) m_pick.positions.push_back(wp[(size_t)tri[k + j]]);
             m_pick.ranges.push_back({(int)fi, firstTri, m_pick.positions.size() / 3 - firstTri});
+            const size_t firstVertex = bucket.size();
             for (int idx : tri) {
                 size_t i = (size_t)idx;
                 // The exporter's colour, so this view lights the scene the way the game does.
@@ -351,6 +358,7 @@ void Ps1View::rebuild() {
                 uv = {uv.x + duv.x, uv.y + duv.y};
                 bucket.push_back({wp[i].x, wp[i].y, -wp[i].z, uv.x, uv.y, col.x, col.y, col.z});
             }
+            if (m_bakeCam) bakeClip(fo, *mesh, tri, &bucket[firstVertex]);
         }
     }
 
@@ -421,7 +429,8 @@ bool Ps1View::init() {
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, px));
     glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, u));
     glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, r));
-    for (int i = 0; i < 3; ++i) glEnableVertexAttribArray(i);
+    glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, pw));
+    for (int i = 0; i < 4; ++i) glEnableVertexAttribArray(i);
     glBindVertexArray(0);
 
     const uint8_t whitePx[4] = {255, 255, 255, 255};
@@ -474,10 +483,10 @@ unsigned Ps1View::render(int panelW, int panelH, int lines) {
     basis(&bRight, &bUp, &bFwd);
     const float aspect = (float)panelW / panelH;
     if (m_ortho) {
-        float hh = distance() * std::tan(kFovY * 0.5f);
+        float hh = distance() * std::tan(m_fovY * 0.5f);
         m_viewProj = Mat4::ortho(hh * aspect, hh, 0.1f, 2 * kOrthoBack) * Mat4::lookAt(eye(), m_target, bUp);
     } else {
-        m_viewProj = Mat4::perspective(kFovY, aspect, 0.1f * viewScale(), 200.0f * viewScale()) * Mat4::lookAt(m_eye, m_target, bUp);
+        m_viewProj = Mat4::perspective(m_fovY, aspect, 0.1f * viewScale(), 200.0f * viewScale()) * Mat4::lookAt(m_eye, m_target, bUp);
     }
 
     // The scene's background as psxsplash draws it: the screen clears to the
@@ -512,7 +521,7 @@ unsigned Ps1View::render(int panelW, int panelH, int lines) {
     glUniform3f(glGetUniformLocation(m_skyProg, "uRight"), sRight.x, sRight.y, sRight.z);
     glUniform3f(glGetUniformLocation(m_skyProg, "uUp"), sUp.x, sUp.y, sUp.z);
     glUniform3f(glGetUniformLocation(m_skyProg, "uForward"), sForward.x, sForward.y, sForward.z);
-    glUniform1f(glGetUniformLocation(m_skyProg, "uTanHalf"), std::tan(kFovY * 0.5f));
+    glUniform1f(glGetUniformLocation(m_skyProg, "uTanHalf"), std::tan(m_fovY * 0.5f));
     glUniform1f(glGetUniformLocation(m_skyProg, "uAspect"), (float)panelW / panelH);
     glUniform3f(glGetUniformLocation(m_skyProg, "uSkyLo"), kSkyLo[0], kSkyLo[1], kSkyLo[2]);
     glUniform3f(glGetUniformLocation(m_skyProg, "uSkyMid"), kSkyMid[0], kSkyMid[1], kSkyMid[2]);
@@ -526,10 +535,12 @@ unsigned Ps1View::render(int panelW, int panelH, int lines) {
     glUniformMatrix4fv(glGetUniformLocation(m_prog, "uViewProj"), 1, GL_FALSE, m_viewProj.m);
     glUniform2f(glGetUniformLocation(m_prog, "uRes"), (float)w, (float)h);
     glUniform1i(glGetUniformLocation(m_prog, "uClean"), clean ? 1 : 0);
+    glUniform1i(glGetUniformLocation(m_prog, "uPreClip"), 0);
     glUniform3f(glGetUniformLocation(m_prog, "uFog"), fog[0], fog[1], fog[2]);
     glUniform1f(glGetUniformLocation(m_prog, "uFogScale"), viewScale());
     glUniform1f(glGetUniformLocation(m_prog, "uFogFar"), fogFar);
     glUniform1i(glGetUniformLocation(m_prog, "uTex"), 0);
+    glUniform1i(glGetUniformLocation(m_prog, "uUntextured"), 0);
     glActiveTexture_(GL_TEXTURE0);
     glBindVertexArray(m_vao);
     for (const Batch& b : m_batches) {
@@ -540,6 +551,140 @@ unsigned Ps1View::render(int panelW, int panelH, int lines) {
     glDisable(GL_DEPTH_TEST);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     return m_color;
+}
+
+// Each corner of a bake where psxsplash would put it: through the engine's
+// fixed-point path (whole screen coordinates), at NDC
+// x = (SX + 0.5 - 1/16 - 160) / 160 and y = (120 - SY - 0.5 + 1/16) / 120. A
+// whole SX sits on a pixel centre as the PS1 rasteriser samples, and the
+// sixteenth keeps edges off GL's sample points, so a pixel is drawn when
+// left <= x < right and top <= y < bottom, the PS1 rule. A corner the GTE
+// cannot project (under H / 2 or behind the camera) goes through
+// bgClipMatrix and GL's clipping instead. The choice is per corner, never per
+// triangle: two triangles sharing an edge then share its ends exactly, where
+// a per-triangle choice moved the shared edge on one side only and opened
+// cracks onto the floor's dark underside.
+void Ps1View::bakeClip(const splash::FlatObject& fo, const splash::Mesh& mesh, const std::vector<int>& tri, Vertex* out) const {
+    const float gte = m_bakeCam->gte;
+    const splash::BgFixedObject fixed = splash::bgFixedObject(fo, gte);
+    const std::array<float, 16> m = splash::bgClipMatrix(*m_bakeCam, kBakeNear, kBakeFar);
+    const float a = (kBakeFar + kBakeNear) / (kBakeFar - kBakeNear), b = -2 * kBakeFar * kBakeNear / (kBakeFar - kBakeNear);
+    for (size_t k = 0; k < tri.size(); ++k) {
+        Vertex& v = out[k];
+        splash::BgFixedPoint p;
+        if (splash::bgEngineProject(m_bakeEngine, fixed, splash::bgFixedVertex(mesh.positions[size_t(tri[k])], fo.lossyScale, gte), &p)) {
+            const float w = float(p.sz) * gte / 4096.f;
+            const float nx = (float(p.sx) + 0.5f - 0.0625f - splash::kBgCenterX) / splash::kBgCenterX;
+            const float ny = (splash::kBgCenterY - float(p.sy) - 0.5f + 0.0625f) / splash::kBgCenterY;
+            v.px = nx * w, v.py = ny * w, v.pz = a * w + b, v.pw = w;
+        } else {
+            const float g[4] = {v.px, v.py, v.pz, 1};
+            float c[4] = {};
+            for (int r = 0; r < 4; r++)
+                for (int i = 0; i < 4; i++) c[r] += m[size_t(i * 4 + r)] * g[i];
+            v.px = c[0], v.py = c[1], v.pz = c[2], v.pw = c[3];
+        }
+    }
+}
+
+bool Ps1View::bake(const splash::BgCamera& cam, const std::vector<bool>& include, BakeShot* out) {
+    if (!m_doc || !out) return false;
+    const editor::Preview saved = m_preview;
+    m_preview = {};
+    m_include = &include;
+    m_bakeCam = &cam;
+    m_bakeEngine = splash::bgEngineCamera(cam, {});
+    rebuild();
+    m_include = nullptr;
+    m_bakeCam = nullptr;
+    glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
+    glBufferData(GL_ARRAY_BUFFER, m_verts.size() * sizeof(Vertex), m_verts.data(), GL_STATIC_DRAW);
+    m_vboCap = m_verts.size();
+
+    const int w = splash::kBgWidth, h = splash::kBgHeight;
+    unsigned fbo = 0, tex = 0, rb = 0;
+    glGenFramebuffers(1, &fbo);
+    glGenTextures(1, &tex);
+    glGenRenderbuffers(1, &rb);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glBindRenderbuffer(GL_RENDERBUFFER, rb);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, w, h);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, rb);
+
+    // The game's background: the fog colour, fog on or off (as render()).
+    const splash::SceneSettings& set = m_doc->scene().settings;
+    float fog[3];
+    for (int i = 0; i < 3; i++) fog[i] = std::clamp(set.fog.color[i], 0.0f, 1.0f);
+    const float gte = set.gteScaling > 0 ? set.gteScaling : 100.f;
+    const float fogFar = set.fog.enabled ? 20000.0f / float(std::clamp(set.fog.density, 1, 10)) * gte / 4096.0f : 0.f;
+    const float zn = kBakeNear, zf = kBakeFar;
+    Mat4 vp = Mat4::identity();
+    glViewport(0, 0, w, h);
+    glClearColor(fog[0], fog[1], fog[2], 1);
+    glClearDepth(1.0);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glDisable(GL_BLEND);
+    glDisable(GL_CULL_FACE);
+    glDisable(GL_SCISSOR_TEST);
+    glEnable(GL_DEPTH_TEST);
+    glUseProgram(m_prog);
+    glUniformMatrix4fv(glGetUniformLocation(m_prog, "uViewProj"), 1, GL_FALSE, vp.m);
+    glUniform2f(glGetUniformLocation(m_prog, "uRes"), (float)w, (float)h);
+    glUniform1i(glGetUniformLocation(m_prog, "uClean"), 1);
+    // Corners come in projected by rebuild() (bakeClip).
+    glUniform1i(glGetUniformLocation(m_prog, "uPreClip"), 1);
+    glUniform3f(glGetUniformLocation(m_prog, "uFog"), fog[0], fog[1], fog[2]);
+    // No editor haze: the game only fogs with the scene's fog.
+    glUniform1f(glGetUniformLocation(m_prog, "uFogScale"), 1e9f);
+    glUniform1f(glGetUniformLocation(m_prog, "uFogFar"), fogFar);
+    glUniform1i(glGetUniformLocation(m_prog, "uTex"), 0);
+    glActiveTexture_(GL_TEXTURE0);
+    glBindVertexArray(m_vao);
+    // Textured: texel x colour / 128, as the GPU modulates; untextured: the
+    // colour itself (the viewport draws those twice as bright).
+    const GLint untexturedAt = glGetUniformLocation(m_prog, "uUntextured");
+    for (const Batch& bt : m_batches) {
+        glUniform1i(untexturedAt, bt.tex == m_white ? 1 : 0);
+        glBindTexture(GL_TEXTURE_2D, bt.tex);
+        glDrawArrays(GL_TRIANGLES, bt.start, bt.count);
+    }
+    glUniform1i(untexturedAt, 0);
+    glUniform1i(glGetUniformLocation(m_prog, "uPreClip"), 0);
+    glBindVertexArray(0);
+    glDisable(GL_DEPTH_TEST);
+
+    std::vector<uint8_t> rgba(size_t(w) * h * 4);
+    std::vector<float> depth(size_t(w) * h);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+    glReadPixels(0, 0, w, h, GL_DEPTH_COMPONENT, GL_FLOAT, depth.data());
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &fbo);
+    glDeleteTextures(1, &tex);
+    glDeleteRenderbuffers(1, &rb);
+
+    // GL rows are bottom-up; depth back to view distance, then GTE units.
+    out->rgba.assign(rgba.size(), 0);
+    out->sz.assign(depth.size(), -1.f);
+    const float a = (zf + zn) / (zf - zn), b = -2 * zf * zn / (zf - zn);
+    for (int y = 0; y < h; ++y) {
+        const int src = h - 1 - y;
+        std::memcpy(&out->rgba[size_t(y) * w * 4], &rgba[size_t(src) * w * 4], size_t(w) * 4);
+        for (int x = 0; x < w; ++x) {
+            const float d = depth[size_t(src) * w + x];
+            if (d >= 1.0f) continue;
+            const float view = b / ((2 * d - 1) - a);
+            out->sz[size_t(y) * w + x] = view * 4096.f / gte;
+        }
+    }
+    m_preview = saved;
+    m_built = false;
+    return true;
 }
 
 void Ps1View::basis(Vec3* right, Vec3* up, Vec3* forward) const {
@@ -559,7 +704,7 @@ Vec3 Ps1View::eye() const {
 }
 
 float Ps1View::worldPerPixel(float depth, float panelH) const {
-    return 2 * (m_ortho ? distance() : depth) * std::tan(kFovY * 0.5f) / std::max(panelH, 1.0f);
+    return 2 * (m_ortho ? distance() : depth) * std::tan(m_fovY * 0.5f) / std::max(panelH, 1.0f);
 }
 
 float Ps1View::distance() const {
@@ -572,7 +717,7 @@ void Ps1View::ray(ImVec2 screen, ImVec2 mn, ImVec2 sz, Vec3* origin, Vec3* dir) 
     basis(&s, &u, &f);
     float nx = (screen.x - mn.x) / sz.x * 2 - 1;
     float ny = 1 - (screen.y - mn.y) / sz.y * 2;
-    float th = std::tan(kFovY * 0.5f);
+    float th = std::tan(m_fovY * 0.5f);
     if (m_ortho) {
         float hh = distance() * th;
         *origin = eye() + s * (nx * hh * sz.x / sz.y) + u * (ny * hh);
@@ -584,6 +729,7 @@ void Ps1View::ray(ImVec2 screen, ImVec2 mn, ImVec2 sz, Vec3* origin, Vec3* dir) 
 }
 
 void Ps1View::orbit(float dx, float dy) {
+    m_fovY = kFovY;  // a Look through lens lasts until the view turns or zooms
     Vec3 off = m_eye - m_target;
     float r = std::sqrt(dot(off, off));
     if (r <= 0) return;
@@ -605,6 +751,7 @@ void Ps1View::pan(float dx, float dy, float panelH) {
 }
 
 void Ps1View::dolly(float steps) {
+    m_fovY = kFovY;  // a Look through lens lasts until the view turns or zooms
     Vec3 off = m_eye - m_target;
     float r = std::sqrt(dot(off, off));
     if (r <= 0) return;
@@ -613,14 +760,16 @@ void Ps1View::dolly(float steps) {
 }
 
 void Ps1View::frame(Vec3 center, float radius) {
+    m_fovY = kFovY;  // a Look through lens lasts until the view turns or zooms
     Vec3 dir = normalize(m_eye - m_target);
     if (dot(dir, dir) == 0) dir = {0, 0, 1};
-    float r = std::max(radius, 0.1f) / std::sin(kFovY * 0.5f) * 1.3f;
+    float r = std::max(radius, 0.1f) / std::sin(m_fovY * 0.5f) * 1.3f;
     m_target = center;
     m_eye = center + dir * std::max(r, 0.5f);
 }
 
 void Ps1View::lookAround(float dx, float dy) {
+    m_fovY = kFovY;  // a Look through lens lasts until the view turns or zooms
     Vec3 f = normalize(m_target - m_eye);
     float r = distance();
     if (r <= 0) return;

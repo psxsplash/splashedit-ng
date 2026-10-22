@@ -4,6 +4,7 @@
 
 #include "editor/pick.hh"
 #include "editor/timeline.hh"
+#include "background.hh"
 #include "scene.hh"
 
 #include <algorithm>
@@ -103,7 +104,22 @@ class Ps1View {
     };
     Pose pose() const { return {m_eye, m_target, m_ortho}; }
     void setPose(const Pose& p) { m_eye = p.eye, m_target = p.target, m_ortho = p.ortho; }
+    // A Fixed camera's bake: the objects marked in `include` (flatten order)
+    // drawn clean from `cam` with psxsplash's projection (centre 160,120,
+    // distance H, pixel centres on whole screen coordinates) at 320x240, in
+    // the scene's background colour and fog. rgba is top row first; sz is
+    // each pixel's GTE depth, < 0 where nothing was drawn. Leaves the view as
+    // it was (it rebuilds on its next render). False without a document.
+    struct BakeShot {
+        std::vector<uint8_t> rgba;
+        std::vector<float> sz;
+    };
+    bool bake(const splash::BgCamera& cam, const std::vector<bool>& include, BakeShot* out);
     static constexpr float kFovY = 0.95f;
+    // The vertical field of view drawn with: kFovY, or a Fixed camera's after
+    // Look through until the view is turned, zoomed or framed.
+    float fovY() const { return m_fovY; }
+    void setFovY(float radians) { m_fovY = radians; }
     static constexpr float kOrthoBack = 150.0f;  // orthographic: render eye's distance behind the pivot
 
     bool clean = false;  // false = PS1 look, true = clean view
@@ -113,6 +129,7 @@ class Ps1View {
         float px, py, pz;
         float u, v;
         float r, g, b;
+        float pw = 1;  // bake: px, py, pz, pw are the clip position itself
     };
     // A run of vertices drawn with one GL texture bound.
     struct Batch {
@@ -125,6 +142,12 @@ class Ps1View {
     unsigned textureFor(const std::string& projectPath);  // cached; white/fallback on empty/error
 
     const editor::Document* m_doc = nullptr;
+    const std::vector<bool>* m_include = nullptr;  // bake(): only these objects
+    // bake(): the camera; rebuild() then writes clip positions (see bakeClip).
+    const splash::BgCamera* m_bakeCam = nullptr;
+    splash::BgEngineCamera m_bakeEngine;
+    static constexpr float kBakeNear = 0.05f, kBakeFar = 2000.0f;
+    void bakeClip(const splash::FlatObject& fo, const splash::Mesh& mesh, const std::vector<int>& tri, Vertex* out) const;
     unsigned m_builtRevision = 0;
     editor::Preview m_preview;
     bool m_previewDirty = false;
@@ -149,6 +172,7 @@ class Ps1View {
     int m_fboW = 0, m_fboH = 0;
     Vec3 m_eye{7.6f, 5.2f, 9.2f}, m_target{-0.9f, 0.9f, -2.0f};
     bool m_ortho = false;
+    float m_fovY = kFovY;
     Mat4 m_viewProj;
 };
 

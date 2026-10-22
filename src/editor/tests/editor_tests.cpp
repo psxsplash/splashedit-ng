@@ -56,6 +56,7 @@
 #include "editor/timeline.hh"
 #include "editor/unirom.hh"
 #include "audio.hh"
+#include "background.hh"
 #include "blend.hh"
 #include "blocks.hh"
 #include "luacompile.hh"
@@ -12611,6 +12612,579 @@ void testSpriteDirectionSets() {
 // into view moves the scroll as little as it can, the thumb spans the view
 // in proportion and its drag covers the whole scroll, and a dragged row
 // scrolls the list only near or past an edge.
+// ---- Fixed cameras and baked backgrounds
+namespace bgtest {
+namespace fs = std::filesystem;
+
+uint16_t rd16(const std::string& b, size_t at) { return uint16_t(uint8_t(b[at]) | (uint8_t(b[at + 1]) << 8)); }
+int16_t rdi16(const std::string& b, size_t at) { return int16_t(rd16(b, at)); }
+uint32_t rd32(const std::string& b, size_t at) { return uint32_t(rd16(b, at)) | (uint32_t(rd16(b, at + 2)) << 16); }
+
+splash::Quat mul(splash::Quat a, splash::Quat b) {
+    return {a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y, a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+            a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w, a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z};
+}
+// Unity order: yaw about Y after pitch about X.
+splash::Quat yawPitch(float yawDeg, float pitchDeg) {
+    const float y = yawDeg * 3.14159265f / 360.f, x = pitchDeg * 3.14159265f / 360.f;
+    return mul({0, std::sin(y), 0, std::cos(y)}, {std::sin(x), 0, 0, std::cos(x)});
+}
+splash::FlatObject flatAt(const splash::Object& o, splash::Vec3 p, splash::Quat q) {
+    return {&o, p, q, {1, 1, 1}, splash::Mat34::trs(p, q, {1, 1, 1}), true};
+}
+uint32_t fnvFile(const fs::path& f) {
+    std::ifstream in(f, std::ios::binary);
+    if (!in) return 0;
+    uint32_t h = 2166136261u;
+    for (std::istreambuf_iterator<char> it(in), end; it != end; ++it) h = (h ^ uint8_t(*it)) * 16777619u;
+    return h;
+}
+std::string slurp(const fs::path& f) {
+    std::ifstream in(f, std::ios::binary);
+    std::ostringstream ss;
+    ss << in.rdbuf();
+    return ss.str();
+}
+
+}  // namespace bgtest
+
+// The component in the scene file: fields round-trip, defaults stay out of
+// the mesh, and the catalog adds and removes it.
+void testFixedCameraModel() {
+    namespace fs = std::filesystem;
+    splash::Scene s;
+    splash::Object cam;
+    cam.name = "Hall cam";
+    cam.fixedCamera.emplace();
+    cam.fixedCamera->h = 150;
+    cam.fixedCamera->layers = 6;
+    cam.fixedCamera->bitDepth = splash::BitDepth::Bpp8;
+    cam.fixedCamera->showAtStart = true;
+    cam.fixedCamera->bake = "bakes/x-Hall_cam.bgbake";
+    s.objects.push_back(cam);
+    splash::Object m;
+    m.name = "Statue";
+    m.mesh.emplace();
+    m.mesh->mesh = "meshes/statue.mesh";
+    m.mesh->keep3dInFixedCameras = true;
+    s.objects.push_back(m);
+    splash::Object plain;
+    plain.name = "Plain";
+    plain.mesh.emplace();
+    plain.mesh->mesh = "meshes/plain.mesh";
+    s.objects.push_back(plain);
+    const fs::path dir = g_outDir / "fixedcammodel";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    splash::saveScene(s, dir / "a.scene");
+    const std::string text = bgtest::slurp(dir / "a.scene");
+    CHECK(text.find("\"fixedCamera\"") != std::string::npos);
+    CHECK(text.find("\"keep3dInFixedCameras\": true") != std::string::npos);
+    CHECK(text.find("\"keep3dInFixedCameras\": false") == std::string::npos);
+    const splash::Scene back = splash::loadScene(dir / "a.scene");
+    CHECK(back.objects.size() == 3);
+    const splash::FixedCameraComponent& fc = *back.objects[0].fixedCamera;
+    CHECK(fc.h == 150 && fc.layers == 6 && fc.bitDepth == splash::BitDepth::Bpp8 && fc.showAtStart && fc.bake == "bakes/x-Hall_cam.bgbake");
+    CHECK(back.objects[1].mesh->keep3dInFixedCameras);
+    CHECK(!back.objects[2].mesh->keep3dInFixedCameras);
+    CHECK(back.objects[2].mesh->extra.empty());
+    // An explicit false is a known key, not an unknown one kept for saving.
+    std::string withFalse = text;
+    const size_t at = withFalse.find("\"keep3dInFixedCameras\": true");
+    withFalse.replace(at, std::strlen("\"keep3dInFixedCameras\": true"), "\"keep3dInFixedCameras\": false");
+    { std::ofstream(dir / "b.scene", std::ios::binary) << withFalse; }
+    const splash::Scene b2 = splash::loadScene(dir / "b.scene");
+    CHECK(!b2.objects[1].mesh->keep3dInFixedCameras && b2.objects[1].mesh->extra.empty());
+    // Layers out of range fail the load.
+    std::string bad = text;
+    const size_t la = bad.find("\"layers\": 6");
+    CHECK(la != std::string::npos);
+    bad.replace(la, std::strlen("\"layers\": 6"), "\"layers\": 9");
+    { std::ofstream(dir / "c.scene", std::ios::binary) << bad; }
+    bool threw = false;
+    try {
+        splash::loadScene(dir / "c.scene");
+    } catch (const std::exception&) {
+        threw = true;
+    }
+    CHECK(threw);
+
+    splash::Object fresh;
+    CHECK(editor::cannotAdd(fresh, editor::ComponentKind::FixedCamera).empty());
+    CHECK(editor::addComponent(fresh, editor::ComponentKind::FixedCamera) && fresh.fixedCamera && fresh.fixedCamera->h == 120 &&
+          fresh.fixedCamera->layers == 4 && fresh.fixedCamera->bitDepth == splash::BitDepth::Bpp16 && !fresh.fixedCamera->showAtStart);
+    CHECK(editor::hasComponent(fresh, editor::ComponentKind::FixedCamera));
+    CHECK(std::string(editor::info(editor::ComponentKind::FixedCamera).label) == "Fixed camera");
+    CHECK(editor::removeComponent(fresh, editor::ComponentKind::FixedCamera) && !fresh.fixedCamera);
+    CHECK(std::abs(splash::fovForH(120) - 90.f) < 0.01f);
+    CHECK(splash::hForFov(90.f) == 120 && splash::hForFov(splash::fovForH(200)) == 200);
+}
+
+// Which objects a bake takes in: static meshes only.
+void testFixedCameraBakedSet() {
+    splash::Scene s;
+    auto mesh = [](const char* n) {
+        splash::Object o;
+        o.name = n;
+        o.mesh.emplace();
+        o.mesh->mesh = "meshes/m.mesh";
+        return o;
+    };
+    s.objects.push_back(mesh("Wall"));                                  // 0 baked
+    s.objects.push_back(mesh("Kept"));                                  // 1 keep 3D
+    s.objects.back().mesh->keep3dInFixedCameras = true;
+    s.objects.push_back(mesh("Scripted"));                              // 2 script
+    s.objects.back().script.emplace();
+    s.objects.push_back(mesh("Pushed"));                                // 3 dynamic collider
+    s.objects.back().collider = splash::ColliderComponent{splash::ColliderKind::Dynamic, false, {}};
+    s.objects.push_back(mesh("Door"));                                  // 4 cutscene target
+    s.objects.push_back(mesh("Hidden"));                                // 5 starts off
+    s.objects.back().startActive = false;
+    s.objects.push_back(mesh("Guard"));                                 // 6 agent
+    s.objects.back().agent.emplace();
+    s.objects.push_back(mesh("Floor"));                                 // 7 static collider, baked
+    s.objects.back().collider = splash::ColliderComponent{splash::ColliderKind::Static, false, {}};
+    splash::Object off = mesh("Off");                                   // 8 not exported
+    off.active = false;
+    s.objects.push_back(off);
+    splash::Object empty;                                               // 9 no mesh
+    empty.name = "Empty";
+    s.objects.push_back(empty);
+    splash::Cutscene cs;
+    cs.name = "open";
+    splash::CutsceneTrack t;
+    t.type = splash::TrackType::ObjectRotation;
+    t.target = "Door";
+    cs.tracks.push_back(t);
+    s.cutscenes.push_back(cs);
+    const std::vector<bool> b = splash::bakedObjects(s, splash::flatten(s), {});
+    const std::vector<bool> want = {true, false, false, false, false, false, false, true, false, false};
+    CHECK(b == want);
+    // A script naming an object in quotes keeps it 3D (it can Entity.Find it and move it).
+    s.settings.script = "scripts/scene.lua";
+    s.objects[9].script.emplace();
+    s.objects[9].script->lua = "scripts/empty.lua";
+    const std::vector<splash::FlatObject> flats = splash::flatten(s);
+    const splash::ScriptNames named = splash::scriptNamedObjects(s, flats, [](const std::string& p) -> std::string {
+        if (p == "scripts/scene.lua") return "local w = Entity.Find('Wall')\nlocal f = 'Floorish'";
+        if (p == "scripts/empty.lua") return "print(\"Floor\")";
+        return {};
+    });
+    CHECK(named.size() == 2 && named.at("Wall") == "scripts/scene.lua" && named.at("Floor") == "scripts/empty.lua");
+    const std::vector<bool> b2 = splash::bakedObjects(s, flats, named);
+    CHECK(!b2[0] && !b2[7]);
+}
+
+// The bake's projection is psxsplash's: the GL clip matrix lands every point
+// where bgProject puts it, and bgProject agrees with the engine record's
+// fixed-point rotation and position to a twentieth of a pixel.
+void testFixedCameraProjection() {
+    splash::Object o;
+    o.name = "cam";
+    o.fixedCamera.emplace();
+    o.fixedCamera->h = 150;
+    const splash::Quat q = bgtest::yawPitch(30, 12);
+    const splash::FlatObject fo = bgtest::flatAt(o, {1, 2, -3}, q);
+    const splash::BgCamera c = splash::bgCamera(fo, 100);
+    CHECK(c.h == 150);
+    const splash::BgEngineCamera e = splash::bgEngineCamera(c, q);
+    // The bake draws with the camera the record rounds to (4.12), which the
+    // engine reproduces exactly; the unrounded one is within a pixel of it.
+    const splash::BgCamera cq = splash::bgCameraAsEngine(c, q);
+    const std::array<float, 16> m = splash::bgClipMatrix(cq, 0.05f, 2000.f);
+    const splash::Vec3 pts[] = {{2, 1, 3}, {-1, 0.5f, 6}, {4, 3, 10}, {0, -1, 1}, {8, 2, 25}};
+    int checked = 0;
+    for (const splash::Vec3& p : pts) {
+        splash::BgScreenPoint sp, raw;
+        if (!splash::bgProject(cq, p, &sp) || !splash::bgProject(c, p, &raw)) continue;
+        checked++;
+        CHECK(std::abs(raw.x - sp.x) < 1.0f && std::abs(raw.y - sp.y) < 1.0f);
+        const float g[4] = {p.x, p.y, -p.z, 1};
+        float clip[4] = {};
+        for (int r = 0; r < 4; r++)
+            for (int k = 0; k < 4; k++) clip[r] += m[size_t(k * 4 + r)] * g[k];
+        const float sx = clip[0] / clip[3] * 160 + 160 - 0.5f, sy = 120 - clip[1] / clip[3] * 120 - 0.5f;
+        CHECK(std::abs(sx - sp.x) < 1e-2f);
+        CHECK(std::abs(sy - sp.y) < 1e-2f);
+        CHECK(std::abs(clip[3] * 4096 / 100 - sp.sz) < 0.5f);
+        // The engine: view = rot (4.12) x (P - C), P and C in 20.12 with Y down.
+        const double P[3] = {double(splash::toWorldFixed12(p.x / 100)), double(splash::toWorldFixed12(-p.y / 100)),
+                             double(splash::toWorldFixed12(p.z / 100))};
+        double v[3] = {};
+        for (int r = 0; r < 3; r++)
+            for (int k = 0; k < 3; k++) v[r] += e.rotation[size_t(r * 3 + k)] / 4096.0 * (P[k] - e.position[size_t(k)]);
+        // The point itself rounds to 20.12 on the console as well (a mesh
+        // vertex does): compare against where that rounded point projects.
+        splash::BgScreenPoint spq;
+        CHECK(splash::bgProject(cq, {float(P[0] * 100 / 4096), float(-P[1] * 100 / 4096), float(P[2] * 100 / 4096)}, &spq));
+        const double ex = 160 + e.h * v[0] / v[2], ey = 120 + e.h * v[1] / v[2];
+        if (std::abs(ex - spq.x) >= 0.05 || std::abs(ey - spq.y) >= 0.05)
+            std::fprintf(stderr, "projection: point %g,%g,%g engine %.4f,%.4f (z %.1f) bake %.4f,%.4f (z %.1f) unrounded %.4f,%.4f\n", p.x, p.y,
+                         p.z, ex, ey, v[2], spq.x, spq.y, spq.sz, sp.x, sp.y);
+        CHECK(std::abs(ex - spq.x) < 0.05);
+        CHECK(std::abs(ey - spq.y) < 0.05);
+        CHECK(std::abs(v[2] - spq.sz) < 1.0);
+        CHECK(std::abs(ex - sp.x) < 1.0 && std::abs(ey - sp.y) < 1.0);
+    }
+    CHECK(checked == 5);
+    // H 120 is 90 degrees tall: a point 45 degrees up on the axis is the top row.
+    splash::Object o2;
+    o2.name = "cam2";
+    o2.fixedCamera.emplace();
+    const splash::BgCamera c2 = splash::bgCamera(bgtest::flatAt(o2, {}, {}), 100);
+    splash::BgScreenPoint top;
+    CHECK(splash::bgProject(c2, {0, 5, 5}, &top) && std::abs(top.y) < 1e-3f && std::abs(top.x - 160) < 1e-3f);
+    CHECK(std::abs(top.sz - 5 * 4096 / 100.f) < 1e-2f);
+    CHECK(!splash::bgProject(c2, {0, 0, -1}, &top));
+    // Identity camera record: rows S*right, -(S*up), S*forward.
+    const splash::BgEngineCamera e2 = splash::bgEngineCamera(c2, {});
+    const std::array<int16_t, 9> rows = {4096, 0, 0, 0, 4096, 0, 0, 0, 4096};
+    CHECK(e2.rotation == rows && e2.h == 120);
+
+    // The engine's fixed-point path (each mvmva floors, then RTPS floors SX,
+    // SY), against a separate emulation of the same rules for a courtyard
+    // camera record and the right pillar: a top corner the exact projection
+    // puts at 295.61, 55.47 lands at 295, 53, where Redux draws it.
+    splash::BgEngineCamera oc;
+    oc.position = {0, -66, -184};
+    oc.rotation = {3753, 0, 1642, 285, 4034, -652, -1617, 711, 3696};
+    oc.h = 120;
+    splash::BgFixedObject pillar;
+    pillar.pos = {123, -74, 164};
+    pillar.rot = {4096, 0, 0, 0, 4096, 0, 0, 0, 4096};
+    splash::BgFixedPoint fp;
+    CHECK(splash::bgEngineProject(oc, pillar, {16, -74, -16}, &fp) && fp.sx == 295 && fp.sy == 53 && fp.sz == 229);
+    CHECK(splash::bgEngineProject(oc, pillar, {-16, 74, 16}, &fp) && fp.sx == 258 && fp.sy == 125 && fp.sz == 296);
+    // Under H / 2 the GTE's divide overflows: not projected.
+    splash::BgFixedObject near = pillar;
+    near.pos = {0, -66, -160};
+    CHECK(!splash::bgEngineProject(oc, near, {0, 0, 0}, &fp));
+    // The exporter's vertex and object encodings.
+    CHECK((splash::bgFixedVertex({0.4f, 1.8f, -0.4f}, {1, 1, 1}, 100) == std::array<int16_t, 3>{16, -74, -16}));
+    splash::Object po;
+    po.name = "p";
+    const splash::BgFixedObject fpo = splash::bgFixedObject(bgtest::flatAt(po, {3, 1.8f, 4}, {}), 100);
+    CHECK((fpo.pos == std::array<int32_t, 3>{123, -74, 164}) && fpo.rot[0] == 4096 && fpo.rot[4] == 4096 && fpo.rot[1] == 0);
+}
+
+// Layers: equal-count bands over the pixels that are neither sky nor ground,
+// each at its nearest depth; ground from depth alone.
+void testFixedCameraLayers() {
+    const int W = splash::kBgWidth, H = splash::kBgHeight, T = splash::kBgLayerTile;
+    // Occluder depth: sky (row 0) and ground (the last 10 rows) have none.
+    std::vector<float> sz(size_t(W) * H);
+    std::vector<uint8_t> ground(sz.size(), 0);
+    for (int y = 0; y < H; y++)
+        for (int x = 0; x < W; x++) {
+            sz[size_t(y) * W + x] = y == 0 ? -1.f : 100.4f;
+            if (y >= H - 10) ground[size_t(y) * W + x] = 1;
+        }
+    const std::vector<uint16_t> occ = splash::occluderDepth(sz, ground);
+    CHECK(occ[0] == 0 && occ[size_t(H - 1) * W] == 0 && occ[size_t(50) * W] == 100);
+    CHECK(splash::layerSpanSZ(100) == 20 && splash::layerSpanSZ(50) == 41);
+
+    // One cell holding a pillar at 300 (left half) before a wall from 360 to
+    // 420 (right half, rising by row): the pillar is one tile at 300; the wall
+    // splits into tiles no deeper than the span, each at its nearest depth.
+    std::vector<uint16_t> d(size_t(W) * H, 0);
+    for (int y = 0; y < T; y++)
+        for (int x = 0; x < T; x++) d[size_t(y) * W + x] = uint16_t(x < 8 ? 300 : 360 + y * 4);
+    const std::vector<splash::BgLayerTile> tiles = splash::cutLayerTiles(d, 8, 20);
+    CHECK(tiles.size() == 4);
+    if (tiles.size() == 4) {
+        CHECK(tiles[0].nearSZ == 300 && tiles[0].farSZ == 300 && tiles[0].pixels == 8 * T);
+        CHECK(tiles[1].nearSZ == 360 && tiles[1].farSZ == 380 && tiles[2].nearSZ == 384 && tiles[3].farSZ == 420);
+        for (const splash::BgLayerTile& t : tiles) CHECK(t.x == 0 && t.y == 0 && t.farSZ - t.nearSZ <= 20);
+        CHECK(tiles[0].mask[0] == 1 && tiles[0].mask[8] == 0 && tiles[1].mask[8] == 1);
+        int px = 0;
+        for (const splash::BgLayerTile& t : tiles) px += t.pixels;
+        CHECK(px == T * T);
+    }
+    // A cap of 2: the closest neighbours merge (the three wall runs), at the nearer depth.
+    const std::vector<splash::BgLayerTile> two = splash::cutLayerTiles(d, 2, 20);
+    CHECK(two.size() == 2 && two[0].nearSZ == 300 && two[1].nearSZ == 360 && two[1].farSZ == 420 && two[1].pixels == 8 * T);
+    CHECK(splash::cutLayerTiles(d, 0, 20).empty());
+    CHECK(splash::cutLayerTiles(std::vector<uint16_t>(d.size(), 0), 4, 20).empty());
+    // A character 0.3 m deep standing 0.2 m in front of the wall (SZ 352..364 at
+    // gte 100) is behind no wall tile, and behind the pillar's.
+    for (const splash::BgLayerTile& t : tiles) CHECK((364 > t.nearSZ) == (t.nearSZ == 300 || t.nearSZ == 360));
+
+    // Sheets: 16 tiles a row, as tall as needed; each tile's texels at its spot.
+    splash::Image img;
+    img.width = W, img.height = H;
+    img.pixels.assign(size_t(W) * H, {0.25f, 0.5f, 0.75f, 1});
+    std::vector<splash::BgLayerTile> many(20, tiles[0]);
+    std::vector<splash::BgSheetSpot> at;
+    const std::vector<splash::Image> sheets = splash::layerSheets(img, many, &at);
+    CHECK(sheets.size() == 1 && sheets[0].width == 256 && sheets[0].height == 32);
+    CHECK(at[17].sheet == 0 && at[17].u == 16 && at[17].v == 16);
+    // Spot (16,16), texel (0,0) is the pillar's (opaque), texel (8,0) is not this tile's.
+    CHECK(sheets[0].pixels[size_t(32 - 1 - 16) * 256 + 16].a == 1.f && sheets[0].pixels[size_t(32 - 1 - 16) * 256 + 24].a == 0.f);
+    std::vector<splash::BgLayerTile> lots(300, tiles[0]);
+    CHECK(splash::layerSheets(img, lots, &at).size() == 2 && at[299].sheet == 1 && at[299].v == 32);
+
+    // A floor 2 m under a camera pitched 30 degrees down is ground; a wall
+    // 6 m ahead of a level camera is not.
+    splash::Object o;
+    o.name = "cam";
+    o.fixedCamera.emplace();
+    auto render = [&](const splash::BgCamera& c, auto hit) {
+        std::vector<float> d(size_t(W) * H, -1.f);
+        for (int y = 0; y < H; y++)
+            for (int x = 0; x < W; x++) {
+                const float a = (x + 0.5f - 160) / c.h, b = -(y + 0.5f - 120) / c.h;
+                const splash::Vec3 dir{c.forward.x + c.right.x * a + c.up.x * b, c.forward.y + c.right.y * a + c.up.y * b,
+                                       c.forward.z + c.right.z * a + c.up.z * b};
+                const float t = hit(c.position, dir);
+                if (t > 0) d[size_t(y) * W + x] = t * 4096 / c.gte;  // forward.dir == 1: t is the view depth
+            }
+        return d;
+    };
+    const splash::BgCamera down = splash::bgCamera(bgtest::flatAt(o, {0, 2, 0}, bgtest::yawPitch(0, 30)), 100);
+    const std::vector<float> floorSz = render(down, [](splash::Vec3 p, splash::Vec3 d) { return d.y < 0 ? -p.y / d.y : -1.f; });
+    const std::vector<uint8_t> g1 = splash::groundPixels(floorSz, down);
+    int seen = 0, up = 0;
+    for (size_t i = 0; i < floorSz.size(); i++)
+        if (floorSz[i] >= 0) seen++, up += g1[i];
+    CHECK(seen > 1000 && up > seen * 9 / 10);
+    const splash::BgCamera level = splash::bgCamera(bgtest::flatAt(o, {0, 1, 0}, {}), 100);
+    const std::vector<float> wallSz = render(level, [](splash::Vec3 p, splash::Vec3 d) { return d.z > 0 ? (6 - p.z) / d.z : -1.f; });
+    const std::vector<uint8_t> g2 = splash::groundPixels(wallSz, level);
+    CHECK(std::count(g2.begin(), g2.end(), uint8_t(1)) == 0);
+}
+
+// The bake files and the tiles cut from them.
+void testFixedCameraBakeFiles() {
+    namespace fs = std::filesystem;
+    const int W = splash::kBgWidth, H = splash::kBgHeight;
+    std::vector<uint8_t> rgba(size_t(W) * H * 4);
+    std::vector<uint16_t> depth(size_t(W) * H, 0);
+    for (int y = 0; y < H; y++)
+        for (int x = 0; x < W; x++) {
+            uint8_t* p = &rgba[(size_t(y) * W + x) * 4];
+            p[0] = uint8_t(x), p[1] = uint8_t(y), p[2] = 7, p[3] = 255;
+            if (x >= 64 && x < 128 && y >= 64 && y < 100) depth[size_t(y) * W + x] = uint16_t(200 + x);
+            if (x >= 300 && y >= 230) depth[size_t(y) * W + x] = 65535;
+        }
+    const fs::path dir = g_outDir / "fixedcamfiles";
+    fs::remove_all(dir);
+    splash::BgBake b;
+    b.image = "t.png";
+    b.depth = "t.depth";
+    b.hash = "0badf00d";
+    b.h = 130;
+    b.occluders = 64 * 36 + 20 * 10;
+    splash::writeBake(dir / "t.bgbake", b, rgba, depth);
+    std::error_code ec;
+    CHECK(fs::exists(dir / "t.png") && fs::file_size(dir / "t.depth", ec) == size_t(W) * H * 2);
+    const splash::BgBake r = splash::readBake(dir / "t.bgbake");
+    CHECK(r.hash == "0badf00d" && r.h == 130 && r.occluders == b.occluders && r.image == "t.png" && r.depth == "t.depth");
+    const splash::BgBakePixels px = splash::readBakePixels(dir / "t.bgbake", r);
+    CHECK(px.depth == depth);
+    // Image rows are bottom-up: the top-left pixel is the last row's first.
+    CHECK(std::lround(px.image.pixels[size_t(H - 1) * W + 3].r * 255) == 3);
+    const std::vector<splash::BgTileImage> cols = splash::backgroundTiles(px.image);
+    CHECK(cols.size() == 2 && cols[0].image.width == 256 && cols[1].x == 256 && cols[1].image.width == 64 && cols[1].image.height == 240);
+    CHECK(splash::bakePathFor("courtyard", "Hall cam/1") == "bakes/courtyard-Hall_cam_1.bgbake");
+    // A truncated depth file is refused.
+    { std::ofstream(dir / "t.depth", std::ios::binary) << "xx"; }
+    bool threw = false;
+    try {
+        splash::readBakePixels(dir / "t.bgbake", r);
+    } catch (const std::exception&) {
+        threw = true;
+    }
+    CHECK(threw);
+    threw = false;
+    try {
+        splash::readBake(dir / "missing.bgbake");
+    } catch (const std::exception&) {
+        threw = true;
+    }
+    CHECK(threw);
+}
+
+// The pack: v29 and a 164-byte header only with a baked Fixed camera (the
+// background table at byte 160, the shadow slot at 156 left 0), the
+// table psxsplash reads (tests/host/test_background.cpp pins the same
+// layout), the hidden list = the baked objects, the stale warning and the
+// VRAM error.
+void testFixedCameraPack() {
+    namespace fs = std::filesystem;
+    using bgtest::rd16;
+    using bgtest::rd32;
+    const fs::path src = SPLASHEDIT_SOURCE_DIR;
+    const fs::path dir = g_outDir / "fixedcampack", project = dir / "project";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    fs::copy(src / "examples" / "courtyard", project, fs::copy_options::recursive);
+    // The scene's script can reach Crate (3) by name: it must stay 3D.
+    { std::ofstream(project / "scripts" / "game_logic.lua", std::ios::app) << "\nlocal kept = Entity.Find(\"Crate (3)\")\n"; }
+    splash::Scene scene = splash::loadScene(project / "courtyard.scene");
+
+    const splash::ExportResult plain = splash::exportSplashpack(scene, project, dir / "plain.splashpack");
+    CHECK(plain.ok());
+    CHECK(rd16(bgtest::slurp(dir / "plain.splashpack"), 2) == 27);
+
+    splash::Object cam;
+    cam.name = "Yard cam";
+    cam.transform.position = {0, 2, -6};
+    cam.transform.rotation = bgtest::yawPitch(0, 10);
+    cam.fixedCamera.emplace();
+    cam.fixedCamera->layers = 2;
+    cam.fixedCamera->showAtStart = true;
+    cam.fixedCamera->bake = "bakes/yard.bgbake";
+    scene.objects.push_back(cam);
+    // A crate kept 3D stays drawn: not in the hidden list.
+    scene.objects[1].children[1].mesh->keep3dInFixedCameras = true;
+
+    const int W = splash::kBgWidth, H = splash::kBgHeight;
+    // Occluders: the top-left 16x16 cell at 250, and the cell right of it
+    // with a top half from 300 to 315 (one tile, drawn at its nearest, 300)
+    // over 600 (a second tile). Everything else is image only.
+    std::vector<uint8_t> rgba(size_t(W) * H * 4, 90);
+    std::vector<uint16_t> depth(size_t(W) * H, 0);
+    for (int y = 0; y < 16; y++)
+        for (int x = 0; x < 32; x++) depth[size_t(y) * W + x] = uint16_t(x < 16 ? 250 : y < 8 ? 300 + (x - 16) : 600);
+    auto bake = [&]() {
+        const std::vector<splash::FlatObject> flats = splash::flatten(scene);
+        const splash::ScriptNames named =
+            splash::scriptNamedObjects(scene, flats, [&](const std::string& p) { return bgtest::slurp(project / p); });
+        const splash::FlatObject* fo = nullptr;
+        for (const splash::FlatObject& f : flats)
+            if (f.object->name == "Yard cam") fo = &f;
+        splash::BgBake b;
+        b.image = "yard.png";
+        b.depth = "yard.depth";
+        b.h = 120;
+        b.hash = splash::hashHex(splash::bakeHash(scene, flats, *fo, named, [&](const std::string& p) { return bgtest::fnvFile(project / p); }));
+        splash::writeBake(project / "bakes" / "yard.bgbake", b, rgba, depth);
+    };
+    bake();
+    const splash::ExportResult r = splash::exportSplashpack(scene, project, dir / "bg.splashpack");
+    CHECK(r.ok());
+    CHECK(r.stats.backgrounds == 1);
+    for (const std::string& w : r.warnings) CHECK(w.find("Fixed camera") == std::string::npos);
+    const std::string b = bgtest::slurp(dir / "bg.splashpack");
+    CHECK(b.size() > 164 && rd16(b, 2) == 29);
+    CHECK(rd32(b, 156) == 0);  // no shadows
+    const size_t table = rd32(b, 160);
+    CHECK(table >= 164 && table % 4 == 0 && table + 4 + 64 <= b.size());
+    CHECK(rd16(b, table) == 1);
+    const size_t rec = table + 4;
+    CHECK(std::string(&b[rd32(b, rec)]) == "Yard cam");
+    // Position 20.12 with Y down: (0, 2, -6) m at gte 100.
+    CHECK(int32_t(rd32(b, rec + 4)) == 0 && int32_t(rd32(b, rec + 8)) == -82 && int32_t(rd32(b, rec + 12)) == -246);
+    CHECK(rd16(b, rec + 40) == 120);
+    const uint16_t tiles = rd16(b, rec + 42), layers = rd16(b, rec + 44), hidden = rd16(b, rec + 46);
+    CHECK(tiles == 2 && layers == 3);
+    CHECK(rd16(b, rec + 48) == 1);  // show at start
+    const size_t tilesAt = rd32(b, rec + 52), layersAt = rd32(b, rec + 56), hiddenAt = rd32(b, rec + 60);
+    CHECK(rd16(b, tilesAt + 4) + rd16(b, tilesAt + 20 + 4) == 320);
+    CHECK(rd16(b, tilesAt + 6) == 240 && bgtest::rdi16(b, tilesAt + 20) == 256);
+    for (int t = 0; t < 2; t++) {
+        const size_t at = tilesAt + size_t(t) * 20;
+        CHECK(uint8_t(b[at + 16]) == 2);                                  // 16 bpp
+        CHECK(uint8_t(b[at + 12]) * 64 >= 320);                           // page past framebuffer 0
+        CHECK(uint8_t(b[at + 14]) + rd16(b, at + 4) <= 256);              // u + w inside the page
+    }
+    // Layer tiles: 16x16 sprites at their cells, each with its own nearest depth
+    // (offset 18), cut out of one sheet in a page past framebuffer 0.
+    const int wantSZ[3] = {250, 300, 600}, wantX[3] = {0, 16, 16};
+    for (int t = 0; t < 3; t++) {
+        const size_t at = layersAt + size_t(t) * 20;
+        CHECK(bgtest::rdi16(b, at) == wantX[t] && bgtest::rdi16(b, at + 2) == 0);
+        CHECK(rd16(b, at + 4) == 16 && rd16(b, at + 6) == 16);
+        CHECK(rd16(b, at + 18) == wantSZ[t]);
+        CHECK(uint8_t(b[at + 12]) * 64 >= 320 && uint8_t(b[at + 16]) == 2);
+    }
+    CHECK(uint8_t(b[layersAt + 20 + 14]) == uint8_t(b[layersAt + 14]) + 16);  // the next spot in the sheet
+    CHECK(rd16(b, tilesAt + 18) == 0);                                         // the image has no depth
+    CHECK(r.stats.backgroundInfo.size() == 1 && r.stats.backgroundInfo[0].keptForScripts.size() == 1 &&
+          r.stats.backgroundInfo[0].keptForScripts[0] == std::make_pair(std::string("Crate (3)"), std::string("scripts/game_logic.lua")));
+    // Whole atlases: the 256 column in one, the 64 column with the 16-row sheet under it in another.
+    CHECK(r.stats.backgroundInfo.size() == 1 && r.stats.backgroundInfo[0].layerTiles == 3 &&
+          r.stats.backgroundInfo[0].vramBytes == 2 * 256 * 256 * 2);
+    // Hidden: every courtyard mesh but the kept crate, as game object indices.
+    std::vector<uint16_t> hid;
+    for (uint16_t i = 0; i < hidden; i++) hid.push_back(rd16(b, hiddenAt + 2 * i));
+    const std::vector<uint16_t> want = {0, 1, 2, 3, 4, 5, 6};  // Crate (2) kept 3D, Crate (3) named by the script
+    CHECK(hid == want);
+    // Lua records start right after the 164-byte header.
+    const size_t luaAt = 164;
+    CHECK(rd32(b, luaAt) > luaAt && rd32(b, luaAt) < b.size());
+
+    // With a blob shadow too: still v29, the shadow table at 156 and the
+    // background table at 160, each where its slot points.
+    {
+        splash::Scene both = scene;
+        both.objects[1].children[1].mesh->shadow = splash::ShadowMode::Blob;
+        const splash::ExportResult rb = splash::exportSplashpack(both, project, dir / "both.splashpack");
+        CHECK(rb.ok() && rb.stats.shadows == 1 && rb.stats.backgrounds == 1);
+        const std::string bb = bgtest::slurp(dir / "both.splashpack");
+        CHECK(bb.size() > 164 && rd16(bb, 2) == 29);
+        const size_t sh = rd32(bb, 156), bg = rd32(bb, 160);
+        CHECK(sh >= 164 && sh % 4 == 0 && sh + 4 + 8 <= bb.size() && rd16(bb, sh) == 1 && uint8_t(bb[sh + 6]) == 1);
+        CHECK(bg >= 164 && bg % 4 == 0 && bg + 4 + 64 <= bb.size() && bg != sh && rd16(bb, bg) == 1);
+        CHECK(std::string(&bb[rd32(bb, bg + 4)]) == "Yard cam");
+    }
+
+    // A baked object moved: the bake is stale.
+    scene.objects[0].children[3].transform.position.x += 0.5f;
+    const splash::ExportResult moved = splash::exportSplashpack(scene, project, dir / "moved.splashpack");
+    CHECK(moved.ok());
+    CHECK(std::any_of(moved.warnings.begin(), moved.warnings.end(), [](const std::string& w) {
+        return w.rfind("Fixed camera 'Yard cam': the scene changed since the bake", 0) == 0;
+    }));
+    scene.objects[0].children[3].transform.position.x -= 0.5f;
+    // A Keep 3D crate moving does not touch the bake.
+    scene.objects[1].children[1].transform.position.x += 0.5f;
+    const splash::ExportResult kept = splash::exportSplashpack(scene, project, dir / "kept.splashpack");
+    CHECK(std::none_of(kept.warnings.begin(), kept.warnings.end(), [](const std::string& w) { return w.find("Fixed camera") != std::string::npos; }));
+
+    // Not enough VRAM: an error naming the camera.
+    splash::ExportOptions tight;
+    tight.vram.prohibited.push_back({320, 0, 640, 512});
+    const splash::ExportResult full = splash::exportSplashpack(scene, project, dir / "full.splashpack", tight);
+    CHECK(!full.ok());
+    CHECK(std::any_of(full.errors.begin(), full.errors.end(), [](const std::string& e) {
+        return e.rfind("Fixed camera 'Yard cam': the baked background does not fit in VRAM", 0) == 0;
+    }));
+
+    // Every cell 16 depths 30 apart. At Layers 8 that is 2400 tiles, over
+    // the cap (checked at 8 bpp, where the 1024 kept fit).
+    for (int y = 0; y < H; y++)
+        for (int x = 0; x < W; x++) depth[size_t(y) * W + x] = uint16_t(100 + (y % 16) * 30);
+    auto has = [](const splash::ExportResult& e, const char* what) {
+        return std::any_of(e.warnings.begin(), e.warnings.end(), [&](const std::string& w) { return w.find(what) != std::string::npos; });
+    };
+    scene.objects.back().fixedCamera->layers = 8;
+    scene.objects.back().fixedCamera->bitDepth = splash::BitDepth::Bpp8;
+    bake();
+    const splash::ExportResult capped = splash::exportSplashpack(scene, project, dir / "capped.splashpack");
+    CHECK(capped.ok() && capped.stats.backgroundInfo.size() == 1 && capped.stats.backgroundInfo[0].layerTiles == 2400 &&
+          capped.stats.backgroundInfo[0].droppedTiles == 2400 - splash::kBgMaxLayerTiles && has(capped, "over the 1024 a background draws"));
+    // At Layers 1, 300 tiles: at 16 bpp the image and two sheets take four
+    // whole atlases, half of VRAM (the most 16 bpp atlases beside the
+    // framebuffers), which warns; 8 bpp takes a quarter and does not.
+    scene.objects.back().fixedCamera->layers = 1;
+    scene.objects.back().fixedCamera->bitDepth = splash::BitDepth::Bpp16;
+    const splash::ExportResult half = splash::exportSplashpack(scene, project, dir / "half.splashpack");
+    CHECK(half.ok() && half.stats.backgroundInfo.size() == 1 && half.stats.backgroundInfo[0].layerTiles == 300 &&
+          half.stats.backgroundInfo[0].vramBytes == 4 * 256 * 256 * 2 && has(half, "50% of VRAM; Bit depth 8 takes about half"));
+    scene.objects.back().fixedCamera->bitDepth = splash::BitDepth::Bpp8;
+    const splash::ExportResult half8 = splash::exportSplashpack(scene, project, dir / "half8.splashpack");
+    CHECK(half8.ok() && !has(half8, "% of VRAM") && half8.stats.backgroundInfo[0].vramBytes * 2 < half.stats.backgroundInfo[0].vramBytes + 16 * 1024);
+    scene.objects.back().fixedCamera->bitDepth = splash::BitDepth::Bpp16;
+    scene.objects.back().fixedCamera->layers = 2;
+
+    // No bake: a warning, and the pack stays v27.
+    scene.objects.back().fixedCamera->bake.clear();
+    const splash::ExportResult none = splash::exportSplashpack(scene, project, dir / "none.splashpack");
+    CHECK(none.ok() && rd16(bgtest::slurp(dir / "none.splashpack"), 2) == 27);
+    CHECK(std::any_of(none.warnings.begin(), none.warnings.end(), [](const std::string& w) { return w.find("is not baked") != std::string::npos; }));
+}
+
 void testListScroll() {
     CHECK(ui::maxScroll(500, 800) == 0);
     CHECK(ui::maxScroll(2000, 800) == 1200);
@@ -14330,6 +14904,12 @@ int main(int argc, char** argv) {
     testGpuRaster();
     testShadows();
     testListScroll();
+    testFixedCameraModel();
+    testFixedCameraBakedSet();
+    testFixedCameraProjection();
+    testFixedCameraLayers();
+    testFixedCameraBakeFiles();
+    testFixedCameraPack();
     if (g_failures) {
         std::fprintf(stderr, "editor_tests: %d of %d checks failed\n", g_failures, g_checks);
         return 1;
