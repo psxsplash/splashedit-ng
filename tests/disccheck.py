@@ -5,7 +5,7 @@
 # the second under SCENE1/SCENE_1.*; then a disc with the psxsplash licence
 # and --volume, the same from disc.json, and a licence of a bad size.
 # usage: python3 disccheck.py <splashpack-cli>
-import json, os, shutil, struct, subprocess, sys, tempfile
+import json, os, re, shutil, struct, subprocess, sys, tempfile
 
 cli = sys.argv[1]
 here = os.path.dirname(os.path.abspath(__file__))
@@ -36,6 +36,9 @@ binpath = os.path.join(tmp, 'game.bin')
 r = subprocess.run([cli, 'disc', scene, '--engine', os.path.join(tmp, 'cd.ps-exe'), '-o', binpath],
                    capture_output=True, text=True)
 check('disc exits 0', r.returncode == 0, r.stderr)
+est = [l for l in r.stdout.splitlines() if l.startswith('scene ')]
+check('a one-scene disc prints one load estimate', len(est) == 1 and
+      bool(re.fullmatch(r'scene 0 load ~\d+\.\d s \(\d+ reads, \d+ sectors\)', est[0])), r.stdout)
 r2 = subprocess.run([cli, 'disc', scene, '--engine', os.path.join(tmp, 'pc.ps-exe'), '-o',
                      os.path.join(tmp, 'pc.bin')], capture_output=True, text=True)
 check('PCdrv engine refused', r2.returncode != 0 and 'PCdrv' in r2.stderr and
@@ -294,6 +297,29 @@ if r4.returncode == 0:
     s0dir = root.get(b'SCENE0')
     check('no SCENE0/SCENE_0.LDG', s0dir and b'SCENE_0.LDG;1' not in records(s0dir[0], s0dir[1]))
     check('no SCENE2', b'SCENE2' not in root, root.keys())
+    # One estimate line per scene, priced as psxsplash reads the scene off the disc
+    # (PCSX-Redux CD timing at 2x): the root and scene directories, then one read
+    # each for LDG, VRM and SPU, and the SPK in 32-sector chunks behind a loading
+    # screen, else in one read. Neither scene streams, so no region reads.
+    lines = [l for l in r4.stdout.splitlines() if l.startswith('scene ')]
+    want_lines = []
+    for i in (0, 1):
+        d = root.get(b'SCENE%d' % i)
+        sub = records(d[0], d[1]) if d else {}
+        size = lambda ext: (sub.get(b'SCENE_%d.%s;1' % (i, ext)) or (0, 0))[1]
+        sect = lambda b: (b + 2047) // 2048
+        reads, sectors = 2, 2
+        for ext in (b'LDG', b'VRM', b'SPU'):
+            if size(ext):
+                reads, sectors = reads + 1, sectors + sect(size(ext))
+        spk = sect(size(b'SPK'))
+        reads += (spk + 31) // 32 if size(b'LDG') else 1
+        sectors += spk
+        check('SCENE%d does not stream (no region reads to count)' % i, not size(b'GEO'))
+        ms = reads * 66.5 + (sectors - reads) * 1000 / 150
+        want_lines.append('scene %d load ~%.1f s (%d reads, %d sectors)' % (i, ms / 1000, reads, sectors))
+    check('one load estimate line per scene, reads and sectors as the files on the disc', lines == want_lines,
+          (lines, want_lines))
 
 # A licensed disc with its own volume name: the built-in psxsplash licence at
 # LBA 0-11 (Form 1, its "Created with psxsplash" text at LBA 4), LBA 12-15

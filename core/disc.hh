@@ -130,8 +130,45 @@ DiscInfo writeDiscImage(const std::vector<DiscFile>& files, const std::string& v
                         const std::vector<LicenceSector>& licence = {},
                         const std::vector<std::vector<int16_t>>& tracks = {});
 
+// Estimated scene load time from the disc (issue #214): what psxsplash's
+// SceneManager::loadScene reads, priced with PCSX-Redux's CD timing. No real
+// drive was measured; seek distance is not modelled (Redux has none). CD reads
+// only: VRAM/SPU uploads and scene setup come on top (0.3-0.8 s on lamplighter).
+// Every blocking read (Setloc, ReadN, first sector, Pause) at 2x, measured on PCSX-Redux's CD timing.
+constexpr double kCdReadMs = 66.5;
+// Every further sector of a read at 2x (150 sectors a second), PCSX-Redux's CD timing.
+constexpr double kCdSectorMs = 1000.0 / 150.0;
+// psxsplash LoadFileSyncWithProgress (fileloader_cdrom.hh kChunkSectors): the
+// splashpack is read in chunks of this many sectors when a loading screen shows.
+constexpr uint32_t kSplashpackChunkSectors = 32;
+// One-sector directory reads per load, the root and the scene's directory
+// (psxsplash#101 caches each directory once per load). The first load after
+// boot also reads the volume descriptor; that is not counted.
+constexpr uint32_t kSceneDirReads = 2;
+
+struct SceneLoad {
+    uint32_t reads = 0;    // blocking CD reads
+    uint32_t sectors = 0;  // sectors they read
+    double ms = 0;         // reads * kCdReadMs + (sectors - reads) * kCdSectorMs
+    std::string name;      // exportDisc: the scene's name from `names`, else empty
+};
+// The milliseconds of one blocking read of `sectors` sectors (0 for none).
+double cdReadMs(uint32_t sectors);
+// One scene's load: the directory reads, then one read each for the loading
+// screen (`ldgBytes`, 0 = the scene has none), VRAM and SPU files, the
+// splashpack in kSplashpackChunkSectors chunks when there is a loading screen
+// (else one read), and one read per region in `regionSectors` (the streamed
+// regions WorldStreamer::init reads before the first frame, see
+// ExportStats::streamInitialSectors). Opening the .geo reads nothing (its
+// directory is cached). An empty file costs no read.
+SceneLoad estimateSceneLoad(size_t ldgBytes, size_t vramBytes, size_t spuBytes, size_t splashpackBytes,
+                            const std::vector<uint32_t>& regionSectors = {});
+// `ms` as the UI shows it: "~1.4 s".
+std::string loadTimeText(double ms);
+
 // A bootable disc: SYSTEM.CNF, the engine as PSX.EXE, and each scene's files
-// under SCENE<i>/ as SCENE_<i>.SPK, .VRM, .SPU (and .GEO when it streams),
+// under SCENE<i>/ as SCENE_<i>.LDG (when it has a loading screen), .VRM, .SPU,
+// .SPK (and .GEO when it streams), in the order psxsplash loads them,
 // where psxsplash's CD-ROM loader opens them; scene 0 is the one the game
 // starts in and Lua's Scene.Load(i) opens scene i. `engine` must be a
 // LOADER=cdrom build. The volume name is `disc.volume`, or `title` when that
@@ -149,10 +186,13 @@ DiscInfo writeDiscImage(const std::vector<DiscFile>& files, const std::string& v
 // gives one, its name ("scene 1 (cave): ..."). No image is written when any
 // scene fails. The stats are scene 0's. Every scene packs VRAM with `vram`
 // (the app passes the project's vram.json, see readVramSettings); the cli
-// passes the project's disc.json as `disc`.
+// passes the project's disc.json as `disc`. `loads` holds each scene's
+// estimateSceneLoad when the disc was written.
 struct DiscResult {
     ExportResult exported;
     DiscInfo disc;
+    // Per scene, in scene order, when the disc was written (estimateSceneLoad).
+    std::vector<SceneLoad> loads;
 };
 DiscResult exportDisc(const std::vector<const Scene*>& scenes, const std::filesystem::path& projectRoot,
                       const std::filesystem::path& engine, const std::filesystem::path& bin, const std::string& title,

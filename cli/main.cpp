@@ -99,6 +99,8 @@ static int usage() {
                  "  --track adds a CD-DA music track (WAV, AIFF, MP3, Ogg Vorbis or FLAC; relative to the\n"
                  "    working directory), tracks 2 and up in the order given (Audio.PlayCDDA(2) plays the\n"
                  "    first); any --track replaces disc.json's list\n"
+                 "  prints each scene's load as \"scene N load ~T s (R reads, S sectors)\": the CD read time,\n"
+                 "    estimated from the emulator's CD timing (2x drive); uploads and setup add more\n"
                  "usage: splashpack-cli font <font.ttf> --size <px> -o <sheet.png>\n"
                  "       splashpack-cli font <bitmap.png> --cell <w>x<h> -o <sheet.png>\n"
                  "  builds one UI font sheet the way export does and prints its cell size and height\n"
@@ -575,6 +577,10 @@ static int discCmd(int argc, char** argv) {
         if (!r.exported.ok()) return 1;
         std::printf("%s sectors=%u\n", outPath.c_str(), r.disc.sectors);
         printRaised(r.exported.stats);
+        // Estimated from PCSX-Redux's CD timing (2x), not a real drive.
+        for (size_t s = 0; s < r.loads.size(); s++)
+            std::printf("scene %zu load %s (%u reads, %u sectors)\n", s, splash::loadTimeText(r.loads[s].ms).c_str(),
+                        r.loads[s].reads, r.loads[s].sectors);
         for (size_t t = 0; t < r.disc.tracks.size(); t++)
             std::printf("track %zu lba=%u sectors=%u length=%s\n", t + 2, r.disc.tracks[t].start,
                         r.disc.tracks[t].sectors, splash::cueTime(r.disc.tracks[t].sectors).c_str());

@@ -138,6 +138,10 @@ struct ExportStats {
     size_t streamTableBytes = 0, geoFileBytes = 0;
     std::vector<std::array<int32_t, 4>> streamRegionBounds;  // minX, minZ, maxX, maxZ
     std::vector<float> streamRegionFloor;  // per region, its lowest point in world units (Y up)
+    // Sectors of each region psxsplash's WorldStreamer::init reads before the
+    // first frame, in read order: those within the load radius of the player
+    // start, nearest first, as many as there are slots (StreamPlanner::planLoad).
+    std::vector<uint32_t> streamInitialSectors;
     // Each baked nav region's outline, in world metres (Y up), for the viewport.
     std::vector<std::vector<Vec3>> navOutlines;
     // Each baked nav region's facts for the inspector, in navOutlines order.
