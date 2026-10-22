@@ -81,14 +81,15 @@ check('text', elements['title']['text'] == 'SplashEdit NG: UI', elements['title'
 check('progress', tuple(elements['hp']['td'][:4]) == (76, 26, 26, 60), tuple(elements['hp']['td'][:4]))
 
 # Font sheets: inside the x=960 column, one texture page each, not
-# overlapping each other or the system font (960, 464, 48 rows). A greyLevels
-# font's 16-entry palette follows its sheet and takes the row below it.
+# overlapping each other, psxsplash's screen effect dither masks (rows 456-463)
+# or the system font (960, 464, 48 rows). A greyLevels font's 16-entry palette
+# follows its sheet and takes the row below it.
 def font_sheets(tag, pack, fonts, grey):
     spans = [(f['vy'], f['vy'] + f['th'] + (1 if g else 0)) for f, g in zip(fonts, grey)]
     check(tag + 'fonts in column 960', all(f['vx'] == 960 for f in fonts))
     check(tag + 'fonts inside a page', all(f['vy'] // 256 == (f['vy'] + f['th'] - 1) // 256 for f in fonts), spans)
-    check(tag + 'fonts clear of each other and the system font',
-          all(b <= 464 for a, b in spans) and all(s[1] <= t[0] or t[1] <= s[0] for i, s in enumerate(spans)
+    check(tag + 'fonts clear of each other, the dither masks and the system font',
+          all(b <= 456 for a, b in spans) and all(s[1] <= t[0] or t[1] <= s[0] for i, s in enumerate(spans)
                                                    for t in spans[i + 1:]), spans)
     v = open(pack[:-len('splashpack')] + 'vram', 'rb').read()
     na, nc, nf = struct.unpack_from('<HHB', v, 2)
