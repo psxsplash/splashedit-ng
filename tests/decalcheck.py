@@ -78,14 +78,15 @@ def read_png(path):
 
 
 def cyan(path, box):
-    """Cyan pixels (the decal's X) in the box (x0, y0, x1, y1) of a screenshot."""
+    """Cyan pixels (the decal's X) in the box (x0, y0, x1, y1) of a screenshot: green and blue alike and
+    high, red low; the gizmo's light blue arrow (green well under blue) is not."""
     _, _, rows = read_png(path)
     x0, y0, x1, y1 = box
     n = 0
     for y in range(y0, y1):
         for x in range(x0, x1):
             r, g, b = rows[y][3 * x:3 * x + 3]
-            n += g > 110 and b > 110 and r < 80
+            n += g > 180 and b > 180 and r < 60 and abs(g - b) < 30
     return n
 
 
@@ -148,7 +149,7 @@ check('the Decal section shows Texture, Width, Height, Depth, Colour and the cov
 box = (VIEWPORT[0] - 70, VIEWPORT[1] - 45, VIEWPORT[0] + 70, VIEWPORT[1] + 45)
 if os.path.exists(before) and os.path.exists(shot):
     c0, c1 = cyan(before, box), cyan(shot, box)
-    check('the scene view draws the X on the floor where it was dropped', c0 == 0 and c1 > 150, (c0, c1))
+    check('the scene view draws the X on the floor where it was dropped', c0 == 0 and c1 > 100, (c0, c1))
 saved = json.load(open(scene))
 obj = next((o for o in saved['objects'] if o['name'] == 'Decal xmark'), None)
 dec = next((c for c in obj['components'] if c['type'] == 'decal'), None) if obj else None

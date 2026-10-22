@@ -12009,6 +12009,25 @@ void testDecalExport() {
     CHECK(decalTris == int(b.pieces.size()));
     const std::vector<uint16_t> ff = flagsOf({splash::Vec3{-2, 0, -2}, {-2, 0, 2}, {2, 0, -2}});
     CHECK(ff.size() == 1 && (ff.empty() || (ff[0] & 0x8) == 0));
+    // The decal object's world AABB (the engine culls the object by it) holds
+    // every piece corner: a decal object has no mesh of its own, so without the
+    // pieces it would be the point at its origin. Game object records (92
+    // bytes) follow the v27 header (156 bytes, no Lua files here); the AABB is
+    // the record's last 24 bytes, min then max, engine axes (y down).
+    CHECK(pack.size() > 156 + 2 * 92 && pack[2] == 27);
+    if (pack.size() > 156 + 2 * 92) {
+        int32_t box[6];
+        std::memcpy(box, &pack[156 + 92 + 68], sizeof box);  // record 1: the decal object
+        bool inside = true;
+        for (const auto& p : b.pieces)
+            for (const auto& c : p.c) {
+                const int32_t e[3] = {splash::toWorldFixed12(c.world.x / gte), splash::toWorldFixed12(-c.world.y / gte),
+                                      splash::toWorldFixed12(c.world.z / gte)};
+                for (int k = 0; k < 3; k++) inside &= e[k] >= box[k] - 1 && e[k] <= box[3 + k] + 1;
+            }
+        CHECK(inside);
+        CHECK(box[3] - box[0] >= splash::toWorldFixed12(1.0f / gte) - 2);  // 1 m wide in X at least
+    }
 
     const splash::ExportStats on = r.stats;
     // Nothing under it: a warning, no pieces.
