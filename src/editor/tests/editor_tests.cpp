@@ -321,6 +321,166 @@ void testSceneEdgeFade() {
     CHECK(c.stats.bumpAllocatorNeed == a.stats.bumpAllocatorNeed);
 }
 
+// Reverb: the scene, room, trigger and clip fields are saved only when not the
+// default and by name; the export puts them in the pad fields psxsplash reads
+// (header renderFlags bits 1-4 and 7, RoomData and trigger box pad, .spu clip
+// pad bit 0) and reserves the largest work area any of them uses: ExportStats,
+// the clip pad's bits 4-7, the SPU meter and a warning when it does not fit.
+void testReverb() {
+    namespace fs = std::filesystem;
+    CHECK(splash::SceneSettings{}.reverb == 0 && !splash::SceneSettings{}.cdReverb);
+    CHECK(splash::AudioComponent{}.reverbSend && splash::RoomComponent{}.reverb == 0 &&
+          splash::TriggerComponent{}.reverb == 0);
+    CHECK(splash::reverbFromKey("hall") == 5 && splash::reverbFromKey("delay") == 9 && splash::reverbFromKey("x") == -1);
+    CHECK(splash::reverbWorkAreaBytes(5) == 0xADE0 && splash::reverbWorkAreaBytes(8) == 0x18040 &&
+          splash::reverbWorkAreaBytes(0) == 0 && splash::reverbWorkAreaBytes(10) == 0);
+    const fs::path project = fs::path(SPLASHEDIT_SOURCE_DIR) / "examples" / "courtyard";
+    const fs::path dir = g_outDir / "reverb";
+    fs::remove_all(dir);
+    fs::create_directories(dir / "audio");
+    fs::copy_file(fs::path(SPLASHEDIT_SOURCE_DIR) / "tests" / "audio" / "noise22.wav", dir / "audio" / "noise.wav");
+    for (const char* sub : {"meshes", "textures", "scripts"})
+        fs::copy(project / sub, dir / sub, fs::copy_options::recursive);
+    auto slurp = [](const fs::path& f) {
+        std::ifstream in(f, std::ios::binary);
+        return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    };
+    auto object = [](const char* name, splash::Vec3 pos) {
+        splash::Object o;
+        o.name = name;
+        o.transform.position = pos;
+        return o;
+    };
+
+    splash::Scene sc = splash::loadScene(project / "courtyard.scene");
+    splash::saveScene(sc, dir / "plain.scene");
+    for (const char* key : {"reverb", "cdReverb", "reverbSend"}) CHECK(slurp(dir / "plain.scene").find(key) == std::string::npos);
+
+    sc.settings.reverb = 2;  // Studio small
+    sc.settings.cdReverb = true;
+    splash::Object west = object("West", {-3.6f, 2, 0.5f}), east = object("East", {3.6f, 2, 0.5f});
+    west.room = splash::RoomComponent{{7, 4.4f, 12}, {}, 0, {}};
+    east.room = splash::RoomComponent{{7, 4.4f, 12}, {}, 5, {}};  // Hall
+    splash::Object door = object("Door", {0, 1.5f, -1.5f});
+    door.transform.rotation = {0, 0.70710678f, 0, 0.70710678f};
+    splash::PortalComponent pc;
+    pc.roomA = "West";
+    pc.roomB = "East";
+    pc.width = 2;
+    pc.height = 3;
+    door.portal = pc;
+    splash::Object zone = object("Zone", {2, 1, 3});
+    zone.trigger = splash::TriggerComponent{{2, 2, 2}, "", 3, {}};  // Studio medium
+    splash::Object wet = object("Wet", {}), dry = object("Dry", {});
+    wet.audio = splash::AudioComponent{};
+    wet.audio->clip = "audio/noise.wav";
+    wet.audio->clipName = "wet";
+    dry.audio = wet.audio;
+    dry.audio->clipName = "dry";
+    dry.audio->reverbSend = false;
+    for (splash::Object* o : {&west, &east, &door, &zone, &wet, &dry}) sc.objects.push_back(*o);
+    splash::saveScene(sc, dir / "wet.scene");
+    const std::string text = slurp(dir / "wet.scene");
+    CHECK(text.find("\"reverb\": \"studioSmall\"") != std::string::npos);
+    CHECK(text.find("\"reverb\": \"hall\"") != std::string::npos);
+    CHECK(text.find("\"reverb\": \"studioMedium\"") != std::string::npos);
+    CHECK(text.find("\"cdReverb\": true") != std::string::npos);
+    CHECK(text.find("\"reverbSend\": false") != std::string::npos);
+    const splash::Scene back = splash::loadScene(dir / "wet.scene");
+    CHECK(back.settings.reverb == 2 && back.settings.cdReverb && back.settings.extra.empty());
+    int rooms = 0, zones = 0, sends = 0, drys = 0;
+    for (const splash::Object& o : back.objects) {
+        if (o.room && o.name == "East") rooms += o.room->reverb == 5;
+        if (o.room && o.name == "West") rooms += o.room->reverb == 0;
+        if (o.trigger) zones += o.trigger->reverb == 3;
+        if (o.audio) (o.audio->reverbSend ? sends : drys)++;
+    }
+    CHECK(rooms == 2 && zones == 1 && sends == 1 && drys == 1);
+    {
+        std::string bad = text;
+        bad.replace(bad.find("\"hall\""), 6, "\"cave\"");
+        std::ofstream(dir / "bad.scene", std::ios::binary) << bad;
+        bool threw = false;
+        try { splash::loadScene(dir / "bad.scene"); } catch (const std::exception& e) {
+            threw = std::string(e.what()).find("unknown reverb 'cave'") != std::string::npos;
+        }
+        CHECK(threw);
+    }
+
+    splash::ExportResult r = splash::exportSplashpack(sc, dir, dir / "wet.splashpack");
+    CHECK(r.ok());
+    // Hall (room) is the largest work area of Studio small, Hall and Studio medium.
+    CHECK(r.stats.reverbPreset == 5 && r.stats.reverbBytes == 0xADE0);
+    CHECK(splash::spuBudget(r.stats).used == r.stats.spuEnd + 0xADE0);
+    CHECK(!splash::reverbOverflowsSpu(r.stats));
+    const std::string pk = slurp(dir / "wet.splashpack");
+    CHECK(pk.size() > 160 && uint8_t(pk[77]) == (splash::kRenderFlagEdgeFade | 2 << 1 | 0x80));
+    // The trigger box: its world box in 20.12 (Y flipped), no Lua (-1), Studio medium.
+    {
+        const int32_t box[6] = {41, -82, 82, 123, 0, 164};
+        std::string want(reinterpret_cast<const char*>(box), sizeof box);
+        want += std::string("\xff\xff\x03\x00", 4);
+        CHECK(pk.find(want) != std::string::npos);
+    }
+    // The rooms: West inherits (0), East is Hall, the catch-all 0.
+    {
+        CHECK(r.stats.rooms.size() == 2);
+        splash::RoomSet rs;
+        rs.rooms.resize(3);
+        rs.rooms[1].reverb = 5;
+        splash::BinWriter w;
+        splash::writeRooms(w, rs, 100.f);
+        const std::vector<uint8_t>& b = w.data();
+        CHECK(b.size() >= 3 * 36 && b[34] == 0 && b[36 + 34] == 5 && b[36 + 35] == 0 && b[72 + 34] == 0);
+    }
+    // .spu: per clip pad, bit 0 the send, bits 4-7 the reserved preset.
+    {
+        const std::string spu = slurp(dir / "wet.spu");
+        CHECK(spu.size() > 12 && spu[0] == 'S' && spu[1] == 'A' && uint8_t(spu[2]) == 2);
+        size_t o = 4;
+        std::vector<uint8_t> pads;
+        for (int i = 0; i < 2 && o + 8 <= spu.size(); i++) {
+            uint32_t n;
+            std::memcpy(&n, spu.data() + o, 4);
+            pads.push_back(uint8_t(spu[o + 7]));
+            o = (o + 8 + n + 3) & ~size_t(3);
+        }
+        CHECK(pads == std::vector<uint8_t>({0x51, 0x50}));
+    }
+
+    // No reverb anywhere: no reservation, pad bytes as before.
+    splash::Scene dryScene = sc;
+    dryScene.settings.reverb = 0;
+    for (splash::Object& o : dryScene.objects) {
+        if (o.room) o.room->reverb = 0;
+        if (o.trigger) o.trigger->reverb = 0;
+    }
+    splash::ExportResult d = splash::exportSplashpack(dryScene, dir, dir / "dry.splashpack");
+    CHECK(d.ok() && d.stats.reverbPreset == 0 && d.stats.reverbBytes == 0 && splash::spuBudget(d.stats).used == d.stats.spuEnd);
+    {
+        const std::string spu = slurp(dir / "dry.spu"), pk2 = slurp(dir / "dry.splashpack");
+        CHECK(spu.size() > 12 && uint8_t(spu[11]) == 0x01);
+        CHECK(pk2.size() > 160 && uint8_t(pk2[77]) == (splash::kRenderFlagEdgeFade | 0x80));
+    }
+
+    // Clips plus work area past 512 KB: the meter shows the sum, Problems names
+    // the preset to shrink and the largest that fits.
+    splash::ExportStats big;
+    big.spuEnd = 0x80000 - 0x10000;
+    big.reverbPreset = 8;
+    big.reverbBytes = 0x18040;
+    CHECK(splash::reverbOverflowsSpu(big) && splash::spuBudget(big).used == big.spuEnd + 0x18040);
+    const std::string warn = splash::reverbSpuWarning(big);
+    CHECK(warn.find("Chaos echo reverb needs 96 KB") != std::string::npos);
+    CHECK(warn.find("Shrink the Chaos echo reverb to Space echo or smaller") != std::string::npos);
+    sc.settings.reverb = 8;
+    splash::ExportResult w2 = splash::exportSplashpack(sc, dir, dir / "big.splashpack");
+    CHECK(w2.ok() && w2.stats.reverbPreset == 8 && !splash::reverbOverflowsSpu(w2.stats));
+    bool warned = false;
+    for (const std::string& s2 : w2.warnings) warned |= s2.find("reverb") != std::string::npos;
+    CHECK(!warned);
+}
+
 // The Memory card section's helpers: the filename preview, each problem's
 // fix, and the icon decoded through the export's shared palette.
 void testMemCard() {
@@ -14489,6 +14649,7 @@ int main(int argc, char** argv) {
     testSettings();
     testSceneRendering();
     testSceneEdgeFade();
+    testReverb();
     testRenderPeak();
     testRenderLost();
     testMemCard();

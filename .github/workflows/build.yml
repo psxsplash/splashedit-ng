@@ -241,6 +241,9 @@ jobs:
       - name: Scene edge fade switch
         if: runner.os == 'Linux'
         run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/edgefadecheck.py build/splashedit
+      - name: Reverb presets for the scene, rooms, trigger zones and clips
+        if: runner.os == 'Linux'
+        run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/reverbcheck.py build/splashedit
       - name: Scene loading screen
         if: runner.os == 'Linux'
         run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/loadingscreencheck.py build/splashedit

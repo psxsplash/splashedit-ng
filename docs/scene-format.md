@@ -91,6 +91,16 @@ any active mesh within 100 units, raised by `playerHeight` (no hit: the position
 agent size of the player (or 1.8/0.5); if a `navigation` component exists, all its values win over
 the player's.
 
+### Reverb
+
+psxsplash's SPU reverb presets are saved by name: `off`, `room`, `studioSmall`, `studioMedium`,
+`studioLarge`, `hall`, `halfEcho`, `spaceEcho`, `chaosEcho`, `delay` (`core/reverb.hh`, psx-spx
+"SPU Reverb Examples"). Each key below is written only when it is not the default:
+`settings.reverb` (the scene's preset, `off`) and `settings.cdReverb` (CD music feeds the reverb,
+false); a `room` component's `reverb` (while the camera is in the room; none = the scene's); a
+`trigger` component's `reverb` (while the player is in the box; none = not a reverb zone, the
+smallest such zone wins); an `audio` component's `reverbSend` (the clip feeds the reverb, true).
+
 ### Memory card saves: `settings.memCard`
 
 Optional, after the other settings. What psxsplash's `MemCard.Save` names a save by and what the
