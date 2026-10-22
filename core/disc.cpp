@@ -722,7 +722,6 @@ DiscResult exportDisc(const std::vector<const Scene*>& scenes, const fs::path& p
             // File data goes on the disc in the order psxsplash's SceneManager::loadScene reads it:
             // the loading screen first (drawn while the rest loads), then VRAM, SPU, the
             // splashpack, and the streamed geometry (opened last, read during play).
-            // The loading screen psxsplash draws while this scene loads.
             size_t ldg = 0;
             if (fs::exists(part.replace_extension(".loading"))) {
                 files.push_back({dir + ".LDG", readFile(part)});

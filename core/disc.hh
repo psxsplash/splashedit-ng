@@ -130,26 +130,6 @@ DiscInfo writeDiscImage(const std::vector<DiscFile>& files, const std::string& v
                         const std::vector<LicenceSector>& licence = {},
                         const std::vector<std::vector<int16_t>>& tracks = {});
 
-// A bootable disc: SYSTEM.CNF, the engine as PSX.EXE, and each scene's files
-// under SCENE<i>/ as SCENE_<i>.SPK, .VRM, .SPU (and .GEO when it streams),
-// where psxsplash's CD-ROM loader opens them; scene 0 is the one the game
-// starts in and Lua's Scene.Load(i) opens scene i. `engine` must be a
-// LOADER=cdrom build. The volume name is `disc.volume`, or `title` when that
-// is empty (letters, digits and _ kept, upper-cased, at most 31; PSXSPLASH
-// when nothing is left). `disc.licence` goes into sectors 0-15 (see
-// resolveLicence and writeDiscImage); a licence that cannot be read or has a
-// bad size is an error. `disc.tracks` become CD-DA tracks 2 and up (paths
-// relative to `projectRoot`, decoded with loadCdAudio); one that is missing
-// or cannot be decoded is the error "music track <N>: <why>" (N its disc
-// track number, 2 for the first). A disc longer than 74 minutes (333000
-// sectors) is a warning naming its length in minutes; longer than 80
-// (360000) is an error and no image is written. Errors land in the result;
-// with more than one scene,
-// each error and warning starts with its scene's index and, when `names`
-// gives one, its name ("scene 1 (cave): ..."). No image is written when any
-// scene fails. The stats are scene 0's. Every scene packs VRAM with `vram`
-// (the app passes the project's vram.json, see readVramSettings); the cli
-// passes the project's disc.json as `disc`.
 // Estimated scene load time from the disc (issue #214): what psxsplash's
 // SceneManager::loadScene reads, priced with PCSX-Redux's CD timing. No real
 // drive was measured; seek distance is not modelled (Redux has none). CD reads
@@ -186,6 +166,28 @@ SceneLoad estimateSceneLoad(size_t ldgBytes, size_t vramBytes, size_t spuBytes, 
 // `ms` as the UI shows it: "~1.4 s".
 std::string loadTimeText(double ms);
 
+// A bootable disc: SYSTEM.CNF, the engine as PSX.EXE, and each scene's files
+// under SCENE<i>/ as SCENE_<i>.LDG (when it has a loading screen), .VRM, .SPU,
+// .SPK (and .GEO when it streams), in the order psxsplash loads them,
+// where psxsplash's CD-ROM loader opens them; scene 0 is the one the game
+// starts in and Lua's Scene.Load(i) opens scene i. `engine` must be a
+// LOADER=cdrom build. The volume name is `disc.volume`, or `title` when that
+// is empty (letters, digits and _ kept, upper-cased, at most 31; PSXSPLASH
+// when nothing is left). `disc.licence` goes into sectors 0-15 (see
+// resolveLicence and writeDiscImage); a licence that cannot be read or has a
+// bad size is an error. `disc.tracks` become CD-DA tracks 2 and up (paths
+// relative to `projectRoot`, decoded with loadCdAudio); one that is missing
+// or cannot be decoded is the error "music track <N>: <why>" (N its disc
+// track number, 2 for the first). A disc longer than 74 minutes (333000
+// sectors) is a warning naming its length in minutes; longer than 80
+// (360000) is an error and no image is written. Errors land in the result;
+// with more than one scene,
+// each error and warning starts with its scene's index and, when `names`
+// gives one, its name ("scene 1 (cave): ..."). No image is written when any
+// scene fails. The stats are scene 0's. Every scene packs VRAM with `vram`
+// (the app passes the project's vram.json, see readVramSettings); the cli
+// passes the project's disc.json as `disc`. `loads` holds each scene's
+// estimateSceneLoad when the disc was written.
 struct DiscResult {
     ExportResult exported;
     DiscInfo disc;
