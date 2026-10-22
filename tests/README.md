@@ -721,7 +721,7 @@ opens with it off and a click turns it on. Needs a display.
 a trigger box Zone and a looping clip Sound. The scene's picker (`@scene.reverb`, items
 `@scene.reverb/<label>`) and CD music switch (`@scene.cdreverb`), a Room's (`@obj.rreverb`) and a
 trigger zone's (`@obj.treverb`) pickers and the clip's send switch (`@obj.areverb`) each save by
-name only when not the default and print their `scene: reverb`, `room:`, `trigger:` or `audio:` line;
+name only when not the default and print their `reverb: scene`, `reverb: room`, `reverb: trigger` or `reverb: send` line;
 the status bar's `statusbar: spu reverb <preset> <bytes> clips <end>` line names the largest preset and
 the SPU meter adds its work area to the clips. One Ctrl+Z undoes a pick. An optional second argument
 keeps the screenshot of the Room's inspector. Needs a display.

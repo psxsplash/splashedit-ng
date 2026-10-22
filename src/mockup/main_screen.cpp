@@ -6813,7 +6813,7 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
         nameRect("scene.cdreverb", cdSw);
         if (toggle("cdreverbon", cdSw, set.cdReverb))
             doc.editSettings([](splash::SceneSettings& s) { s.cdReverb = !s.cdReverb; });
-        scriptLine("scene.reverb", std::string("scene: reverb ") + reverbKey(set.reverb) + " cd " + (set.cdReverb ? "on" : "off"));
+        scriptLine("scene.reverb", std::string("reverb: scene ") + reverbKey(set.reverb) + " cd " + (set.cdReverb ? "on" : "off"));
         const ImRect gteRow = row("lgte", "GTE scaling",
                                   "Editor units per PS1 unit. Positions export as value / scaling in 16-bit 4.12 fixed point, so "
                                   "everything must sit within 8 x scaling of the origin. Smaller is finer, larger reaches farther.");
@@ -9650,7 +9650,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
             "and the scene's. None: the box only runs its script.");
         const int zp = reverbCombo("obj.treverb", row("ltreverb", "Reverb", zoneTip.c_str()), tr.reverb, "None");
         if (zp >= 0) doc.edit(path, [zp](splash::Object& ob) { ob.trigger->reverb = zp; });
-        report("triggerreverb", "trigger: " + o->name + " reverb " + reverbKey(tr.reverb));
+        report("triggerreverb", "reverb: trigger " + o->name + " " + reverbKey(tr.reverb));
         sectionEnd(top);
     }
     // Scripted checks name each axis of a vec3Field: <name>.x/.y/.z.
@@ -9679,7 +9679,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
             "zone with a preset wins inside it.");
         const int rvp = reverbCombo("obj.rreverb", row("lrreverb", "Reverb", roomTip.c_str()), rm.reverb, "Scene's");
         if (rvp >= 0) doc.edit(path, [rvp](splash::Object& ob) { ob.room->reverb = rvp; });
-        report("roomreverb", "room: " + o->name + " reverb " + reverbKey(rm.reverb));
+        report("roomreverb", "reverb: room " + o->name + " " + reverbKey(rm.reverb));
         // What the last live export made of this room. Drawn from the first
         // frame, so nothing below moves when the export lands.
         const std::optional<splash::ExportResult>& res = st.live.result();
@@ -10003,7 +10003,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
         toggleRow("areverb", "Reverb send", "The clip goes through the room's or zone's reverb. Off for sounds that should stay "
                   "dry anywhere: menu blips, music stingers.",
                   a.reverbSend, [](splash::Object& ob) { ob.audio->reverbSend = !ob.audio->reverbSend; });
-        report("audioreverb", "audio: " + o->name + " reverb send " + (a.reverbSend ? "on" : "off"));
+        report("audioreverb", "reverb: send " + o->name + " " + (a.reverbSend ? "on" : "off"));
         sectionEnd(top);
     }
     if (o->skin) {

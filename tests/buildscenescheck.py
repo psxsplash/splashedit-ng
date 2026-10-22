@@ -43,7 +43,10 @@ def run(args):
 
 
 def click(name):
-    return ['--click', '@' + name, '--wait', '3']
+    # The Build section sits low in the scene inspector: scroll a control into
+    # view first (a dropdown item is reached through its opened menu).
+    scroll = [] if '/' in name else ['--scroll-to', '@' + name]
+    return scroll + ['--click', '@' + name, '--wait', '3']
 
 
 def add(item):

@@ -104,7 +104,7 @@ SAVE_MID = ['--key', 'ctrl+s', '--wait', '10', '--copy-file', '{scene}@{snap}', 
 # 1. Nothing set: no keys, the scene reports off, no work area on the meter.
 s, out = run(W(15))
 check('save alone writes no reverb keys', 'reverb' not in json.dumps(s) and 'cdReverb' not in s['settings'], s['settings'])
-check('the scene reports reverb off, CD off', last(out, r'^scene: reverb ') == 'scene: reverb off cd off', out[-20:])
+check('the scene reports reverb off, CD off', last(out, r'^reverb: scene ') == 'reverb: scene off cd off', out[-20:])
 m = spu(out)
 check('no reverb: no work area, the meter is the clips alone', m and m[0] == 'off' and m[1] == 0 and m[3] == m[2], m)
 clips = m[2] if m else 0
@@ -113,7 +113,7 @@ clips = m[2] if m else 0
 s, out = run(pick('scene.reverb', 'Hall') + ['--scroll-to', '@scene.cdreverb'] + W(3) + ['--click', '@scene.cdreverb'] + W(15))
 check('picking Hall saves "reverb": "hall"', s['settings'].get('reverb') == 'hall', s['settings'])
 check('the CD switch saves "cdReverb": true', s['settings'].get('cdReverb') is True, s['settings'])
-check('the scene reports hall, CD on', last(out, r'^scene: reverb ') == 'scene: reverb hall cd on', out[-20:])
+check('the scene reports hall, CD on', last(out, r'^reverb: scene ') == 'reverb: scene hall cd on', out[-20:])
 m = spu(out)
 check('the meter adds the Hall work area above the clips', m and m[0] == 'hall' and m[1] == WORK['hall'] and m[2] == clips and
       m[3] == clips + WORK['hall'], m)
@@ -124,7 +124,7 @@ check('the Room is selected', 'selected: East' in out, [l for l in out if l.star
 check('picking Space echo saves the room\'s "reverb": "spaceEcho"', (comp(s, 'East', 'room') or {}).get('reverb') == 'spaceEcho',
       comp(s, 'East', 'room'))
 check('West keeps no reverb key', 'reverb' not in (comp(s, 'West', 'room') or {}), comp(s, 'West', 'room'))
-check('the room reports it', last(out, r'^room: East reverb ') == 'room: East reverb spaceEcho', out[-20:])
+check('the room reports it', last(out, r'^reverb: room East ') == 'reverb: room East spaceEcho', out[-20:])
 m = spu(out)
 check('the meter takes the Space echo work area', m and m[0] == 'spaceEcho' and m[3] == clips + WORK['spaceEcho'], m)
 shot_room = last_shot
@@ -133,7 +133,7 @@ shot_room = last_shot
 s, out = run(pick('obj.treverb', 'Delay') + W(15), select='Zone')
 check('picking Delay saves the trigger\'s "reverb": "delay"', (comp(s, 'Zone', 'trigger') or {}).get('reverb') == 'delay',
       comp(s, 'Zone', 'trigger'))
-check('the trigger reports it', last(out, r'^trigger: Zone reverb ') == 'trigger: Zone reverb delay', out[-20:])
+check('the trigger reports it', last(out, r'^reverb: trigger Zone ') == 'reverb: trigger Zone delay', out[-20:])
 m = spu(out)
 check('the meter takes the Delay work area', m and m[0] == 'delay' and m[3] == clips + WORK['delay'], m)
 
@@ -141,7 +141,7 @@ check('the meter takes the Delay work area', m and m[0] == 'delay' and m[3] == c
 s, out = run(['--scroll-to', '@obj.areverb'] + W(3) + ['--click', '@obj.areverb'] + W(5), select='Sound')
 check('the send switch saves "reverbSend": false', (comp(s, 'Sound', 'audio') or {}).get('reverbSend') is False,
       comp(s, 'Sound', 'audio'))
-check('the clip reports its send off', last(out, r'^audio: Sound reverb send ') == 'audio: Sound reverb send off', out[-20:])
+check('the clip reports its send off', last(out, r'^reverb: send Sound ') == 'reverb: send Sound off', out[-20:])
 s, out = run(['--scroll-to', '@obj.areverb'] + W(3) + ['--click', '@obj.areverb'] + W(3) + ['--click', '@obj.areverb'] + W(5),
              select='Sound')
 check('a second click turns it back on and the key is gone', 'reverbSend' not in (comp(s, 'Sound', 'audio') or {}),
