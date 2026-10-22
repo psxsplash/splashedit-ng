@@ -688,13 +688,16 @@ DiscResult exportDisc(const std::vector<const Scene*>& scenes, const fs::path& p
             if (!one.errors.empty()) continue;
             const std::string dir = "SCENE" + std::to_string(i) + "/SCENE_" + std::to_string(i);
             fs::path part = spk;
-            files.push_back({dir + ".SPK", readFile(spk)});
-            files.push_back({dir + ".VRM", readFile(part.replace_extension(".vram"))});
-            files.push_back({dir + ".SPU", readFile(part.replace_extension(".spu"))});
-            // World streaming reads its regions from here while the game runs.
-            if (fs::exists(part.replace_extension(".geo"))) files.push_back({dir + ".GEO", readFile(part)});
+            // File data goes on the disc in the order psxsplash's SceneManager::loadScene reads it:
+            // the loading screen first (drawn while the rest loads), then VRAM, SPU, the
+            // splashpack, and the streamed geometry (opened last, read during play).
             // The loading screen psxsplash draws while this scene loads.
             if (fs::exists(part.replace_extension(".loading"))) files.push_back({dir + ".LDG", readFile(part)});
+            files.push_back({dir + ".VRM", readFile(part.replace_extension(".vram"))});
+            files.push_back({dir + ".SPU", readFile(part.replace_extension(".spu"))});
+            files.push_back({dir + ".SPK", readFile(spk)});
+            // World streaming reads its regions from here while the game runs.
+            if (fs::exists(part.replace_extension(".geo"))) files.push_back({dir + ".GEO", readFile(part)});
         }
         if (r.exported.errors.empty()) {
             // The length check needs the layout; write, then drop an over-long image.
