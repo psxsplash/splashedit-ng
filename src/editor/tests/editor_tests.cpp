@@ -11908,6 +11908,19 @@ void testDecalClip() {
     for (const auto& p : b.pieces)
         for (const auto& c : p.c) col &= dnear(c.color.x, 0.5f) && dnear(c.color.y, 0.125f) && dnear(c.color.z, 0.5f);
     CHECK(col);
+    // Placement on a drop: +Z out of the surface; on a wall the top up, on a
+    // floor the top away from the viewer.
+    auto same = [](Vec3 a, Vec3 b) { return dnear(a.x, b.x, 1e-4f) && dnear(a.y, b.y, 1e-4f) && dnear(a.z, b.z, 1e-4f); };
+    splash::Quat q = splash::decalPlacement({0, 1, 0}, splash::normalized(Vec3{0, -0.5f, 1}));
+    CHECK(same(splash::rotate(q, {0, 0, 1}), {0, 1, 0}) && same(splash::rotate(q, {0, 1, 0}), {0, 0, 1}));
+    q = splash::decalPlacement({0, 0, -1}, {0, 0, 1});
+    CHECK(same(splash::rotate(q, {0, 0, 1}), {0, 0, -1}) && same(splash::rotate(q, {0, 1, 0}), {0, 1, 0}) &&
+          same(splash::rotate(q, {1, 0, 0}), {-1, 0, 0}));
+    q = splash::decalPlacement(splash::normalized(Vec3{1, 0.2f, -0.3f}), {0, 0, 1});
+    CHECK(same(splash::rotate(q, {0, 0, 1}), splash::normalized(Vec3{1, 0.2f, -0.3f})) && splash::rotate(q, {0, 1, 0}).y > 0.9f &&
+          dnear(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w, 1.0f));
+    // A decal placed that way on a floor covers it.
+    CHECK(dnear(totalArea(splash::buildDecal(d, {0, 0, 0}, splash::decalPlacement({0, 1, 0}, {0, 0, 1}), {1, 1, 1}, {quad})), 1.0f));
     // Exclusions.
     splash::Object o;
     CHECK(splash::decalExclusion(o).empty());
