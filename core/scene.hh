@@ -463,15 +463,19 @@ enum class TrackType : uint8_t {
     CameraPosition = 0, CameraRotation = 1, ObjectPosition = 2, ObjectRotation = 3, ObjectActive = 4,
     UICanvasVisible = 5, UIElementVisible = 6, UIProgress = 7, UIPosition = 8, UIColor = 9, CameraH = 10,
     RumbleSmall = 11, RumbleLarge = 12, ObjectUVOffset = 13, LightPosition = 14, LightColor = 15,
-    LightIntensity = 16, LightRadius = 17, LightEnabled = 18
+    LightIntensity = 16, LightRadius = 17, LightEnabled = 18,
+    // Screen effects, cutscenes only, no target.
+    ScreenFade = 19, ScreenFadeColor = 20, Letterbox = 21, Shake = 22, Trail = 23
 };
+inline bool isScreenTrack(TrackType t) { return int(t) >= 19 && int(t) <= 23; }
 enum class Interp : uint8_t { Linear = 0, Step = 1, EaseIn = 2, EaseOut = 3, EaseInOut = 4 };
 
 // A key. `value` is in the track's own units: world units for positions,
 // degrees for rotations, 0/1 for on/off tracks, 0..100 for progress, pixels
 // for UI position and UV offset, 0..1 colour, raw projection H, 0..255 rumble;
 // light tracks: world units for position and radius, 0..1 colour, the light's
-// intensity, 0/1 enabled.
+// intensity, 0/1 enabled; screen tracks: fade amount 0..1, fade colour 0..1,
+// letterbox bar height and shake amplitude in pixels, trail 0/1.
 struct Keyframe {
     int frame = 0;  // 0..8191
     std::array<float, 3> value{0, 0, 0};

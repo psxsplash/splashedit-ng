@@ -176,6 +176,8 @@ struct RuntimeLight {
     const LightComponent* light;
 };
 constexpr size_t kMaxSceneLights = 16;   // MAX_SCENE_LIGHTS in psxsplash lightmath.hh
+// psxsplash screenfx.cpp kMaskY: its dither masks (32 words) and CLUT (16) at x 960..1007, rows 456-463.
+constexpr int kScreenFxMaskY = 456;
 constexpr size_t kMaxLightsPerMesh = 4;  // MAX_LIGHTS_PER_MESH
 constexpr size_t kSpuStart = 0x1010;      // SPU_RAM_START in psxsplash audiomanager.hh
 
@@ -834,11 +836,12 @@ void prepareUi(const Scene& scene, const std::vector<UICanvas>& canvases, const 
         res.errors.push_back(std::to_string(scene.fonts.size()) + " UI fonts, psxsplash loads at most " +
                              std::to_string(kUiMaxFonts));
     // Fonts go in the column at x = 960 that the VRAM packer keeps free, above
-    // the system font (960, 464, 48 rows). A sheet must not cross a texture
-    // page, so the column is two bins: rows 0-255 and 256-463.
+    // psxsplash's own: the screen effects' dither masks (960..1007, rows
+    // 456-463) and the system font (960, 464, 48 rows). A sheet must not cross
+    // a texture page, so the column is two bins: rows 0-255 and 256-455.
     struct Bin {
         int y, end;
-    } bins[2] = {{0, 256}, {256, 464}};
+    } bins[2] = {{0, 256}, {256, kScreenFxMaskY}};
     auto clash = [&](int x, int y, int w, int h) {
         auto hit = [&](int ax, int ay, int aw, int ah) { return ax < x + w && x < ax + aw && ay < y + h && y < ay + ah; };
         for (const auto& a : vs.prohibited)
@@ -1234,6 +1237,8 @@ void writeSequences(BinWriter& w, size_t tableOffsetPos, const std::vector<Seque
                           t.type == TrackType::CameraH;
             if (animation && camera)
                 res.errors.push_back(where + ": camera tracks only play in cutscenes");
+            if (animation && isScreenTrack(t.type))
+                res.errors.push_back(where + ": screen effect tracks only play in cutscenes");
             bool object = (ty >= 2 && ty <= 4) || t.type == TrackType::ObjectUVOffset;
             if (object && std::find(objectNames.begin(), objectNames.end(), truncateUtf16(t.target, 24)) == objectNames.end()) {
                 if (offObjectNames.count(truncateUtf16(t.target, 24)))
@@ -1392,6 +1397,21 @@ void writeSequences(BinWriter& w, size_t tableOffsetPos, const std::vector<Seque
                     o[0] = std::max<int16_t>(0, coord(v[0]));
                     break;
                 case TrackType::LightEnabled:
+                    o[0] = v[0] > 0.5f ? 1 : 0;
+                    break;
+                case TrackType::ScreenFade:
+                    o[0] = byteOf(v[0] * 255.f, 0, 255);
+                    break;
+                case TrackType::ScreenFadeColor:
+                    for (int i = 0; i < 3; i++) o[i] = byteOf(v[size_t(i)] * 255.f, 0, 255);
+                    break;
+                case TrackType::Letterbox:
+                    o[0] = byteOf(v[0], 0, vs.resolutionY / 2);
+                    break;
+                case TrackType::Shake:
+                    o[0] = byteOf(v[0], 0, 64);
+                    break;
+                case TrackType::Trail:
                     o[0] = v[0] > 0.5f ? 1 : 0;
                     break;
                 }
@@ -2231,6 +2251,7 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
         else
             map.push_back({K::Framebuffer, vs.resolutionX, 0, vs.resolutionX, vs.resolutionY, "Framebuffer 1 (320x240)"});
         map.push_back({K::Reserved, 960, 0, 64, kVramHeight, "Font column (x 960, reserved)"});
+        map.push_back({K::Reserved, 960, kScreenFxMaskY, 48, 8, "Screen effect dither masks (psxsplash)"});
         for (size_t i = 0; i < vs.prohibited.size(); i++) {
             const auto& a = vs.prohibited[i];
             map.push_back({K::Prohibited, a.x, a.y, a.w, a.h, "Prohibited area " + std::to_string(i + 1)});

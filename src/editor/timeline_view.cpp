@@ -30,6 +30,7 @@ ImU32 trackColor(TrackType t) {
     const int v = int(t);
     if (t == TrackType::CameraPosition || t == TrackType::CameraRotation || t == TrackType::CameraH) return rgb(0x5ccfe0);
     if (v >= 5 && v <= 9) return rgb(0xd98ad2);
+    if (splash::isScreenTrack(t)) return rgb(0xe8a33c);
     if (v >= 14) return color::warn;
     if (t == TrackType::RumbleSmall || t == TrackType::RumbleLarge) return color::textDim;
     return color::good;
@@ -39,6 +40,12 @@ ImU32 withAlpha(ImU32 c, int a) { return (c & 0x00ffffffu) | (ImU32(a) << IM_COL
 
 std::string fmtValue(TrackType t, const KeyValue& v) {
     if (editor::isDiscrete(t)) return v[0] > 0.5f ? "on" : "off";
+    if (t == TrackType::ScreenFadeColor) {
+        char c[48];
+        std::snprintf(c, sizeof c, "#%02X%02X%02X", int(std::clamp(v[0], 0.f, 1.f) * 255 + 0.5f),
+                      int(std::clamp(v[1], 0.f, 1.f) * 255 + 0.5f), int(std::clamp(v[2], 0.f, 1.f) * 255 + 0.5f));
+        return c;
+    }
     char buf[96];
     const int n = editor::valueCount(t);
     if (n == 1)
@@ -602,14 +609,18 @@ void TimelinePanel::addTrackPopup(editor::Document& doc) {
             if (i >= 0) m_scrollY = std::max(0.0f, (i + 1) * kLaneH - 4 * kLaneH);
         };
         int lastGroup = -1;
-        for (int ti = 0; ti <= int(TrackType::LightEnabled); ++ti) {
+        for (int ti = 0; ti <= int(TrackType::Trail); ++ti) {
             const TrackType t = TrackType(ti);
             if (!editor::allowedIn(m_ref.kind, t)) continue;
-            const int group = !editor::needsTarget(t) ? (ti >= 11 ? 4 : 0) : ti >= 14 ? 3 : (ti >= 5 && ti <= 9) ? 2 : 1;
+            const int group = splash::isScreenTrack(t) ? 5
+                              : !editor::needsTarget(t) ? (ti >= 11 ? 4 : 0)
+                              : ti >= 14 ? 3 : (ti >= 5 && ti <= 9) ? 2 : 1;
             if (lastGroup >= 0 && group != lastGroup) ImGui::Separator();
             lastGroup = group;
             if (!editor::needsTarget(t)) {
                 if (ImGui::MenuItem(editor::trackTypeName(t), nullptr, false, !has(t, ""))) add(t, "");
+                nameRect(std::string("timeline.addtrack/") + editor::trackTypeName(t),
+                         ImRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax()));
                 continue;
             }
             // What the export can address: objects with a mesh, runtime point lights, canvases, elements.
@@ -747,7 +758,9 @@ void TimelinePanel::lanes(ImDrawList* dl, ImRect labels, ImRect body, editor::Do
         dl->AddLine(ImVec2(row.Min.x, row.Max.y - 0.5f), ImVec2(row.Max.x, row.Max.y - 0.5f), color::border);
         const ImU32 tc = trackColor(t.type);
         dl->AddRectFilled(ImVec2(row.Min.x + 6, y + 8), ImVec2(row.Min.x + 9, y + kLaneH - 8), tc, 2);
-        const std::string who = t.target.empty() ? (t.type == TrackType::RumbleSmall || t.type == TrackType::RumbleLarge ? "Rumble" : "Camera")
+        const std::string who = t.target.empty() ? (t.type == TrackType::RumbleSmall || t.type == TrackType::RumbleLarge ? "Rumble"
+                                                    : splash::isScreenTrack(t.type)                                       ? "Screen"
+                                                                                                                         : "Camera")
                                                  : t.target;
         const float tx = row.Min.x + 18;
         ImGui::PushClipRect(row.Min, ImVec2(row.Max.x - 54, row.Max.y), true);
@@ -1265,7 +1278,8 @@ void TimelinePanel::keyRow(ImDrawList* dl, ImRect r, editor::Document& doc) {
         text(dl, ImVec2(x, cy - 9), f.regular, type::label, color::textFaint, "On/off tracks hold each key until the next.");
     } else {
         const int nv = editor::valueCount(t.type);
-        const bool rgbTrack = t.type == TrackType::UIColor || t.type == TrackType::LightColor;
+        const bool rgbTrack =
+            t.type == TrackType::UIColor || t.type == TrackType::LightColor || t.type == TrackType::ScreenFadeColor;
         static const char* xyz[3] = {"X", "Y", "Z"};
         static const char* rgbl[3] = {"R", "G", "B"};
         const ImU32 axes[3] = {color::axisX, color::axisY, color::axisZ};

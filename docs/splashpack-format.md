@@ -255,6 +255,11 @@ Caps: 16 cutscenes, 8 tracks, 64 keyframes/track, 64 audio events, 16 skin-anim 
 | 16 | LightIntensity | `Clamp(RoundToInt(x*4096),0,32767)`, 0, 0 |
 | 17 | LightRadius | `Max(0, ConvertCoordinateToPSX(x,gte))`, 0, 0 |
 | 18 | LightEnabled | `x>0.5?1:0`, 0, 0 |
+| 19 | ScreenFade (cutscenes only) | `Clamp(RoundToInt(x*255),0,255)`, 0, 0 (fade amount; 255 = the fade colour) |
+| 20 | ScreenFadeColor (cutscenes only, step) | `Clamp(RoundToInt(c*255),0,255)` x3 |
+| 21 | Letterbox (cutscenes only) | `Clamp(RoundToInt(x),0,resolutionY/2)`, 0, 0 (bar height, pixels) |
+| 22 | Shake (cutscenes only) | `Clamp(RoundToInt(x),0,64)`, 0, 0 (amplitude, pixels) |
+| 23 | Trail (cutscenes only, step) | `x>0.5?1:0`, 0, 0 |
 
 InterpMode ids: Linear 0, Step 1, EaseIn 2, EaseOut 3, EaseInOut 4.
 - target-name strings (NUL-terminated UTF-8, <=24 chars) per track with non-empty name. Camera/vibration/light tracks have no name; UI element tracks use `"canvas/element"`, UI tracks `canvas`, others `ObjectName`.
@@ -263,7 +268,11 @@ InterpMode ids: Linear 0, Step 1, EaseIn 2, EaseOut 3, EaseInOut 4.
 - cutscene name (UTF-8, NUL-terminated, <=24), then all offsets are backfilled.
 Reader: R:splashpack.cpp cutscene loop; `CutsceneKeyframe` 8 B, `CutsceneAudioEvent` 8 B, `CutsceneSkinAnimEvent` 8 B (static_asserts in R:cutscene.hh).
 
-This exporter (`core/splashpack.cpp`, `writeSequences`) writes track types 0-18 with the same
+Screen tracks (19-23) have no target name. The runtime holds their last values when the cutscene
+ends by itself and puts back what the cutscene drove when `Cutscene.Stop` stops it (R:cutscene.cpp).
+An animation with a screen track is an export error.
+
+This exporter (`core/splashpack.cpp`, `writeSequences`) writes track types 0-23 with the same
 encodings, except: keys and audio events are sorted stably, so keys on the same frame keep their
 file order; `uiColor` and `lightColor` take 0..1; `uiPosition` keys get the same anchor rounding
 correction as the element (sec. 2.18); a position or radius key that clamps to int16 is a warning,
@@ -320,8 +329,9 @@ Type data: Image `{u8 texpageX, texpageY; u16 clutX, clutY; u8 u0,v0,u1,v1; u8 b
 Strings: for each element in order: text (only Text type and only if non-empty) then name (always, even empty); each NUL-terminated UTF-8; `nameOffset`/`textOffset` backfilled. The element's layout is baked by `PSXUILayout.Bake` (sec. 3).
 
 This exporter (`core/splashpack.cpp`, `writeUi`) writes the same records with these differences:
-- Fonts are stacked in the x = 960 column in scene order, first fit in rows 0-255 then 256-463
-  (the system font is at 960,464), each inside one texture page, so 3 fonts fit where 2.4.0 placed
+- Fonts are stacked in the x = 960 column in scene order, first fit in rows 0-255 then 256-455
+  (psxsplash keeps rows 456-463 at x 960..1007 for the screen effects' dither masks and their CLUT,
+  and the system font is at 960,464), each inside one texture page, so 3 fonts fit where 2.4.0 placed
   at most 2. Glyph cells can be any width, not only 4/8/16/32 (the reader only needs
   `256 / glyphW` per row). Sheets come from `core/font.cpp`: TrueType glyphs are rendered at the
   subpixel offset that leaves the fewest half-covered pixels, then thresholded at 96/255.

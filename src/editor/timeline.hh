@@ -90,6 +90,8 @@ const char* trackTypeName(splash::TrackType t);
 int valueCount(splash::TrackType t);
 // The runtime holds the last key's value (on/off tracks) instead of interpolating.
 bool isDiscrete(splash::TrackType t);
+// Held from key to key (isDiscrete, and the fade colour: three values, stepped).
+bool isStepped(splash::TrackType t);
 // Camera and rumble tracks drive no named target.
 bool needsTarget(splash::TrackType t);
 // Animations have no camera tracks.
@@ -284,13 +286,26 @@ struct LightPose {
     std::optional<bool> enabled;
     bool operator==(const LightPose&) const = default;
 };
+// The screen effect tracks: what the console draws over the picture.
+struct ScreenPose {
+    std::optional<float> fade;                       // 0..1 of the fade colour
+    std::optional<std::array<float, 3>> fadeColor;   // 0..1
+    std::optional<float> letterbox;                  // bar height, screen pixels
+    std::optional<float> shake;                      // amplitude, screen pixels
+    std::optional<bool> trail;
+    bool empty() const { return !fade && !fadeColor && !letterbox && !shake && !trail; }
+    bool operator==(const ScreenPose&) const = default;
+};
 struct Preview {
     std::map<std::string, ObjectPose> objects;  // by track target (object name)
     std::map<std::string, LightPose> lights;    // by track target (the light's object name)
     std::optional<splash::Vec3> cameraPosition;  // world units
     std::optional<splash::Vec3> cameraRotation;  // degrees
     std::optional<float> cameraH;                // projection H, 1..1024
-    bool empty() const { return objects.empty() && lights.empty() && !cameraPosition && !cameraRotation && !cameraH; }
+    ScreenPose screen;
+    bool empty() const {
+        return objects.empty() && lights.empty() && !cameraPosition && !cameraRotation && !cameraH && screen.empty();
+    }
     bool operator==(const Preview&) const = default;
 };
 // Object position, rotation, active and UV offset tracks, light tracks and

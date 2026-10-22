@@ -78,12 +78,13 @@ check('text', elements['title']['text'] == 'SplashEdit NG: UI', elements['title'
 check('progress', tuple(elements['hp']['td'][:4]) == (76, 26, 26, 60), tuple(elements['hp']['td'][:4]))
 
 # Font sheets: inside the x=960 column, one texture page each, not
-# overlapping each other or the system font (960, 464, 48 rows).
+# overlapping each other, psxsplash's screen effect dither masks (rows 456-463)
+# or the system font (960, 464, 48 rows).
 spans = [(f['vy'], f['vy'] + f['th']) for f in fonts]
 check('fonts in column 960', all(f['vx'] == 960 for f in fonts))
 check('fonts inside a page', all(a // 256 == (b - 1) // 256 for a, b in spans), spans)
-check('fonts clear of each other and the system font',
-      all(b <= 464 for a, b in spans) and all(s[1] <= t[0] or t[1] <= s[0] for i, s in enumerate(spans)
+check('fonts clear of each other, the dither masks and the system font',
+      all(b <= 456 for a, b in spans) and all(s[1] <= t[0] or t[1] <= s[0] for i, s in enumerate(spans)
                                                for t in spans[i + 1:]), spans)
 v = open(out[:-len('splashpack')] + 'vram', 'rb').read()
 na, nc, nf = struct.unpack_from('<HHB', v, 2)

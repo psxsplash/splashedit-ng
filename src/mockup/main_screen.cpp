@@ -4859,6 +4859,43 @@ static void previewCamera(ImDrawList* dl, viewport::Ps1View& view, ImVec2 mn, Im
     ImGui::PopID();
 }
 
+// The screen effect tracks at the scrub head, over the Scene view as the
+// console would draw them over its picture: the fade colour at the fade's
+// share, the letterbox bars (their pixels of the 240 lines, scaled to the
+// view's height), and a caption naming shake and trail, which a still frame
+// cannot show. Prints "screenfx: preview ..." when what it shows changes.
+static void previewScreen(ImDrawList* dl, ImVec2 mn, ImVec2 sz, const editor::Preview& p) {
+    static std::string reported;
+    const editor::ScreenPose& s = p.screen;
+    if (s.empty()) {
+        if (!reported.empty()) std::printf("screenfx: preview none\n");
+        reported.clear();
+        return;
+    }
+    nameRect("screenfx.preview", ImRect(mn, ImVec2(mn.x + sz.x, mn.y + sz.y)));  // the view it covers, for tests
+    const std::array<float, 3> c = s.fadeColor.value_or(std::array<float, 3>{0, 0, 0});
+    auto byte = [](float v) { return int(std::clamp(v, 0.0f, 1.0f) * 255.0f + 0.5f); };
+    const float fade = std::clamp(s.fade.value_or(0.0f), 0.0f, 1.0f);
+    if (fade > 0)
+        dl->AddRectFilled(mn, ImVec2(mn.x + sz.x, mn.y + sz.y), IM_COL32(byte(c[0]), byte(c[1]), byte(c[2]), byte(fade)));
+    const float bar = std::clamp(s.letterbox.value_or(0.0f), 0.0f, 120.0f) * sz.y / 240.0f;
+    if (bar > 0) {
+        dl->AddRectFilled(mn, ImVec2(mn.x + sz.x, mn.y + bar), IM_COL32(0, 0, 0, 255));
+        dl->AddRectFilled(ImVec2(mn.x, mn.y + sz.y - bar), ImVec2(mn.x + sz.x, mn.y + sz.y), IM_COL32(0, 0, 0, 255));
+    }
+    char line[160];
+    std::snprintf(line, sizeof line, "fade %d%% #%02X%02X%02X letterbox %d shake %d trail %s", int(fade * 100 + 0.5f),
+                  byte(c[0]), byte(c[1]), byte(c[2]), int(std::lround(s.letterbox.value_or(0.0f))),
+                  int(std::lround(s.shake.value_or(0.0f))), s.trail.value_or(false) ? "on" : "off");
+    const ImVec2 at(mn.x + 8, mn.y + sz.y - bar - 22);
+    const float lw = ImGui::CalcTextSize("Screen  ").x;
+    dl->AddRectFilled(ImVec2(at.x - 4, at.y - 2), ImVec2(at.x + lw + ImGui::CalcTextSize(line).x + 4, at.y + 18),
+                      IM_COL32(0, 0, 0, 170), 3);
+    dl->AddText(at, rgb(0xe8a33c), "Screen");
+    dl->AddText(ImVec2(at.x + lw, at.y), rgb(0xffffff), line);
+    if (reported != line) std::printf("screenfx: preview %s\n", (reported = line).c_str());
+}
+
 constexpr ImU32 kNavPortal = rgb(0xff6650);  // nav portal edges, apart from Room portals' yellow
 static ImU32 overlayCol(ImU32 c, unsigned a) { return (c & 0x00ffffffu) | (a << IM_COL32_A_SHIFT); }
 
@@ -5491,6 +5528,7 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
         ImGui::PopID();
     }
     if (previewing) previewCamera(dl, view, mn, sz, view.preview());
+    if (previewing) previewScreen(dl, mn, sz, view.preview());
     dl->ChannelsMerge();
 
     viewportInput(st, r, doc, view, flats);

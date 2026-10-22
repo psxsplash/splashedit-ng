@@ -58,7 +58,11 @@ BlockScript parseBlocks(const std::string& json, const std::string& path);
 std::string saveBlocks(const BlockScript& script);
 
 enum class BlockKind { Hat, Statement, CBlock, Reporter, Boolean };
-enum class BlockField { None, Variable, Object, Button, Number, Text, Bool, Sound, Cutscene, Light, Key };
+// Color: "#RRGGBB", the block shows a swatch with a colour picker; the
+// generated Lua passes it as three 0-255 numbers.
+enum class BlockField { None, Variable, Object, Button, Number, Text, Bool, Sound, Cutscene, Light, Key, Color };
+// "#RRGGBB" (either case) -> r, g, b; false for anything else.
+bool parseBlockColor(std::string_view s, int& r, int& g, int& b);
 
 // Label templates (English, for the block editor): %f is the field, %1..%9
 // the inputs; '|' separates the label shown before each body after the
@@ -82,7 +86,7 @@ std::string_view hatCallback(std::string_view op);
 // Button names a Button field takes, in the order Input numbers them.
 const std::vector<std::string_view>& blockButtons();
 // The palette's sections, in order: Events (every hat), Control, Objects,
-// Sound and scenes, Variables, Operators, Input, Debug.
+// Sound and scenes, Variables, Operators, Input, Debug, Screen.
 const std::vector<std::string_view>& blockCategories();
 
 // Why name can't be a variable: not an identifier, a Lua keyword, an event

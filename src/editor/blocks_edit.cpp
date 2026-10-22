@@ -134,6 +134,7 @@ Block newBlock(std::string_view op) {
         case BlockField::Button: b.field = "CROSS"; break;
         case BlockField::Bool: b.field = "true"; break;
         case BlockField::Number: b.field = "0"; break;
+        case BlockField::Color: b.field = op == "flash" ? "#FFFFFF" : "#000000"; break;
         default: break;
     }
     auto num = [](const char* v) { return Block{"number", v, {}, {}}; };
@@ -144,6 +145,9 @@ Block newBlock(std::string_view op) {
         else if (op == "change_var" || op == "wait") b.args.push_back(num("1"));
         else if (op == "repeat") b.args.push_back(num("10"));
         else if (op == "random") b.args.push_back(num(i == 0 ? "1" : "10"));
+        else if (op == "fade_out" || op == "fade_in" || op == "flash") b.args.push_back(num("30"));
+        else if (op == "shake") b.args.push_back(num(i == 0 ? "8" : "15"));
+        else if (op == "letterbox") b.args.push_back(num(i == 0 ? "24" : "15"));
         else b.args.push_back(num("0"));
     }
     b.bodies.resize(size_t(spec->bodies));
@@ -205,6 +209,7 @@ const char* placeholder(BlockField f) {
         case BlockField::Cutscene: return "cutscene";
         case BlockField::Light: return "light";
         case BlockField::Key: return "name";
+        case BlockField::Color: return "colour";
         default: return "";
     }
 }
