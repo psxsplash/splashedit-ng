@@ -398,7 +398,9 @@ void testReverb() {
     CHECK(rooms == 2 && zones == 1 && sends == 1 && drys == 1);
     {
         std::string bad = text;
-        bad.replace(bad.find("\"hall\""), 6, "\"cave\"");
+        const size_t at = bad.find("\"hall\"");
+        CHECK(at != std::string::npos);
+        if (at != std::string::npos) bad.replace(at, 6, "\"cave\"");
         std::ofstream(dir / "bad.scene", std::ios::binary) << bad;
         bool threw = false;
         try { splash::loadScene(dir / "bad.scene"); } catch (const std::exception& e) {
