@@ -860,7 +860,9 @@ const std::initializer_list<std::pair<const char*, TrackType>> kTrackTypes = {
     {"rumbleLarge", TrackType::RumbleLarge},       {"objectUVOffset", TrackType::ObjectUVOffset},
     {"lightPosition", TrackType::LightPosition},   {"lightColor", TrackType::LightColor},
     {"lightIntensity", TrackType::LightIntensity}, {"lightRadius", TrackType::LightRadius},
-    {"lightEnabled", TrackType::LightEnabled}};
+    {"lightEnabled", TrackType::LightEnabled},     {"screenFade", TrackType::ScreenFade},
+    {"screenFadeColor", TrackType::ScreenFadeColor}, {"letterbox", TrackType::Letterbox},
+    {"shake", TrackType::Shake},                   {"trail", TrackType::Trail}};
 const std::initializer_list<std::pair<const char*, Interp>> kInterps = {
     {"linear", Interp::Linear}, {"step", Interp::Step}, {"easeIn", Interp::EaseIn},
     {"easeOut", Interp::EaseOut}, {"easeInOut", Interp::EaseInOut}};

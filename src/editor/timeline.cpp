@@ -45,6 +45,11 @@ const char* trackTypeName(TrackType t) {
         case TrackType::LightIntensity: return "Light Intensity";
         case TrackType::LightRadius: return "Light Radius";
         case TrackType::LightEnabled: return "Light Enabled";
+        case TrackType::ScreenFade: return "Screen Fade";
+        case TrackType::ScreenFadeColor: return "Fade Color";
+        case TrackType::Letterbox: return "Letterbox";
+        case TrackType::Shake: return "Screen Shake";
+        case TrackType::Trail: return "Motion Trail";
     }
     return "Track";
 }
@@ -71,6 +76,11 @@ static const char* propertyName(TrackType t) {
         case TrackType::LightIntensity: return "Intensity";
         case TrackType::LightRadius: return "Radius";
         case TrackType::LightEnabled: return "Enabled";
+        case TrackType::ScreenFade: return "Fade";
+        case TrackType::ScreenFadeColor: return "Fade color";
+        case TrackType::Letterbox: return "Letterbox";
+        case TrackType::Shake: return "Shake";
+        case TrackType::Trail: return "Trail";
     }
     return "Track";
 }
@@ -83,7 +93,8 @@ int valueCount(TrackType t) {
         case TrackType::ObjectRotation:
         case TrackType::UIColor:
         case TrackType::LightPosition:
-        case TrackType::LightColor: return 3;
+        case TrackType::LightColor:
+        case TrackType::ScreenFadeColor: return 3;
         case TrackType::UIPosition:
         case TrackType::ObjectUVOffset: return 2;
         default: return 1;
@@ -92,22 +103,28 @@ int valueCount(TrackType t) {
 
 bool isDiscrete(TrackType t) {
     return t == TrackType::ObjectActive || t == TrackType::UICanvasVisible || t == TrackType::UIElementVisible ||
-           t == TrackType::RumbleSmall || t == TrackType::LightEnabled;
+           t == TrackType::RumbleSmall || t == TrackType::LightEnabled || t == TrackType::Trail;
 }
+
+bool isStepped(TrackType t) { return isDiscrete(t) || t == TrackType::ScreenFadeColor; }
 
 bool needsTarget(TrackType t) {
     return !(t == TrackType::CameraPosition || t == TrackType::CameraRotation || t == TrackType::CameraH ||
-             t == TrackType::RumbleSmall || t == TrackType::RumbleLarge);
+             t == TrackType::RumbleSmall || t == TrackType::RumbleLarge || splash::isScreenTrack(t));
 }
 
 bool allowedIn(SeqKind kind, TrackType t) {
     if (kind == SeqKind::Cutscene) return true;
-    return !(t == TrackType::CameraPosition || t == TrackType::CameraRotation || t == TrackType::CameraH);
+    return !(t == TrackType::CameraPosition || t == TrackType::CameraRotation || t == TrackType::CameraH ||
+             splash::isScreenTrack(t));
 }
 
 std::string trackLabel(const CutsceneTrack& t) {
     std::string who = t.target;
-    if (who.empty()) who = (t.type == TrackType::RumbleSmall || t.type == TrackType::RumbleLarge) ? "Rumble" : "Camera";
+    if (who.empty())
+        who = (t.type == TrackType::RumbleSmall || t.type == TrackType::RumbleLarge) ? "Rumble"
+              : splash::isScreenTrack(t.type)                                       ? "Screen"
+                                                                                     : "Camera";
     return who + ": " + propertyName(t.type);
 }
 
@@ -1246,7 +1263,7 @@ KeyValue sample(const CutsceneTrack& track, float frame, const KeyValue& initial
     std::stable_sort(ks.begin(), ks.end(), [](const Keyframe* a, const Keyframe* b) { return a->frame < b->frame; });
     if (ks.empty()) return initial;  // the runtime leaves the target alone
 
-    if (isDiscrete(track.type)) {
+    if (isStepped(track.type)) {
         // Whole frames only: the runtime compares the integer frame.
         const int f = int(std::floor(frame));
         KeyValue v = f < ks[0]->frame ? initial : ks[0]->value;
@@ -1331,6 +1348,13 @@ FixedValue encodeValue(TrackType t, const KeyValue& v, float gte) {
         case TrackType::ObjectUVOffset: o = {byteOf(v[0], 0, 255), byteOf(v[1], 0, 255), 0}; break;
         case TrackType::LightIntensity: o[0] = byteOf(v[0] * 4096.f, 0, 32767); break;
         case TrackType::LightRadius: o[0] = std::max<int16_t>(0, coord(v[0])); break;
+        case TrackType::ScreenFade: o[0] = byteOf(v[0] * 255.f, 0, 255); break;
+        case TrackType::ScreenFadeColor:
+            for (int i = 0; i < 3; ++i) o[size_t(i)] = byteOf(v[size_t(i)] * 255.f, 0, 255);
+            break;
+        case TrackType::Letterbox: o[0] = byteOf(v[0], 0, 120); break;  // half the 240-line screen
+        case TrackType::Shake: o[0] = byteOf(v[0], 0, 64); break;
+        case TrackType::Trail: o[0] = v[0] > 0.5f ? 1 : 0; break;
     }
     return o;
 }
@@ -1344,7 +1368,9 @@ KeyValue decodeValue(TrackType t, const FixedValue& o, float gte) {
         case TrackType::CameraRotation:
         case TrackType::ObjectRotation: return {-o[0] * a, o[1] * a, -o[2] * a};
         case TrackType::UIColor:
-        case TrackType::LightColor: return {o[0] / 255.f, o[1] / 255.f, o[2] / 255.f};
+        case TrackType::LightColor:
+        case TrackType::ScreenFadeColor: return {o[0] / 255.f, o[1] / 255.f, o[2] / 255.f};
+        case TrackType::ScreenFade: return {o[0] / 255.f, 0, 0};
         case TrackType::LightIntensity: return {o[0] / 4096.f, 0, 0};
         case TrackType::LightRadius: return {o[0] * c, 0, 0};
         default: return {float(o[0]), float(o[1]), float(o[2])};
@@ -1353,7 +1379,7 @@ KeyValue decodeValue(TrackType t, const FixedValue& o, float gte) {
 
 FixedValue sampleFixedRaw(const CutsceneTrack& track, float frame, const KeyValue& initial, float gte) {
     const TrackType ty = track.type;
-    if (isDiscrete(ty)) return encodeValue(ty, sample(track, frame, initial), gte);
+    if (isStepped(ty)) return encodeValue(ty, sample(track, frame, initial), gte);
     struct K {
         int frame;
         FixedValue v;
@@ -1420,7 +1446,7 @@ FixedValue sampleFixedRaw(const CutsceneTrack& track, float frame, const KeyValu
 }
 
 KeyValue sampleFixed(const CutsceneTrack& track, float frame, const KeyValue& initial, float gte) {
-    if (isDiscrete(track.type)) return sample(track, frame, initial);
+    if (isStepped(track.type)) return sample(track, frame, initial);
     return decodeValue(track.type, sampleFixedRaw(track, frame, initial, gte), gte);
 }
 
@@ -1524,6 +1550,11 @@ Preview samplePreview(const Document& doc, SeqRef ref, float frame) {
             case TrackType::LightIntensity: p.lights[t.target].intensity = v[0]; break;
             case TrackType::LightRadius: p.lights[t.target].radius = v[0]; break;
             case TrackType::LightEnabled: p.lights[t.target].enabled = v[0] > 0.5f; break;
+            case TrackType::ScreenFade: p.screen.fade = v[0]; break;
+            case TrackType::ScreenFadeColor: p.screen.fadeColor = v; break;
+            case TrackType::Letterbox: p.screen.letterbox = v[0]; break;
+            case TrackType::Shake: p.screen.shake = v[0]; break;
+            case TrackType::Trail: p.screen.trail = v[0] > 0.5f; break;
             // UI and rumble: nothing in the Scene view to pose.
             default: break;
         }
