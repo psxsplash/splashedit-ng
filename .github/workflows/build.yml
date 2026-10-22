@@ -205,6 +205,9 @@ jobs:
       - name: Timeline preview
         if: runner.os == 'Linux'
         run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/timelinepreviewcheck.py build/splashedit
+      - name: Screen effect tracks (export, timeline, scrub preview)
+        if: runner.os == 'Linux'
+        run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/screenfxcheck.py build/splashedit
       - name: Frame debugger
         if: runner.os == 'Linux'
         run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/framedebugcheck.py build/splashedit
@@ -286,6 +289,9 @@ jobs:
       - name: Light, Persist and name blocks
         if: runner.os == 'Linux'
         run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/blockslightcheck.py build/splashedit
+      - name: Screen blocks and the colour picker
+        if: runner.os == 'Linux'
+        run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/blocksscreencheck.py build/splashedit
       - name: New blocks and New Lua, block help
         if: runner.os == 'Linux'
         run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/newscriptcheck.py build/splashedit

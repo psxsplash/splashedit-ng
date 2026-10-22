@@ -619,6 +619,8 @@ void TimelinePanel::addTrackPopup(editor::Document& doc) {
             lastGroup = group;
             if (!editor::needsTarget(t)) {
                 if (ImGui::MenuItem(editor::trackTypeName(t), nullptr, false, !has(t, ""))) add(t, "");
+                nameRect(std::string("timeline.addtrack/") + editor::trackTypeName(t),
+                         ImRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax()));
                 continue;
             }
             // What the export can address: objects with a mesh, runtime point lights, canvases, elements.
@@ -756,7 +758,9 @@ void TimelinePanel::lanes(ImDrawList* dl, ImRect labels, ImRect body, editor::Do
         dl->AddLine(ImVec2(row.Min.x, row.Max.y - 0.5f), ImVec2(row.Max.x, row.Max.y - 0.5f), color::border);
         const ImU32 tc = trackColor(t.type);
         dl->AddRectFilled(ImVec2(row.Min.x + 6, y + 8), ImVec2(row.Min.x + 9, y + kLaneH - 8), tc, 2);
-        const std::string who = t.target.empty() ? (t.type == TrackType::RumbleSmall || t.type == TrackType::RumbleLarge ? "Rumble" : "Camera")
+        const std::string who = t.target.empty() ? (t.type == TrackType::RumbleSmall || t.type == TrackType::RumbleLarge ? "Rumble"
+                                                    : splash::isScreenTrack(t.type)                                       ? "Screen"
+                                                                                                                         : "Camera")
                                                  : t.target;
         const float tx = row.Min.x + 18;
         ImGui::PushClipRect(row.Min, ImVec2(row.Max.x - 54, row.Max.y), true);

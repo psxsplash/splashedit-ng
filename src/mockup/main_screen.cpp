@@ -4872,6 +4872,7 @@ static void previewScreen(ImDrawList* dl, ImVec2 mn, ImVec2 sz, const editor::Pr
         reported.clear();
         return;
     }
+    nameRect("screenfx.preview", ImRect(mn, ImVec2(mn.x + sz.x, mn.y + sz.y)));  // the view it covers, for tests
     const std::array<float, 3> c = s.fadeColor.value_or(std::array<float, 3>{0, 0, 0});
     auto byte = [](float v) { return int(std::clamp(v, 0.0f, 1.0f) * 255.0f + 0.5f); };
     const float fade = std::clamp(s.fade.value_or(0.0f), 0.0f, 1.0f);
