@@ -115,6 +115,7 @@ void visitObjectPaths(SceneT& o, const std::string& names, std::vector<int>& pat
     if (o.script) fn("Script", names, path, o.script->lua);
     if (o.trigger) fn("Trigger script", names, path, o.trigger->lua);
     if (o.audio) fn("Audio clip", names, path, o.audio->clip);
+    if (o.decal) fn("Decal texture", names, path, o.decal->texture);
     for (size_t i = 0; i < o.children.size(); ++i) {
         path.push_back(static_cast<int>(i));
         visitObjectPaths(o.children[i], names + "/" + o.children[i].name, path, fn);

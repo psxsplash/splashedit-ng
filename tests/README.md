@@ -572,6 +572,20 @@ must write a v28 pack with one blob record at 153 darkness and size 0.75 m. Need
 
     python3 shadowcheck.py <splashedit> [screenshot.png]
 
+`decalcheck.py` checks decals in the editor on a copy of the courtyard example with a cyan X
+(`textures/xmark.png`, transparent around it) added. Dragging it from the Project panel onto the floor
+in the Scene view must print `decal: placed Decal xmark on Floor at X Y Z normal 0.00 1.00 0.00 size
+1.00x1.00`, select the new object, and show the Decal section (`obj.dtexture`, `obj.dwidth`,
+`obj.dheight`, `obj.ddepth`, `obj.dcol`, `obj.dcovers`) with `decal: Decal xmark texture xmark.png size
+1x1 depth 0.5 colour #FFFFFF covers N triangles on 1 objects pieces P | Floor N`. Typing 1.5 into Width
+must take, the scene view must draw cyan where it was dropped (none there before), Ctrl+S must save the
+component, and `splashpack-cli export` must write its pieces with Tri flag 0x8. The same drop then Ctrl+Z
+must leave no decal. A decal in mid-air must cover nothing and warn (`obj.dnothing`); one over a crate
+whose collider is dynamic must skip it (`| skipped Crate dynamic`, `obj.dexcluded.Crate`). Needs a
+display (CI runs it under `xvfb-run`).
+
+    python3 decalcheck.py <splashedit> [screenshot.png]
+
 `statusbudgetcheck.py` checks the status bar's Triangles meter and what the meters show when the
 live export fails. It builds a temp project with one flat grid mesh: 1700 triangles must print
 `statusbar: tris 1700/2000 warn` (the most triangles in view against the psxsplash docs' 2000 per

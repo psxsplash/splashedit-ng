@@ -69,6 +69,7 @@
 #include "ui/scrub.hh"
 #include "ui/colour_hex.hh"
 #include "budget.hh"
+#include "decal.hh"
 #include "disc.hh"
 #include "font.hh"
 #include "navregion.hh"
@@ -11806,6 +11807,250 @@ void testUvOffsetSlots() {
     CHECK(splash::uvOffsetMaterials(mc, 0).empty());
 }
 
+// Decals (core/decal.hh): the box clipped onto the triangles under it. A floor
+// decal: the object at the origin turned so its +Z is world +Y (the projector
+// looks down), local +X = world +X, local +Y = world -Z.
+namespace decaltest {
+const splash::Quat kDown{-0.70710678f, 0, 0, 0.70710678f};
+float area(const splash::DecalPiece& p) {
+    return 0.5f * splash::magnitude(splash::cross(p.c[1].world - p.c[0].world, p.c[2].world - p.c[0].world));
+}
+float totalArea(const splash::DecalBuild& b) {
+    float a = 0;
+    for (const auto& p : b.pieces) a += area(p);
+    return a;
+}
+// Floor triangles wound to face +Y (cross(b - a, c - a) up).
+splash::DecalSurface floorSurface(int object, std::vector<splash::Vec3> pos, std::string excluded = {}) {
+    splash::DecalSurface s;
+    s.object = object;
+    s.positions = std::move(pos);
+    s.excluded = std::move(excluded);
+    return s;
+}
+bool dnear(float a, float b, float eps = 1e-4f) { return std::fabs(a - b) <= eps; }
+}  // namespace decaltest
+
+void testDecalClip() {
+    using namespace decaltest;
+    using splash::Vec3;
+    splash::DecalComponent d;  // 1 x 1, depth 0.5, white
+    // One big triangle under the whole box: one covered triangle, exactly the 1 m^2 square.
+    const splash::DecalSurface big = floorSurface(7, {{-10, 0, -10}, {-10, 0, 30}, {30, 0, -10}});
+    CHECK(splash::dot(splash::cross(big.positions[1] - big.positions[0], big.positions[2] - big.positions[0]), {0, 1, 0}) > 0);
+    splash::DecalBuild b = splash::buildDecal(d, {0, 0, 0}, kDown, {1, 1, 1}, {big});
+    CHECK(!b.pieces.empty());
+    CHECK(dnear(totalArea(b), 1.0f));
+    CHECK(b.covered.size() == 1 && b.covered[0].object == 7 && b.covered[0].triangles == 1 && b.coveredTriangles() == 1);
+    CHECK(b.excludedHit.empty());
+    bool inside = true, flat = true, wound = true;
+    for (const auto& p : b.pieces) {
+        for (const auto& c : p.c) {
+            inside &= std::fabs(c.world.x) <= 0.5001f && std::fabs(c.world.z) <= 0.5001f;
+            flat &= dnear(c.world.y, 0);
+            inside &= c.uv.x >= 0 && c.uv.x <= 1 && c.uv.y >= 0 && c.uv.y <= 1;
+        }
+        wound &= splash::dot(splash::cross(p.c[1].world - p.c[0].world, p.c[2].world - p.c[0].world), {0, 1, 0}) > 0;
+        wound &= p.object == 7 && dnear(p.worldNormal.y, 1);
+    }
+    CHECK(inside && flat && wound);
+    // UV corners: seen from above (+Y, the decal's +Z), the texture's top-left
+    // (u 0, v 1) is local (+X, +Y) = world (0.5, 0, -0.5), its bottom-right
+    // (u 1, v 0) world (-0.5, 0, 0.5); uv is linear in the position.
+    int corners = 0;
+    bool linear = true;
+    for (const auto& p : b.pieces)
+        for (const auto& c : p.c) {
+            if (dnear(c.world.x, 0.5f) && dnear(c.world.z, -0.5f)) corners += dnear(c.uv.x, 0) && dnear(c.uv.y, 1);
+            if (dnear(c.world.x, -0.5f) && dnear(c.world.z, 0.5f)) corners += dnear(c.uv.x, 1) && dnear(c.uv.y, 0);
+            linear &= dnear(c.uv.x, 0.5f - c.world.x) && dnear(c.uv.y, 0.5f - c.world.z);
+        }
+    CHECK(corners >= 2 && linear);
+
+    // Over the edge between two triangles of a unit quad's diagonal: both covered, still 1 m^2.
+    const splash::DecalSurface quad = floorSurface(3, {{-2, 0, -2}, {-2, 0, 2}, {2, 0, -2}, {2, 0, -2}, {-2, 0, 2}, {2, 0, 2}});
+    b = splash::buildDecal(d, {0, 0, 0}, kDown, {1, 1, 1}, {quad});
+    CHECK(b.covered.size() == 1 && b.covered[0].triangles == 2);
+    CHECK(dnear(totalArea(b), 1.0f));
+    // Moved so it overhangs the quad's corner by half in X and Z: a quarter of it lands.
+    b = splash::buildDecal(d, {2, 0, 2}, kDown, {1, 1, 1}, {quad});
+    CHECK(b.coveredTriangles() == 1 && dnear(totalArea(b), 0.25f));
+    // Over nothing: off to the side, above by more than depth / 2, or past the edge.
+    CHECK(splash::buildDecal(d, {10, 0, 0}, kDown, {1, 1, 1}, {quad}).pieces.empty());
+    b = splash::buildDecal(d, {0, 0.3f, 0}, kDown, {1, 1, 1}, {quad});
+    CHECK(b.pieces.empty() && b.covered.empty() && b.coveredTriangles() == 0);
+    // Within depth / 2 above it: the same square.
+    CHECK(dnear(totalArea(splash::buildDecal(d, {0, 0.2f, 0}, kDown, {1, 1, 1}, {quad})), 1.0f));
+    // Size and scale: 2 x 0.5 times scale (1, 2, 1) is 2 x 1.
+    splash::DecalComponent wide = d;
+    wide.width = 2, wide.height = 0.5f;
+    CHECK(dnear(totalArea(splash::buildDecal(wide, {0, 0, 0}, kDown, {1, 2, 1}, {quad})), 2.0f));
+    // A face turned away from the projector (wound down), or a wall seen edge-on: no pieces.
+    const splash::DecalSurface under = floorSurface(4, {{-2, 0, -2}, {2, 0, -2}, {-2, 0, 2}});
+    CHECK(splash::buildDecal(d, {0, 0, 0}, kDown, {1, 1, 1}, {under}).pieces.empty());
+    const splash::DecalSurface wall = floorSurface(5, {{-2, -2, 0}, {-2, 2, 0}, {2, -2, 0}});
+    CHECK(splash::buildDecal(d, {0, 0, 0}, kDown, {1, 1, 1}, {wall}).pieces.empty());
+    // A wall facing +Z under an unrotated decal (projecting along -Z): the whole square.
+    const splash::DecalSurface wallFront = floorSurface(6, {{-2, -2, 0}, {6, -2, 0}, {-2, 6, 0}});
+    CHECK(dnear(totalArea(splash::buildDecal(d, {0, 0, 0}, {}, {1, 1, 1}, {wallFront})), 1.0f));
+    // An excluded surface is reported and never decalled; the target next to it is.
+    b = splash::buildDecal(d, {0, 0, 0}, kDown, {1, 1, 1}, {floorSurface(8, quad.positions, "skinned"), big});
+    CHECK(b.excludedHit.size() == 1 && b.excludedHit[0] == 8);
+    CHECK(b.covered.size() == 1 && b.covered[0].object == 7);
+    for (const auto& p : b.pieces) CHECK(p.object == 7);
+    // Colour: the decal's times the surface's corner colour, interpolated.
+    splash::DecalSurface lit = big;
+    lit.colors.assign(3, Vec3{0.5f, 0.25f, 1.0f});
+    splash::DecalComponent red = d;
+    red.color = {1.0f, 0.5f, 0.5f};
+    b = splash::buildDecal(red, {0, 0, 0}, kDown, {1, 1, 1}, {lit});
+    bool col = !b.pieces.empty();
+    for (const auto& p : b.pieces)
+        for (const auto& c : p.c) col &= dnear(c.color.x, 0.5f) && dnear(c.color.y, 0.125f) && dnear(c.color.z, 0.5f);
+    CHECK(col);
+    // Placement on a drop: +Z out of the surface; on a wall the top up, on a
+    // floor the top away from the viewer.
+    auto same = [](Vec3 a, Vec3 b) { return dnear(a.x, b.x, 1e-4f) && dnear(a.y, b.y, 1e-4f) && dnear(a.z, b.z, 1e-4f); };
+    splash::Quat q = splash::decalPlacement({0, 1, 0}, splash::normalized(Vec3{0, -0.5f, 1}));
+    CHECK(same(splash::rotate(q, {0, 0, 1}), {0, 1, 0}) && same(splash::rotate(q, {0, 1, 0}), {0, 0, 1}));
+    q = splash::decalPlacement({0, 0, -1}, {0, 0, 1});
+    CHECK(same(splash::rotate(q, {0, 0, 1}), {0, 0, -1}) && same(splash::rotate(q, {0, 1, 0}), {0, 1, 0}) &&
+          same(splash::rotate(q, {1, 0, 0}), {-1, 0, 0}));
+    q = splash::decalPlacement(splash::normalized(Vec3{1, 0.2f, -0.3f}), {0, 0, 1});
+    CHECK(same(splash::rotate(q, {0, 0, 1}), splash::normalized(Vec3{1, 0.2f, -0.3f})) && splash::rotate(q, {0, 1, 0}).y > 0.9f &&
+          dnear(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w, 1.0f));
+    // A decal placed that way on a floor covers it.
+    CHECK(dnear(totalArea(splash::buildDecal(d, {0, 0, 0}, splash::decalPlacement({0, 1, 0}, {0, 0, 1}), {1, 1, 1}, {quad})), 1.0f));
+    // Exclusions.
+    splash::Object o;
+    CHECK(splash::decalExclusion(o).empty());
+    o.collider = splash::ColliderComponent{splash::ColliderKind::Static, false, {}};
+    CHECK(splash::decalExclusion(o).empty());
+    o.collider->kind = splash::ColliderKind::Dynamic;
+    CHECK(splash::decalExclusion(o) == "dynamic");
+    o.skin = splash::SkinComponent{};
+    CHECK(splash::decalExclusion(o) == "skinned");
+}
+
+// A floor mesh and a decal object over it export the pieces as the decal
+// object's own triangles with Tri flag 0x8 and the floor's without; the scene
+// JSON round-trips the component; Add component offers Decal.
+void testDecalExport() {
+    namespace fs = std::filesystem;
+    using namespace decaltest;
+    const fs::path dir = g_outDir / "decal";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir / "out", ec);
+    {
+        std::ofstream m(dir / "floor.mesh");
+        m << R"({"format": "splashedit-ng/mesh", "version": 1, "positions": [-2,0,-2, -2,0,2, 2,0,-2, 2,0,2],
+                "normals": [0,1,0, 0,1,0, 0,1,0, 0,1,0], "uv": [0,0, 0,1, 1,0, 1,1], "submeshes": [[0,1,2, 2,1,3]]})";
+    }
+    splash::Image img;
+    img.width = img.height = 16;
+    img.pixels.assign(256, splash::Image::Px{0, 0, 0, 0});
+    for (int i = 0; i < 16; i++) img.pixels[size_t(i) * 16 + size_t(i)] = splash::Image::Px{1, 0, 0, 1};
+    splash::savePng(img, dir / "x.png");
+
+    splash::Scene scene;
+    splash::Object floor = named("Floor");
+    splash::MeshComponent mc;
+    mc.mesh = "floor.mesh";
+    mc.materials.push_back({"", {1, 1, 1, 1}, {}});
+    mc.vertexColors = splash::VertexColorMode::Flat;
+    floor.mesh = mc;
+    scene.objects.push_back(floor);
+    splash::Object dec = named("Decal");
+    dec.transform.rotation = kDown;
+    dec.decal = splash::DecalComponent{};
+    dec.decal->texture = "x.png";
+    scene.objects.push_back(dec);
+
+    // Round trip.
+    splash::saveScene(scene, dir / "s.scene");
+    const splash::Scene back = splash::loadScene(dir / "s.scene");
+    CHECK(back.objects.size() == 2 && back.objects[1].decal && back.objects[1].decal->texture == "x.png" &&
+          back.objects[1].decal->width == 1.0f && back.objects[1].decal->depth == 0.5f && !back.objects[0].decal);
+
+    splash::ExportResult r = splash::exportSplashpack(scene, dir, dir / "out" / "scene.splashpack");
+    CHECK(r.ok());
+    for (const std::string& w : r.warnings) std::fprintf(stderr, "decal export warning: %s\n", w.c_str());
+    CHECK(r.warnings.empty());
+    std::ifstream in(dir / "out" / "scene.splashpack", std::ios::binary);
+    const std::vector<uint8_t> pack((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    // Every 52-byte Tri whose three corners are these PSX coordinates, and its flags.
+    const float gte = scene.settings.gteScaling;
+    auto flagsOf = [&](const std::array<splash::Vec3, 3>& v) {
+        std::vector<uint16_t> found;
+        int16_t want[9];
+        for (int k = 0; k < 3; k++) {
+            want[k * 3] = splash::toPsxCoord(v[size_t(k)].x, gte);
+            want[k * 3 + 1] = splash::toPsxCoord(-v[size_t(k)].y, gte);
+            want[k * 3 + 2] = splash::toPsxCoord(v[size_t(k)].z, gte);
+        }
+        for (size_t at = 0; at + 52 <= pack.size(); at += 4)
+            if (std::memcmp(&pack[at], want, 18) == 0) found.push_back(uint16_t(pack[at + 50] | pack[at + 51] << 8));
+        return found;
+    };
+    const splash::DecalBuild b = splash::buildDecal(*dec.decal, {0, 0, 0}, kDown, {1, 1, 1},
+                                                    {floorSurface(0, {{-2, 0, -2}, {-2, 0, 2}, {2, 0, -2}, {2, 0, -2}, {-2, 0, 2}, {2, 0, 2}})});
+    CHECK(b.pieces.size() >= 2);
+    int decalTris = 0;
+    for (const auto& p : b.pieces) {
+        const std::vector<uint16_t> f = flagsOf({p.c[0].local, p.c[1].local, p.c[2].local});
+        CHECK(f.size() == 1);
+        if (f.size() == 1) {
+            CHECK((f[0] & 0x8) != 0);
+            CHECK((f[0] & 0x2) != 0);  // the transparent texels: a cutout texture
+            decalTris++;
+        }
+    }
+    CHECK(decalTris == int(b.pieces.size()));
+    const std::vector<uint16_t> ff = flagsOf({splash::Vec3{-2, 0, -2}, {-2, 0, 2}, {2, 0, -2}});
+    CHECK(ff.size() == 1 && (ff.empty() || (ff[0] & 0x8) == 0));
+    // The decal object's world AABB (the engine culls the object by it) holds
+    // every piece corner: a decal object has no mesh of its own, so without the
+    // pieces it would be the point at its origin. Game object records (92
+    // bytes) follow the v27 header (156 bytes, no Lua files here); the AABB is
+    // the record's last 24 bytes, min then max, engine axes (y down).
+    CHECK(pack.size() > 156 + 2 * 92 && pack[2] == 27);
+    if (pack.size() > 156 + 2 * 92) {
+        int32_t box[6];
+        std::memcpy(box, &pack[156 + 92 + 68], sizeof box);  // record 1: the decal object
+        bool inside = true;
+        for (const auto& p : b.pieces)
+            for (const auto& c : p.c) {
+                const int32_t e[3] = {splash::toWorldFixed12(c.world.x / gte), splash::toWorldFixed12(-c.world.y / gte),
+                                      splash::toWorldFixed12(c.world.z / gte)};
+                for (int k = 0; k < 3; k++) inside &= e[k] >= box[k] - 1 && e[k] <= box[3 + k] + 1;
+            }
+        CHECK(inside);
+        CHECK(box[3] - box[0] >= splash::toWorldFixed12(1.0f / gte) - 2);  // 1 m wide in X at least
+    }
+
+    const splash::ExportStats on = r.stats;
+    // Nothing under it: a warning, no pieces.
+    scene.objects[1].transform.position = {10, 0, 0};
+    r = splash::exportSplashpack(scene, dir, dir / "out" / "scene.splashpack");
+    CHECK(r.ok() && std::any_of(r.warnings.begin(), r.warnings.end(),
+                                [](const std::string& w) { return w == "Decal: decal covers no triangles"; }));
+    // The meters: the pieces are ordinary triangles in view, and in the bump allocator's need.
+    CHECK(on.trianglesInView == r.stats.trianglesInView + b.pieces.size());
+    CHECK(on.triangles == r.stats.triangles + int(b.pieces.size()));
+    CHECK(on.bumpAllocatorNeed > r.stats.bumpAllocatorNeed);
+
+    // Add component.
+    splash::Object fresh = named("Empty");
+    CHECK(editor::cannotAdd(fresh, editor::ComponentKind::Decal).empty());
+    CHECK(editor::addComponent(fresh, editor::ComponentKind::Decal) && fresh.decal && fresh.decal->width == 1.0f);
+    CHECK(editor::removeComponent(fresh, editor::ComponentKind::Decal) && !fresh.decal);
+    fresh.mesh.emplace();
+    fresh.skin.emplace();
+    CHECK(editor::cannotAdd(fresh, editor::ComponentKind::Decal) == "Not on a skinned mesh");
+    CHECK(std::string(editor::info(editor::ComponentKind::Decal).label) == "Decal");
+}
+
 // Mesh textures with texels under half alpha export cutout: the hole is VRAM
 // word 0 (what the GPU skips); an image without one exports as before.
 void testMeshAlpha() {
@@ -14598,6 +14843,8 @@ int main(int argc, char** argv) {
     testClipLoopImportAndEdit();
     testImportSettings();
     testSimplifyToTriangles();
+    testDecalClip();
+    testDecalExport();
     testImportTargetTriangles();
     testModelImports();
     testModelImportsGaps();

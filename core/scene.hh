@@ -214,6 +214,20 @@ struct AgentComponent {
     ExtraKeys extra;
 };
 
+// A decal: a box on its object (width x height in the object's local X and Y,
+// depth along Z, all scaled by the object's scale) that projects a texture along
+// the object's local -Z onto the static meshes under it. The exporter clips it
+// to their triangles and ships the pieces as this object's own triangles
+// (core/decal.hh); the engine draws them just in front of the surface.
+struct DecalComponent {
+    std::string texture;  // project-relative path, empty = nothing to draw
+    float width = 1.0f;   // metres
+    float height = 1.0f;
+    float depth = 0.5f;   // box thickness: surfaces within depth / 2 of the object's plane
+    std::array<float, 3> color{1, 1, 1};  // times the surface's lighting under it
+    ExtraKeys extra;
+};
+
 struct Transform {
     Vec3 position;
     Quat rotation;
@@ -239,6 +253,7 @@ struct Object {
     std::optional<AudioComponent> audio;
     std::optional<SkinComponent> skin;
     std::optional<AgentComponent> agent;
+    std::optional<DecalComponent> decal;
     std::vector<std::string> unknownComponents;  // components of an unknown type, as JSON text
     std::vector<Object> children;
     ExtraKeys extra;

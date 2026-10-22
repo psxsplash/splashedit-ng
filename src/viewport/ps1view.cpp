@@ -12,6 +12,7 @@
 #include "editor/pick.hh"
 #include "gl.h"
 #include "scene.hh"
+#include "decal.hh"
 #include "splashpack.hh"
 #include "unitymath.hh"
 
@@ -259,6 +260,7 @@ void Ps1View::rebuild() {
     m_verts.clear();
     m_batches.clear();
     m_pick.clear();
+    m_decalInfo.clear();
     m_posed.reset();
     if (!m_doc) {
         // No scene: the screen-space sky fills the background on its own.
@@ -290,6 +292,7 @@ void Ps1View::rebuild() {
     auto meshCacheKey = [](const std::string& p) { return p; };
     m_pick.clear();
     std::set<std::string> uvPosed;
+    std::vector<splash::DecalSurface> decalSurfaces;  // every drawn mesh, for the decals below
     const bool prefabUnlit = m_doc->inPrefabMode() && std::none_of(flats.begin(), flats.end(), [](const splash::FlatObject& fo) {
         return fo.activeInHierarchy && fo.object->light && fo.object->light->enabled;
     });
@@ -329,6 +332,7 @@ void Ps1View::rebuild() {
         // A prefab edited on its own seldom carries a light, and baked
         // lighting without one is black: drawn at the neutral colour instead.
         if (prefabUnlit) colors.clear();
+        decalSurfaces.push_back(splash::decalSurface(int(fi), *mesh, fo.localToWorld, colors, splash::decalExclusion(*fo.object)));
 
         for (size_t sub = 0; sub < mesh->submeshes.size(); ++sub) {
             const splash::Material& mat = mc.materials[std::min(sub, mc.materials.size() - 1)];
@@ -360,12 +364,43 @@ void Ps1View::rebuild() {
         }
     }
 
+    // Decals: the exporter's pieces (core/decal.hh) on the meshes drawn above,
+    // pickable as the decal object.
+    std::map<unsigned, std::vector<Vertex>> decalBuckets;
+    for (size_t fi = 0; fi < flats.size(); ++fi) {
+        const splash::FlatObject& fo = flats[fi];
+        if (!fo.activeInHierarchy || !fo.object->active || !fo.object->decal) continue;
+        const splash::DecalComponent& d = *fo.object->decal;
+        const splash::DecalBuild b = splash::buildDecal(d, fo.worldPosition, fo.worldRotation, fo.lossyScale, decalSurfaces);
+        DecalInfo& info = m_decalInfo[fo.object];
+        info.triangles = b.coveredTriangles();
+        for (const splash::DecalCoverage& c : b.covered) info.covered.push_back({flats[size_t(c.object)].object->name, c.triangles});
+        for (int x : b.excludedHit)
+            info.excluded.push_back({flats[size_t(x)].object->name, splash::decalExclusion(*flats[size_t(x)].object)});
+        if (d.texture.empty() || fo.object->skin) continue;
+        info.pieces = int(b.pieces.size());
+        std::vector<Vertex>& bucket = decalBuckets[textureFor(d.texture)];
+        const size_t firstTri = m_pick.positions.size() / 3;
+        for (const splash::DecalPiece& p : b.pieces)
+            for (const splash::DecalCorner& c : p.c) {
+                bucket.push_back({c.world.x, c.world.y, -c.world.z, c.uv.x, c.uv.y, c.color.x, c.color.y, c.color.z});
+                m_pick.positions.push_back(c.world);
+            }
+        m_pick.ranges.push_back({(int)fi, firstTri, m_pick.positions.size() / 3 - firstTri});
+    }
+
     // One batch per texture; the sky is drawn separately in screen space.
     for (auto& [tex, verts] : buckets) {
         if (verts.empty()) continue;
         int start = (int)m_verts.size();
         m_verts.insert(m_verts.end(), verts.begin(), verts.end());
         m_batches.push_back({tex, start, (int)verts.size()});
+    }
+    for (auto& [tex, verts] : decalBuckets) {
+        if (verts.empty()) continue;
+        int start = (int)m_verts.size();
+        m_verts.insert(m_verts.end(), verts.begin(), verts.end());
+        m_batches.push_back({tex, start, (int)verts.size(), true});
     }
 
     // Frame the scene bounds from the current eye direction so any scene fits.
@@ -545,9 +580,16 @@ unsigned Ps1View::render(int panelW, int panelH, int lines) {
     glActiveTexture_(GL_TEXTURE0);
     glBindVertexArray(m_vao);
     for (const Batch& b : m_batches) {
+        // Decal batches come last: coplanar with what they lie on, so pulled
+        // towards the eye in depth (the console sorts them in front instead).
+        if (b.decal) {
+            glEnable(GL_POLYGON_OFFSET_FILL);
+            glPolygonOffset(-1.0f, -4.0f);
+        }
         glBindTexture(GL_TEXTURE_2D, b.tex);
         glDrawArrays(GL_TRIANGLES, b.start, b.count);
     }
+    glDisable(GL_POLYGON_OFFSET_FILL);
     glBindVertexArray(0);
     glDisable(GL_DEPTH_TEST);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -668,6 +710,17 @@ std::optional<int> Ps1View::pick(ImVec2 screen, ImVec2 mn, ImVec2 sz) const {
     std::optional<editor::PickHit> hit = editor::pickNearest({{o.x, o.y, -o.z}, {d.x, d.y, -d.z}}, m_pick);
     if (!hit) return std::nullopt;
     return hit->object;
+}
+
+std::optional<Ps1View::SurfaceHit> Ps1View::pickSurface(ImVec2 screen, ImVec2 mn, ImVec2 sz) const {
+    Vec3 o, d;
+    ray(screen, mn, sz, &o, &d);
+    const editor::Ray r{{o.x, o.y, -o.z}, {d.x, d.y, -d.z}};
+    std::optional<editor::PickHit> hit = editor::pickNearest(r, m_pick);
+    if (!hit) return std::nullopt;
+    const splash::Vec3 n = editor::hitNormal(r, m_pick, *hit);
+    if (splash::sqrMagnitude(n) <= 0) return std::nullopt;
+    return SurfaceHit{r.origin + r.dir * hit->t, n, hit->object};
 }
 
 std::optional<Vec3> Ps1View::pickPoint(ImVec2 screen, ImVec2 mn, ImVec2 sz) const {
