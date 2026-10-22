@@ -68,7 +68,7 @@ Field table (writer order = reader struct order; `writer.Write('S')` writes the 
 | 72 | 1 | u8 | fogEnabled | 0/1 |
 | 73 | 3 | u8[3] | fogR,G,B | `Clamp(RoundToInt(c*255),0,255)` |
 | 76 | 1 | u8 | fogDensity | `Clamp(fogDensity,1,10)` |
-| 77 | 1 | u8 | renderFlags | bit 0: edge fade (`SceneSettings::edgeFade`); was pad3, written 0, so older packs read as off |
+| 77 | 1 | u8 | renderFlags | bit 0: edge fade (`SceneSettings::edgeFade`); bits 1-4: the scene's reverb preset id (`SceneSettings::reverb`, `core/reverb.hh`, 0 = off); bit 7: CD music feeds the reverb (`cdReverb`). Was pad3, written 0, so older packs read as off |
 | 78 | 2 | u16 | roomCount | `roomCount>0 ? roomCount+1 : 0` (+1 = catch-all room) |
 | 80 | 2 | u16 | portalCount | room portals |
 | 82 | 2 | u16 | roomTriRefCount | total tri refs incl. catch-all |
@@ -132,7 +132,7 @@ Reader flag semantics: R:gameobject.hh `kActive=0x01, kSkinned=0x10, DYNAMIC_LIT
 Only objects with `CollisionType == Dynamic` and a mesh. `{ i32 AABB x6 (of renderMesh.bounds, same transform as 2.2), u8 collisionType=1, u8 layerMask=0xFF, u16 gameObjectIndex, u32 0 }`. Reader: `SPLASHPACKCollider`, `static_assert == 32`.
 
 ### 2.4 Trigger boxes (cursor) - 32 bytes each, `triggerBoxCount`
-`{ i32 minX = fp12(wMin.x/gte), minY = fp12(-wMax.y/gte), minZ = fp12(wMin.z/gte), maxX = fp12(wMax.x/gte), maxY = fp12(-wMin.y/gte), maxZ = fp12(wMax.z/gte); i16 luaFileIndex (-1 none); u16 0; u32 0 }`, bounds = `PSXTriggerBox.GetWorldBounds()` (AABB of the 8 rotated corners of a box `size` centred on `transform.position`). Reader: `SPLASHPACKTriggerBox`, 32 bytes.
+`{ i32 minX = fp12(wMin.x/gte), minY = fp12(-wMax.y/gte), minZ = fp12(wMin.z/gte), maxX = fp12(wMax.x/gte), maxY = fp12(-wMin.y/gte), maxZ = fp12(wMax.z/gte); i16 luaFileIndex (-1 none); u8 reverbPreset (0 = not a reverb zone; was pad); u8 0; u32 0 }`, bounds = `PSXTriggerBox.GetWorldBounds()` (AABB of the 8 rotated corners of a box `size` centred on `transform.position`). Reader: `SPLASHPACKTriggerBox`, 32 bytes.
 
 ### 2.5 BVH (cursor) - `AlignToFourBytes` first (W:522-523)
 No counts in the section (they live in the header). `bvhNodeCount` x 32 B nodes, then `bvhTriangleRefCount` x 4 B refs.
@@ -187,7 +187,7 @@ clamped): a portal naming a missing, duplicate-named or identical room; more tha
 cells or portal refs; more than 255 portal refs in one room; rooms together with world streaming.
 Sorts by objectIndex are stable.
 Order: `(rooms+1)` x RoomData(36) | `portalCount` x PortalData(40) | `roomTriRefCount` x TriRef(4) | `roomCellCount` x RoomCell(28) | `roomPortalRefCount` x RoomPortalRef(4). Reader reads exactly in this order (cells and portal refs only if their counts >0).
-- RoomData: `i32 aabb x6 (PS1 space, Y negated+swapped; room AABB from PSXRoom.GetWorldBounds); u16 firstTriRef; u16 triRefCount; u16 firstCell; u8 cellCount; u8 portalRefCount; u16 firstPortalRef; u16 pad=0`. Last entry is the catch-all room: AABB = fp12(-1000/gte) x3 .. fp12(1000/gte) x3 (note: min Y written as `-1000/gte`, max Y `+1000/gte`).
+- RoomData: `i32 aabb x6 (PS1 space, Y negated+swapped; room AABB from PSXRoom.GetWorldBounds); u16 firstTriRef; u16 triRefCount; u16 firstCell; u8 cellCount; u8 portalRefCount; u16 firstPortalRef; u8 reverbPreset (0 = the scene's; was pad); u8 pad=0`. Last entry is the catch-all room: AABB = fp12(-1000/gte) x3 .. fp12(1000/gte) x3 (note: min Y written as `-1000/gte`, max Y `+1000/gte`).
 - PortalData: `u16 roomA; u16 roomB; i32 center x, -y, z (fp12(/gte)); i16 halfW = Clamp(RoundToInt(size.x*0.5/gte*4096),1,32767); i16 halfH likewise; i16 normal x, -y, z (RoundToInt(v*4096) clamp int16); i16 pad; i16 right x,-y,z; i16 up x,-y,z`.
 - TriRef: `{u16 objectIndex, u16 triangleIndex}` rooms in order then catch-all. Triangle-to-room: by count of its 3 world vertices inside the room AABB expanded by `ROOM_MARGIN*2 = 1.0` total (0.5 per side), ties -> closest AABB centre to centroid; then portal-boundary triangles are duplicated into the neighbour room; each room list sorted by objectIndex (unstable `List.Sort`); then regrouped into 2x2x2 spatial cells (`CELLS_PER_AXIS=2`) by centroid, each cell's refs sorted by objectIndex again.
 - RoomCell: `i32 aabb x6 (tight, PS1 space); u16 firstTriRef (global index into the flat array); u16 triRefCount`.
@@ -463,7 +463,7 @@ public static int ConvertWorldToFixed12(float value)
 Fog mask CLUTs: when fog is on and a mesh uses a 4bpp (or 8bpp) cutout texture, one 16 (or 256) entry CLUT `{0x0000, 0xFFFF, ...}` is placed after the texture CLUTs and its position written to the header. psxsplash draws the fog pass over such a triangle as the same textured triangle through that CLUT, additive: entry 0 is the transparent texel, so the holes get no fog. 16bpp textures, and packs without the CLUTs, keep the untextured fog pass.
 
 ### 4.5 `.spu` file
-`{ 'S','A'; u16 clipCount }`, then per clip `{u32 sizeBytes, u16 sampleRate, u8 loop, u8 0}` + ADPCM + pad to 4. Clip bytes come from `AudioConvertDelegate(AudioClip, sampleRate, loop, trimLeadingSilence)` (registered by an editor-only `PSXAudioConverter`, source not part of the files read).
+`{ 'S','A'; u16 clipCount }`, then per clip `{u32 sizeBytes, u16 sampleRate, u8 loop, u8 reverb}` + ADPCM + pad to 4. `reverb` (was 0): bit 0 = the clip's voices feed the reverb (`reverbSend`), bits 4-7 = the scene's preset with the largest work area (scene, rooms, trigger zones), which psxsplash keeps free at the top of SPU RAM before it uploads the clips. Clip bytes come from `AudioConvertDelegate(AudioClip, sampleRate, loop, trimLeadingSilence)` (registered by an editor-only `PSXAudioConverter`, source not part of the files read).
 
 ### 4.6 `.loading` loader pack (psxsplash `LoadingScreen`, `loadingscreen.hh`)
 Written when the scene's `settings.loadingCanvas` names one of its canvases; that canvas is then left out of the splashpack's UI table and `.vram`. psxsplash opens `scene_<i>.loading` (PCdrv) or `SCENE<i>/SCENE_<i>.LDG;1` (CD), draws it once into both framebuffers (y 0 and 256) before every scene load, then only redraws the Progress element named `loading` with the engine's load percentage. Line elements are not drawn. A missing file or other version shows a black screen.

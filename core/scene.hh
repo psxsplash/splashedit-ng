@@ -139,6 +139,9 @@ struct NavigationComponent {
 struct TriggerComponent {
     Vec3 size{1, 1, 1};
     std::string lua;  // empty = none
+    // Reverb preset (core/reverb.hh) while the player is inside, 0 = the box
+    // is not a reverb zone. The innermost zone wins over rooms and the scene.
+    int reverb = 0;
     ExtraKeys extra;
 };
 
@@ -148,6 +151,9 @@ struct TriggerComponent {
 struct RoomComponent {
     Vec3 size{1, 1, 1};
     Vec3 offset{};
+    // Reverb preset (core/reverb.hh) while the camera is in the room, 0 =
+    // the scene's.
+    int reverb = 0;
     ExtraKeys extra;
 };
 
@@ -175,6 +181,9 @@ struct AudioComponent {
     bool loop = false;
     int defaultVolume = 100;
     bool trimLeadingSilence = false;
+    // The clip's voices feed the reverb (psxsplash EON). Off for clips that
+    // should stay dry wherever they play: UI sounds, music stingers.
+    bool reverbSend = true;
     ExtraKeys extra;
 };
 
@@ -293,6 +302,10 @@ struct SceneSettings {
     // when nearer), so nothing pops in at the edge. Saved only when off: a
     // scene without the key reads as on.
     bool edgeFade = true;
+    // Reverb preset (core/reverb.hh) where no room or zone sets one, and
+    // whether CD music feeds the reverb too. Saved only when not the default.
+    int reverb = 0;
+    bool cdReverb = false;
     std::string networkId;
     std::string script;  // scene Lua file, empty = none
     // psxsplash render buffers: ordering table buckets and bump allocator

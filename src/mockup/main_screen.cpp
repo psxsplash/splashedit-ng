@@ -6631,6 +6631,32 @@ static void tilemapSection(State& st, ImDrawList* dl, editor::Document& doc, flo
     }
 }
 
+// Reverb preset rows (scene, room, trigger): one picker over core/reverb.hh's
+// presets, the first item named for what 0 means there. Returns the picked id,
+// or -1. --click @<id>/<label> picks an item.
+static int reverbCombo(const char* id, ImRect r, int current, const char* zeroLabel) {
+    std::vector<const char*> items;
+    for (int i = 0; i < splash::kReverbPresetCount; i++) items.push_back(i ? splash::kReverbPresets[i].label : zeroLabel);
+    current = std::clamp(current, 0, splash::kReverbPresetCount - 1);
+    nameRect(id, r);
+    return dropdownMenu(id, r, icon::music, items[size_t(current)], items, current);
+}
+
+// The rows' tooltip: what the row does, then each preset, what it suits and
+// the sound RAM it keeps.
+static std::string reverbTip(const char* lead) {
+    std::string tip = lead;
+    for (int i = 1; i < splash::kReverbPresetCount; i++) {
+        const splash::ReverbPreset& p = splash::kReverbPresets[i];
+        tip += std::string("\n") + p.label + " (" + std::to_string((p.workAreaBytes + 1023) / 1024) + " KB): " + p.goodFor;
+    }
+    return tip + "\nOff: " + splash::kReverbPresets[0].goodFor;
+}
+
+static const char* reverbKey(int id) {
+    return id >= 0 && id < splash::kReverbPresetCount ? splash::kReverbPresets[id].key : "?";
+}
+
 static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor::Document& doc) {
     Fonts& f = fonts();
     ImGui::PushClipRect(ImVec2(r.Min.x, y), ImVec2(r.Max.x, r.Max.y - 1), true);
@@ -6775,6 +6801,19 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
         nameRect("scene.edgefade", edgeSw);
         if (toggle("edgefadeon", edgeSw, set.edgeFade))
             doc.editSettings([](splash::SceneSettings& s) { s.edgeFade = !s.edgeFade; });
+        // psxsplash reverb.hh: the preset wherever no Room or reverb zone sets one.
+        static const std::string sceneReverbTip =
+            reverbTip("SPU reverb wherever no Room or trigger zone sets its own. The largest preset the scene uses keeps "
+                      "its work area free at the top of sound RAM (the SPU RAM meter counts it).");
+        const ImRect revRow = row("lreverb", "Reverb", sceneReverbTip.c_str());
+        const int rp = reverbCombo("scene.reverb", revRow, set.reverb, "Off");
+        if (rp >= 0) doc.editSettings([rp](splash::SceneSettings& s) { s.reverb = rp; });
+        v = row("lcdreverb", "CD music reverb", "CD audio (Audio.PlayCDDA) goes through the reverb too, when a preset is on.");
+        const ImRect cdSw(ImVec2(v.Min.x, v.GetCenter().y - 8), ImVec2(v.Min.x + 30, v.GetCenter().y + 8));
+        nameRect("scene.cdreverb", cdSw);
+        if (toggle("cdreverbon", cdSw, set.cdReverb))
+            doc.editSettings([](splash::SceneSettings& s) { s.cdReverb = !s.cdReverb; });
+        scriptLine("scene.reverb", std::string("reverb: scene ") + reverbKey(set.reverb) + " cd " + (set.cdReverb ? "on" : "off"));
         const ImRect gteRow = row("lgte", "GTE scaling",
                                   "Editor units per PS1 unit. Positions export as value / scaling in 16-bit 4.12 fixed point, so "
                                   "everything must sit within 8 x scaling of the origin. Smaller is finer, larger reaches farther.");
@@ -9606,6 +9645,12 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                 newScript(st, doc, &path, *lang, true);
         }
         y += size::field + space::sm;
+        static const std::string zoneTip = reverbTip(
+            "SPU reverb while the player is in the box: a reverb zone. The smallest zone around the player wins over Rooms "
+            "and the scene's. None: the box only runs its script.");
+        const int zp = reverbCombo("obj.treverb", row("ltreverb", "Reverb", zoneTip.c_str()), tr.reverb, "None");
+        if (zp >= 0) doc.edit(path, [zp](splash::Object& ob) { ob.trigger->reverb = zp; });
+        report("triggerreverb", "reverb: trigger " + o->name + " " + reverbKey(tr.reverb));
         sectionEnd(top);
     }
     // Scripted checks name each axis of a vec3Field: <name>.x/.y/.z.
@@ -9629,6 +9674,12 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
         nameVec3("obj.roffset", ofr);
         commit(vec3Field("roffset", ofr, fmtFixed(rm.offset.x).c_str(), fmtFixed(rm.offset.y).c_str(), fmtFixed(rm.offset.z).c_str(), nullptr, off),
                "roffset", [&](splash::Object& ob) { ob.room->offset = {off[0], off[1], off[2]}; });
+        static const std::string roomTip = reverbTip(
+            "SPU reverb while the camera is in this room; switched at the portals. Scene's: the scene's preset. A trigger "
+            "zone with a preset wins inside it.");
+        const int rvp = reverbCombo("obj.rreverb", row("lrreverb", "Reverb", roomTip.c_str()), rm.reverb, "Scene's");
+        if (rvp >= 0) doc.edit(path, [rvp](splash::Object& ob) { ob.room->reverb = rvp; });
+        report("roomreverb", "reverb: room " + o->name + " " + reverbKey(rm.reverb));
         // What the last live export made of this room. Drawn from the first
         // frame, so nothing below moves when the export lands.
         const std::optional<splash::ExportResult>& res = st.live.result();
@@ -9949,6 +10000,10 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                   [](splash::Object& ob) { ob.audio->loop = !ob.audio->loop; });
         toggleRow("atrim", "Trim silence", "Cuts the quiet part at the start of the file, so it plays the moment it is triggered.",
                   a.trimLeadingSilence, [](splash::Object& ob) { ob.audio->trimLeadingSilence = !ob.audio->trimLeadingSilence; });
+        toggleRow("areverb", "Reverb send", "The clip goes through the room's or zone's reverb. Off for sounds that should stay "
+                  "dry anywhere: menu blips, music stingers.",
+                  a.reverbSend, [](splash::Object& ob) { ob.audio->reverbSend = !ob.audio->reverbSend; });
+        report("audioreverb", "reverb: send " + o->name + " " + (a.reverbSend ? "on" : "off"));
         sectionEnd(top);
     }
     if (o->skin) {
@@ -10887,9 +10942,17 @@ static void statusBar(ImDrawList* dl, ImVec2 size, const editor::Document& doc, 
         x += meter("m_vram", ImVec2(x, bar.Min.y), icon::grid, "VRAM", v.fraction(), vs.c_str(),
                    "Framebuffers, texture atlases, palettes and fonts, as the export packs them.") +
              space::xl;
-        x += meter("m_spu", ImVec2(x, bar.Min.y), icon::music, "SPU RAM", a.fraction(), as.c_str(),
-                   "Sound samples, placed the way psxsplash uploads them.") +
+        // The reverb work area sits above the clips: the largest preset the
+        // scene uses sets its size.
+        const std::string spuTip =
+            s.reverbBytes ? "Sound samples, placed the way psxsplash uploads them, and " + std::to_string(s.reverbBytes / 1024) +
+                                " KB of reverb work area above them for " + splash::kReverbPresets[s.reverbPreset].label +
+                                ", the largest reverb preset the scene uses."
+                          : std::string("Sound samples, placed the way psxsplash uploads them. No reverb, so no work area.");
+        x += meter("m_spu", ImVec2(x, bar.Min.y), icon::music, "SPU RAM", a.fraction(), as.c_str(), spuTip.c_str()) +
              space::xl;
+        scriptLine("statusbar.reverb", std::string("statusbar: spu reverb ") + reverbKey(s.reverbPreset) + " " +
+                                           std::to_string(s.reverbBytes) + " clips " + std::to_string(s.spuEnd));
         x += meter("m_ram", ImVec2(x, bar.Min.y), icon::hardDrive, "RAM", r.fraction(), rs.c_str(),
                    "Scene data, the renderer's buffers, its visible-triangle list, the world streaming slots and what "
                    "psxsplash and Lua allocate for each object, in psxsplash's heap at the peak of loading.") +

@@ -19,6 +19,7 @@
 #include "blocks.hh"
 #include "budget.hh"
 #include "bvh.hh"
+#include "reverb.hh"
 #include "rooms.hh"
 #include "font.hh"
 #include "luacompile.hh"
@@ -2446,6 +2447,16 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     for (ExpObject& e : exporters) roomIn.push_back({e.obj->active, e.flat->localToWorld, &e.triPositions});
     RoomSet rooms = buildRooms(roomObjs, roomIn, res.errors);
     if (!res.ok()) return res;
+    // Reverb: the preset with the largest work area anything in the scene
+    // asks for. psxsplash keeps that much free at the top of SPU RAM.
+    {
+        auto use = [&](int id) {
+            if (reverbWorkAreaBytes(id) > st.reverbBytes) st.reverbPreset = id, st.reverbBytes = reverbWorkAreaBytes(id);
+        };
+        use(scene.settings.reverb);
+        for (const RoomOut& r : rooms.rooms) use(r.reverb);
+        for (const FlatObject* t : triggers) use(t->object->trigger->reverb);
+    }
     for (size_t r = 0; r < rooms.realRooms(); r++)
         st.rooms.push_back({rooms.rooms[r].name, int(rooms.rooms[r].triRefCount), int(rooms.rooms[r].cellCount),
                             int(rooms.rooms[r].portalRefCount)});
@@ -2685,7 +2696,9 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     w.u8(fog.enabled ? 1 : 0);
     for (float c : fog.color) w.u8(uint8_t(clampv(roundToInt(c * 255.f), 0, 255)));
     w.u8(uint8_t(clampv(fog.density, 1, 10)));
-    w.u8(scene.settings.edgeFade ? kRenderFlagEdgeFade : 0);  // render flags, was padding
+    w.u8(uint8_t((scene.settings.edgeFade ? kRenderFlagEdgeFade : 0) |
+                 ((scene.settings.reverb << kRenderFlagReverbShift) & kRenderFlagReverbMask) |
+                 (scene.settings.cdReverb ? kRenderFlagCdReverb : 0)));  // render flags, was padding
     w.u16(uint16_t(rooms.rooms.size()));  // real rooms + the catch-all, or 0
     w.u16(uint16_t(rooms.portals.size()));
     w.u16(uint16_t(rooms.refs.size()));
@@ -2787,7 +2800,8 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
         w.i32(toWorldFixed12(-mn.y / gte));
         w.i32(toWorldFixed12(mx.z / gte));
         w.i16(t.lua.empty() ? int16_t(-1) : luaIndex(t.lua));
-        w.u16(0);
+        w.u8(uint8_t(t.reverb));  // reverbPreset (was padding): 0 = not a reverb zone
+        w.u8(0);
         w.u32(0);
     }
 
@@ -3303,7 +3317,7 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
         s.u32(uint32_t(audioData[i].size()));
         s.u16(uint16_t(a.sampleRate));
         s.u8(a.loop ? 1 : 0);
-        s.u8(0);
+        s.u8(uint8_t((a.reverbSend ? kClipReverbSend : 0) | (st.reverbPreset << kClipReserveShift)));
         for (uint8_t b : audioData[i]) s.u8(b);
         s.align4();
     }
@@ -3326,6 +3340,7 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     for (const std::vector<uint8_t>& d : audioData) st.spuEnd = ((st.spuEnd + 15) & ~size_t(15)) + ((d.size() + 15) & ~size_t(15));
     for (const ExpObject& e : exporters) st.triangles += int(e.tris.size());
     if (objectsBindRam(st)) res.warnings.push_back(objectRamWarning(st));
+    if (reverbOverflowsSpu(st)) res.warnings.push_back(reverbSpuWarning(st));
     return res;
 }
 

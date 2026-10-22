@@ -40,6 +40,12 @@ struct StreamWarning {
 constexpr uint32_t kOtMin = 256, kOtMax = 65536;
 // Splashpack header byte after the fog density (psxsplash renderFlags).
 constexpr uint8_t kRenderFlagEdgeFade = 1;
+// Bits 1-4: the scene's reverb preset (core/reverb.hh), bit 7: CD music feeds
+// the reverb. Older engines ignore them.
+constexpr uint8_t kRenderFlagReverbShift = 1, kRenderFlagReverbMask = 0x1E, kRenderFlagCdReverb = 0x80;
+// .spu clip pad byte: bit 0 the clip feeds the reverb, bits 4-7 the preset
+// whose work area psxsplash keeps free above the clips.
+constexpr uint8_t kClipReverbSend = 1, kClipReserveShift = 4;
 
 struct ExportStats {
     size_t splashpackBytes = 0, vramFileBytes = 0, spuFileBytes = 0;
@@ -50,6 +56,11 @@ struct ExportStats {
     // SPU RAM end address after psxsplash uploads every clip: the engine
     // starts at 0x1010 and rounds each clip's address and size up to 16 bytes.
     size_t spuEnd = 0;
+    // The reverb preset with the largest work area the scene uses (scene,
+    // rooms, trigger zones; 0 = none) and that work area: psxsplash keeps it
+    // free at the top of SPU RAM, above the clips.
+    int reverbPreset = 0;
+    size_t reverbBytes = 0;
     int triangles = 0;
     // Most triangles that can be in view in one frame: every triangle of the
     // objects that do not stream plus streamDrawTris (the same worst case
