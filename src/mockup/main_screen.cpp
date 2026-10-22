@@ -1469,7 +1469,7 @@ static void pasteClipboard(State& st, editor::Document& doc, const std::optional
 // SceneLua and MemCardIcon: no target object. MemCardIcon replaces icon frame
 // `index`, or with index -1 adds the picked files as new frames.
 // UiTexture: a UI image's Texture; the target is {canvas, element}.
-enum class AssetSlot { Texture, Lua, TriggerLua, Clip, SkinClips, SceneLua, MemCardIcon, UiTexture };
+enum class AssetSlot { Texture, Lua, TriggerLua, Clip, SkinClips, SceneLua, MemCardIcon, UiTexture, ShineTexture };
 static AssetSlot g_assetSlot = AssetSlot::Texture;
 static editor::ObjectPath g_assetTarget;
 static int g_assetIndex = 0;
@@ -1493,7 +1493,8 @@ static void pickAsset(AssetSlot slot, const editor::ObjectPath& target, int inde
     static const SDL_DialogFileFilter lua[] = {{"Lua scripts", "lua"}};
     static const SDL_DialogFileFilter wav[] = {{"Audio (WAV, AIFF, MP3, Ogg, FLAC)", splash::kAudioExtensions}};
     static const SDL_DialogFileFilter anim[] = {{"Animation clips", "anim"}};
-    const SDL_DialogFileFilter* filter = slot == AssetSlot::Texture || slot == AssetSlot::MemCardIcon ? images
+    const SDL_DialogFileFilter* filter = slot == AssetSlot::Texture || slot == AssetSlot::MemCardIcon || slot == AssetSlot::ShineTexture
+                                             ? images
                                          : slot == AssetSlot::Clip    ? wav
                                          : slot == AssetSlot::SkinClips ? anim
                                                                         : lua;
@@ -1510,7 +1511,9 @@ static void applyAssetFiles(State& st, editor::Document& doc, AssetSlot slot, co
                             const std::vector<std::string>& files, bool append = false, int index = -1) {
     const bool sceneWide = slot == AssetSlot::SceneLua || slot == AssetSlot::MemCardIcon || slot == AssetSlot::UiTexture;
     if (files.empty() || (!sceneWide && !doc.object(target))) return;
-    const char* folder = slot == AssetSlot::Texture || slot == AssetSlot::MemCardIcon || slot == AssetSlot::UiTexture ? "textures"
+    const char* folder = slot == AssetSlot::Texture || slot == AssetSlot::MemCardIcon || slot == AssetSlot::UiTexture ||
+                                 slot == AssetSlot::ShineTexture
+                             ? "textures"
                          : slot == AssetSlot::Clip      ? "audio"
                          : slot == AssetSlot::SkinClips ? "anims"
                                                         : "scripts";
@@ -1564,6 +1567,11 @@ static void applyAssetFiles(State& st, editor::Document& doc, AssetSlot slot, co
                 if (!o.mesh) return;
                 if (o.mesh->materials.size() <= size_t(std::max(index, 0))) o.mesh->materials.resize(size_t(std::max(index, 0)) + 1);
                 o.mesh->materials[size_t(std::max(index, 0))].texture = first;
+                break;
+            case AssetSlot::ShineTexture:
+                if (!o.mesh) return;
+                if (o.mesh->materials.size() <= size_t(std::max(index, 0))) o.mesh->materials.resize(size_t(std::max(index, 0)) + 1);
+                o.mesh->materials[size_t(std::max(index, 0))].shine.texture = first;
                 break;
             case AssetSlot::Lua:
                 if (o.script) o.script->lua = first;
@@ -1622,7 +1630,8 @@ static bool slotTakes(int slot, editor::AssetType t) {
         case AssetSlot::Clip: return t == T::Audio;
         case AssetSlot::SkinClips: return t == T::Animation;
         case AssetSlot::MemCardIcon:
-        case AssetSlot::UiTexture: return t == T::Texture;
+        case AssetSlot::UiTexture:
+        case AssetSlot::ShineTexture: return t == T::Texture;
     }
     return false;
 }
@@ -5479,6 +5488,16 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
         dl->ChannelsSetCurrent(kScene);
         shadowOverlay(dl, view, mn, sz, doc, shown, st.live.result());
     }
+    // Scripted tests: how many triangles the scene view draws a shine over.
+    if (namedRectsOn()) {
+        static size_t shineReported = 0;
+        const size_t n = view.shineTriangles();
+        if (n != shineReported && ImGui::GetFrameCount() > 1) {
+            shineReported = n;
+            std::printf("shine preview: %zu triangles\n", n);
+            std::fflush(stdout);
+        }
+    }
 
     // Selection outline and the tool's gizmo follow the selected object.
     if (sel) {
@@ -8984,15 +9003,70 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
             ImGui::PopStyleVar(4);
             ImGui::PopStyleColor(2);
         };
+        // A material's shine (splash::Shine): its reflection image, and once it
+        // has one, strength and blend. `sfx` names the rows: "" with one
+        // material (obj.shine, obj.shinestrength, obj.shineblend), else ".<i>".
+        auto shineRows = [&](size_t i, const std::string& sfx) {
+            const splash::Shine& sh = m.materials[i].shine;
+            const editor::TextureInfo* si = sh.texture.empty() ? nullptr : doc.texture(sh.texture);
+            const editor::AssetStatus sSt = si ? si->status : sh.texture.empty() ? editor::AssetStatus::Ok : editor::AssetStatus::Missing;
+            const std::string sMeta = si && si->status == editor::AssetStatus::Ok
+                                          ? std::to_string(si->width) + " x " + std::to_string(si->height)
+                                          : std::string();
+            const ImRect shRow =
+                row(("lshine" + sfx).c_str(), "Shine",
+                    "Reflection image for chrome, glass, wet floors or car paint. The console draws this part of the model "
+                    "again through it, mapped by which way each vertex faces the camera: the top of the image is what "
+                    "faces up, the middle what faces the camera, so the reflection slides over the surface as the camera "
+                    "moves. A sky or studio picture works best. Costs about one more triangle per shiny triangle.");
+            nameRect("obj.shine" + sfx, shRow);
+            if (slotField(st, static_cast<int>(AssetSlot::ShineTexture), path, ("shine" + sfx).c_str(), shRow, icon::grid,
+                          sSt != editor::AssetStatus::Ok ? color::warn : color::textDim,
+                          sh.texture.empty() ? "None" : fileName(sh.texture).c_str(), sMeta.empty() ? nullptr : sMeta.c_str(),
+                          int(i)) |
+                fileCard(("fixshine" + sfx).c_str(), sSt, sh.texture, si ? si->error : std::string()))
+                pickAsset(AssetSlot::ShineTexture, path, int(i));
+            if (sh.texture.empty()) return;
+            float sv = sh.strength * 100.f;
+            const ImRect strRow = row(("lshinestr" + sfx).c_str(), "Shine strength",
+                                      "How strongly the reflection shows: 100 draws the image as it is, 0 not at all. "
+                                      "With Add blending, high values wash a dark colour out to the reflection's.");
+            nameRect("obj.shinestrength" + sfx, strRow);
+            commit(numberField(("shinestr" + sfx).c_str(), strRow, fmtShort(sv).c_str(), "%", 0, nullptr, &sv), "shinestr" + sfx,
+                   [&](splash::Object& ob) {
+                       if (!ob.mesh || i >= ob.mesh->materials.size()) return;
+                       ob.mesh->materials[i].shine.strength = splash::clampv(sv / 100.f, 0.f, 1.f);
+                   });
+            const ImRect blRow = row(("lshineblend" + sfx).c_str(), "Shine blend",
+                                     "Add brightens what is under it, for chrome, glass and highlights. Half averages the "
+                                     "two 50/50, so paint keeps its colour under the reflection. Off removes the shine.");
+            nameRect("obj.shineblend" + sfx, blRow);
+            const bool half = sh.blend == splash::ShineBlend::Half;
+            const int pick = dropdownMenu(("obj.shineblend" + sfx).c_str(), blRow, nullptr, half ? "Half" : "Add",
+                                          {"Off", "Add", "Half"}, half ? 2 : 1);
+            if (pick == 0)
+                doc.edit(path, [i](splash::Object& ob) {
+                    if (ob.mesh && i < ob.mesh->materials.size()) ob.mesh->materials[i].shine.texture.clear();
+                });
+            else if (pick > 0 && (pick == 2) != half)
+                doc.edit(path, [i, pick](splash::Object& ob) {
+                    if (ob.mesh && i < ob.mesh->materials.size())
+                        ob.mesh->materials[i].shine.blend = pick == 2 ? splash::ShineBlend::Half : splash::ShineBlend::Add;
+                });
+        };
         // For scripted tests: the materials, one line each.
         int textured = 0;
         for (const splash::Material& mat : m.materials) textured += !mat.texture.empty();
         std::string matLines = "materials: " + std::to_string(nMat) + " textured " + std::to_string(textured);
         for (size_t i = 0; i < nMat; i++) {
             const std::array<float, 4>& c4 = m.materials[i].color;
+            const splash::Shine& sh = m.materials[i].shine;
             matLines += "\nmaterial " + std::to_string(i) + ": texture " +
                         (m.materials[i].texture.empty() ? std::string("none") : fileName(m.materials[i].texture)) + " colour " +
-                        colourHex({c4[0], c4[1], c4[2]});
+                        colourHex({c4[0], c4[1], c4[2]}) + " shine " +
+                        (sh.texture.empty() ? std::string("none")
+                                            : fileName(sh.texture) + " strength " + fmtShort(sh.strength * 100.f) + " blend " +
+                                                  (sh.blend == splash::ShineBlend::Half ? "half" : "add"));
         }
         materialLines = matLines;
         if (nMat <= 1) {
@@ -9003,6 +9077,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                 fileCard("fixtex", texSt, texPath, ti ? ti->error : std::string()))
                 pickAsset(AssetSlot::Texture, path, 0);
             if (nMat == 1 && texPath.empty()) matColour(0);
+            if (nMat == 1) shineRows(0, "");
         } else {
             std::string cap = std::to_string(nMat) + " materials, " + std::to_string(textured) + " textured";
             if (meshSt == editor::AssetStatus::Ok && nMat > size_t(mi->submeshes)) {
@@ -9032,6 +9107,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                     fileCard(("fixtex." + is).c_str(), mSt, tp, mt ? mt->error : std::string()))
                     pickAsset(AssetSlot::Texture, path, int(i));
                 if (tp.empty()) matColour(i);
+                shineRows(i, "." + is);
             }
         }
         if (to4) {
@@ -11064,6 +11140,8 @@ static void statusBar(ImDrawList* dl, ImVec2 size, const editor::Document& doc, 
         std::string rs = mb(r.used) + " / " + mb(r.capacity) + " MB";
         std::string ts = std::to_string(s.triangles);
         if (s.trianglesInView != uint64_t(s.triangles)) ts += ", up to " + std::to_string(s.trianglesInView) + " in view";
+        // A shiny triangle draws twice: trianglesInView counts its overlay.
+        if (s.shineTriangles > 0) ts += ", " + std::to_string(s.shineTriangles) + " shiny";
         x += meter("m_vram", ImVec2(x, bar.Min.y), icon::grid, "VRAM", v.fraction(), vs.c_str(),
                    "Framebuffers, texture atlases, palettes and fonts, as the export packs them.") +
              space::xl;
@@ -11076,7 +11154,8 @@ static void statusBar(ImDrawList* dl, ImVec2 size, const editor::Document& doc, 
              space::xl;
         x += meter("m_tris", ImVec2(x, bar.Min.y), icon::box, "Triangles", t.fraction(), ts.c_str(),
                    "Triangles in the exported meshes, and the most that can be in view at once (what the meter "
-                   "measures). The psxsplash docs suggest 1000 to 2000 visible triangles per frame at 30 fps.") +
+                   "measures). A shiny triangle counts twice: its reflection is drawn as one more. The psxsplash docs "
+                   "suggest 1000 to 2000 visible triangles per frame at 30 fps.") +
              space::xl;
         auto meterLine = [](const char* name, const splash::Budget& m) {
             scriptLine((std::string("statusbar.") + name).c_str(),

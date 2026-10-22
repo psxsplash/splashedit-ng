@@ -33,9 +33,24 @@ using ExtraKeys = std::vector<std::pair<std::string, std::string>>;
 // Scene and mesh file format version this build reads and writes.
 constexpr int kFormatVersion = 1;
 
+// How a shine overlay meets what is under it: added (chrome, glass,
+// highlights), or averaged 50/50 with it (paint, which keeps its colour).
+enum class ShineBlend : uint8_t { Add = 0, Half = 1 };
+
+// Environment-mapped reflection (psxsplash shinemath.hh): the console draws
+// the material, then the same triangles again through `texture`, with UVs
+// from the vertex normals as the camera sees them (the top of the image is
+// what faces up), at `strength`. Off while `texture` is empty.
+struct Shine {
+    std::string texture;  // project-relative path, empty = no shine
+    float strength = 0.5f;  // 0..1, the overlay at full is the image as is
+    ShineBlend blend = ShineBlend::Add;
+};
+
 struct Material {
     std::string texture;  // project-relative path, empty = untextured
     std::array<float, 4> color{1, 1, 1, 1};
+    Shine shine;
     ExtraKeys extra;
 };
 

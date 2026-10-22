@@ -169,6 +169,33 @@ class Ps1View {
     unsigned m_prog = 0, m_skyProg = 0, m_vao = 0, m_vbo = 0, m_fbo = 0, m_color = 0, m_depth = 0;
     unsigned m_white = 0, m_fallback = 0;
     size_t m_vboCap = 0;
+
+    // Shine (splash::Shine): the shiny triangles once more, with their
+    // render-space normals; every render() turns the normals into reflection
+    // UVs for the eye, as psxsplash does with the GTE, and draws them blended
+    // over the scene (added, or averaged 50/50).
+    struct ShineVert {
+        float px, py, pz;
+        float nx, ny, nz;
+        float grey;  // strength / 2: the shader doubles it, so 0.5 draws the image as it is
+    };
+    struct ShineBatch {
+        unsigned tex;
+        bool half;
+        int start;
+        int count;
+    };
+    std::vector<ShineVert> m_shineSrc;
+    std::vector<ShineBatch> m_shineBatches;
+    std::vector<Vertex> m_shineVerts;
+    unsigned m_shineVao = 0, m_shineVbo = 0;
+    void drawShine(Vec3 right, Vec3 up);
+
+  public:
+    // Shine overlay triangles the last rebuild collected (scripted checks).
+    size_t shineTriangles() const { return m_shineSrc.size() / 3; }
+
+  private:
     int m_fboW = 0, m_fboH = 0;
     Vec3 m_eye{7.6f, 5.2f, 9.2f}, m_target{-0.9f, 0.9f, -2.0f};
     bool m_ortho = false;

@@ -197,7 +197,8 @@ void Document::cacheAssets(const splash::Object& o) {
     if (o.mesh) {
         if (!o.mesh->mesh.empty() && !m_meshes.count(o.mesh->mesh)) m_meshes[o.mesh->mesh] = analyseMesh(resolve(o.mesh->mesh));
         for (const splash::Material& mat : o.mesh->materials)
-            if (!mat.texture.empty() && !m_textures.count(mat.texture)) m_textures[mat.texture] = analyseTexture(resolve(mat.texture));
+            for (const std::string* p : {&mat.texture, &mat.shine.texture})
+                if (!p->empty() && !m_textures.count(*p)) m_textures[*p] = analyseTexture(resolve(*p));
     }
     auto file = [&](const std::string& p) {
         if (!p.empty() && !m_files.count(p)) m_files[p] = isFile(resolve(p));
@@ -1012,8 +1013,10 @@ bool Document::hasWarning(const splash::Object& o) const {
     if (!o.prefab.empty() && !o.prefabResolved) return true;
     if (o.mesh) {
         if (const MeshInfo* mi = mesh(o.mesh->mesh); !mi || mi->status != AssetStatus::Ok) return true;
-        for (const splash::Material& mat : o.mesh->materials)
+        for (const splash::Material& mat : o.mesh->materials) {
             if (const TextureInfo* t = texture(mat.texture); t && t->status != AssetStatus::Ok) return true;
+            if (const TextureInfo* t = texture(mat.shine.texture); t && t->status != AssetStatus::Ok) return true;
+        }
         if (couldBe4bpp(*o.mesh)) return true;
         if (missingMeshColors(*o.mesh)) return true;
     }
