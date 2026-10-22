@@ -363,6 +363,36 @@ std::string cueTime(uint32_t lba) {
     return b;
 }
 
+double cdReadMs(uint32_t sectors) { return sectors ? kCdReadMs + (sectors - 1) * kCdSectorMs : 0.0; }
+
+SceneLoad estimateSceneLoad(size_t ldgBytes, size_t vramBytes, size_t spuBytes, size_t splashpackBytes,
+                            const std::vector<uint32_t>& regionSectors) {
+    SceneLoad l;
+    auto read = [&](uint32_t sectors) {
+        if (!sectors) return;
+        l.reads++;
+        l.sectors += sectors;
+        l.ms += cdReadMs(sectors);
+    };
+    auto sectorsOf = [](size_t bytes) { return uint32_t((bytes + 2047) / 2048); };
+    for (uint32_t i = 0; i < kSceneDirReads; i++) read(1);
+    read(sectorsOf(ldgBytes));
+    read(sectorsOf(vramBytes));
+    read(sectorsOf(spuBytes));
+    const uint32_t spk = sectorsOf(splashpackBytes);
+    // Chunked only behind a loading screen (SceneManager::loadScene picks LoadFileSyncWithProgress then).
+    const uint32_t chunk = ldgBytes ? kSplashpackChunkSectors : spk;
+    for (uint32_t done = 0; done < spk; done += chunk) read(std::min(chunk, spk - done));
+    for (uint32_t s : regionSectors) read(s);
+    return l;
+}
+
+std::string loadTimeText(double ms) {
+    char b[32];
+    std::snprintf(b, sizeof b, "~%.1f s", ms / 1000.0);
+    return b;
+}
+
 DiscInfo writeDiscImage(const std::vector<DiscFile>& files, const std::string& volume, const fs::path& bin,
                         const std::vector<LicenceSector>& licence, const std::vector<std::vector<int16_t>>& tracks) {
     if (tracks.size() + 1 > kMaxDiscTracks)
@@ -684,6 +714,7 @@ DiscResult exportDisc(const std::vector<const Scene*>& scenes, const fs::path& p
             ExportResult& one = all[i];
             for (const std::string& m : one.errors) r.exported.errors.push_back(tag + m);
             for (const std::string& m : one.warnings) r.exported.warnings.push_back(tag + m);
+            const std::vector<uint32_t> regions = one.stats.streamInitialSectors;
             if (i == 0) r.exported.stats = std::move(one.stats);
             if (!one.errors.empty()) continue;
             const std::string dir = "SCENE" + std::to_string(i) + "/SCENE_" + std::to_string(i);
@@ -692,10 +723,18 @@ DiscResult exportDisc(const std::vector<const Scene*>& scenes, const fs::path& p
             // the loading screen first (drawn while the rest loads), then VRAM, SPU, the
             // splashpack, and the streamed geometry (opened last, read during play).
             // The loading screen psxsplash draws while this scene loads.
-            if (fs::exists(part.replace_extension(".loading"))) files.push_back({dir + ".LDG", readFile(part)});
+            size_t ldg = 0;
+            if (fs::exists(part.replace_extension(".loading"))) {
+                files.push_back({dir + ".LDG", readFile(part)});
+                ldg = files.back().data.size();
+            }
             files.push_back({dir + ".VRM", readFile(part.replace_extension(".vram"))});
+            const size_t vrm = files.back().data.size();
             files.push_back({dir + ".SPU", readFile(part.replace_extension(".spu"))});
+            const size_t spu = files.back().data.size();
             files.push_back({dir + ".SPK", readFile(spk)});
+            r.loads.push_back(estimateSceneLoad(ldg, vrm, spu, files.back().data.size(), regions));
+            if (i < names.size()) r.loads.back().name = names[i];
             // World streaming reads its regions from here while the game runs.
             if (fs::exists(part.replace_extension(".geo"))) files.push_back({dir + ".GEO", readFile(part)});
         }
@@ -721,6 +760,7 @@ DiscResult exportDisc(const std::vector<const Scene*>& scenes, const fs::path& p
     } catch (const std::exception& e) {
         r.exported.errors.push_back(e.what());
     }
+    if (!r.exported.errors.empty()) r.loads.clear();  // no disc, nothing to load
     fs::remove_all(tmp, ec);
     return r;
 }

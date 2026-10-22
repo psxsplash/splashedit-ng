@@ -2410,6 +2410,21 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     std::vector<StreamRegionOut> streamRegions;
     if (scene.settings.streamWorld)
         planStreaming(scene, exporters, streamed, streamRegions, luaSources, interactables, gte, res);
+    {
+        // What WorldStreamer::init reads at the player start (the header's playerStartPos):
+        // regions in the load radius, nearest first (ties to the lower index), one per slot.
+        const int64_t x = toPsxCoord(playerPos.x, gte), z = toPsxCoord(playerPos.z, gte);
+        const int64_t load2 = int64_t(st.streamLoadRadius) * st.streamLoadRadius;
+        std::vector<std::pair<int64_t, size_t>> near;
+        for (size_t i = 0; i < streamRegions.size(); i++) {
+            const int64_t d = stream::distSq(streamRegions[i].bounds, x, z);
+            if (d <= load2 && streamRegions[i].byteSize <= st.streamSlotBytes) near.push_back({d, i});
+        }
+        std::stable_sort(near.begin(), near.end(), [](auto& a, auto& b) { return a.first < b.first; });
+        const size_t slots = size_t(std::clamp(st.streamSlots, 0, stream::kMaxSlots));
+        for (size_t k = 0; k < near.size() && k < slots; k++)
+            st.streamInitialSectors.push_back(streamRegions[near[k].second].byteSize / stream::kSector);
+    }
 
     // BVH over active objects' exported triangles.
     std::vector<BvhInputObject> bvhIn;

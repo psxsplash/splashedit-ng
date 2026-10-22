@@ -11145,6 +11145,81 @@ void testDiscExportSettings() {
     CHECK(!bad.exported.errors.empty() && bad.exported.errors[0].find("1000") != std::string::npos);
 }
 
+// The disc's per-scene load estimate (issue #214): PCSX-Redux's CD timing,
+// 66.5 ms a read plus 6.67 ms per further sector at 2x, over the reads
+// psxsplash's loadScene makes. The file set is lamplighter's valley as traced
+// in Redux (16 reads, 239 sectors, 2.57 s of CD reads measured).
+void testDiscLoadEstimate() {
+    CHECK(splash::cdReadMs(0) == 0.0);
+    CHECK(std::fabs(splash::cdReadMs(1) - 66.5) < 1e-9);
+    CHECK(std::fabs(splash::cdReadMs(57) - (66.5 + 56 * 1000.0 / 150.0)) < 1e-9);
+
+    // Loading screen 25 sectors, VRAM 57, SPU 47, splashpack 76 (32 + 32 + 12),
+    // eight streamed regions at the player start; plus the root and scene directories.
+    const std::vector<uint32_t> regions{7, 7, 6, 6, 2, 1, 1, 2};
+    splash::SceneLoad v = splash::estimateSceneLoad(25 * 2048, 57 * 2048 - 100, 47 * 2048, 76 * 2048 - 1, regions);
+    CHECK(v.reads == 2 + 3 + 3 + 8);
+    CHECK(v.sectors == 2 + 25 + 57 + 47 + 76 + 32);
+    CHECK(std::fabs(v.ms - (16 * 66.5 + (239 - 16) * 1000.0 / 150.0)) < 1e-6);
+    CHECK(splash::loadTimeText(v.ms) == "~2.6 s");
+    CHECK(std::fabs(v.ms - 2572.0) / 2572.0 < 0.15);
+
+    // Without a loading screen the splashpack is one read (LoadFileSync); an empty file is none.
+    splash::SceneLoad plain = splash::estimateSceneLoad(0, 57 * 2048, 0, 76 * 2048);
+    CHECK(plain.reads == 2 + 1 + 1 && plain.sectors == 2 + 57 + 76);
+    // One sector past a chunk is one more read.
+    CHECK(splash::estimateSceneLoad(2048, 2048, 2048, 33 * 2048).reads == 2 + 3 + 2);
+    CHECK(splash::estimateSceneLoad(2048, 2048, 2048, 32 * 2048).reads == 2 + 3 + 1);
+
+    // exportDisc fills one estimate per scene, from the files it put on the disc.
+    using namespace disctest;
+    const fs::path project = fs::path(SPLASHEDIT_SOURCE_DIR) / "examples" / "courtyard";
+    const fs::path dir = g_outDir / "discload";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    writeBytes(dir / "cd.ps-exe", cdEngine());
+    splash::Scene scene = splash::loadScene(project / "courtyard.scene");
+    splash::DiscResult r = splash::exportDisc(std::vector<const splash::Scene*>{&scene, &scene}, project, dir / "cd.ps-exe",
+                                              dir / "two.bin", "courtyard", std::vector<std::string>{"yard", "again"});
+    CHECK(r.exported.ok() && r.loads.size() == 2);
+    if (r.loads.size() == 2) {
+        const splash::ExportStats& st = r.exported.stats;
+        auto sec = [](size_t b) { return uint32_t((b + 2047) / 2048); };
+        CHECK(r.loads[0].name == "yard" && r.loads[1].name == "again");
+        CHECK(r.loads[0].sectors >= 2 + sec(st.vramFileBytes) + sec(st.spuFileBytes) + sec(st.splashpackBytes));
+        CHECK(r.loads[0].reads >= 5 && r.loads[0].ms > 5 * 66.5);
+        CHECK(std::fabs(r.loads[0].ms - (r.loads[0].reads * splash::kCdReadMs +
+                                         (r.loads[0].sectors - r.loads[0].reads) * splash::kCdSectorMs)) < 1e-6);
+    }
+    // No disc, no estimates.
+    splash::DiscResult none = splash::exportDisc(scene, project, dir / "missing.ps-exe", dir / "none.bin", "courtyard");
+    CHECK(!none.exported.ok() && none.loads.empty());
+
+    // A streaming world: WorldStreamer::init's reads are the regions in the
+    // load radius of the start (the origin here), one per slot.
+    using namespace roomtest;
+    const fs::path wp = g_outDir / "discload-world";
+    fs::remove_all(wp);
+    (void)twoRooms(wp);  // writes the quad mesh the tiles use
+    splash::Scene world;
+    for (int i = 0; i < 40; i++)
+        world.objects.push_back(meshObject(("Tile " + std::to_string(i)).c_str(), "meshes/quad.mesh",
+                                           {float(50 * i), 0, 0}, false));
+    world.settings.streamWorld = true;
+    splash::ExportResult w = splash::exportSplashpack(world, wp, wp / "world.splashpack");
+    CHECK(w.ok() && w.stats.streamRegions > 1);
+    const int64_t load2 = int64_t(w.stats.streamLoadRadius) * w.stats.streamLoadRadius;
+    size_t inRange = 0;
+    for (const auto& b : w.stats.streamRegionBounds)
+        inRange += splash::stream::distSq({b[0], b[1], b[2], b[3]}, 0, 0) <= load2;
+    CHECK(inRange >= 1 && inRange < size_t(w.stats.streamRegions));
+    CHECK(w.stats.streamInitialSectors.size() == std::min(inRange, size_t(w.stats.streamSlots)));
+    for (uint32_t n : w.stats.streamInitialSectors) CHECK(n >= 1 && n * 2048 <= w.stats.streamSlotBytes);
+    // Not streaming: nothing read at the start.
+    world.settings.streamWorld = false;
+    CHECK(splash::exportSplashpack(world, wp, wp / "flat.splashpack").stats.streamInitialSectors.empty());
+}
+
 namespace fs = std::filesystem;
 
 // The size helpers the inspector estimates with match what export makes.
@@ -14370,6 +14445,7 @@ int main(int argc, char** argv) {
     testDiscSettings();
     testDiscLicenceImage();
     testDiscExportSettings();
+    testDiscLoadEstimate();
     testAudioSizes();
     testWavInfo();
     testAudioFormats();
