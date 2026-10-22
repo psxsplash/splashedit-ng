@@ -121,6 +121,7 @@ uniform vec3 uFog;
 uniform float uFogScale;  // grows with the orbit distance, so a big world is not all fog
 uniform float uFogFar;    // > 0: the scene's fog wall, in view depth
 uniform int uUntextured;  // bake only: a vertex colour is the pixel, as the GPU draws untextured triangles
+uniform float uAlpha;     // shine half blend: 0.5 with SRC_ALPHA, ONE_MINUS_SRC_ALPHA; else 1
 out vec4 oColor;
 const float kDither[16] = float[16](-4, 0, -3, 1, 2, -2, 3, -1, -3, 1, -4, 0, 3, -1, 2, -2);
 void main() {
@@ -141,7 +142,7 @@ void main() {
         vec3 v = floor(clamp(c * 255.0 + kDither[p.y * 4 + p.x], 0.0, 255.0));
         c = floor(v / 8.0) * 8.0 / 255.0;
     }
-    oColor = vec4(c, 1.0);
+    oColor = vec4(c, uAlpha);
 }
 )";
 
@@ -257,6 +258,8 @@ const splash::Scene* Ps1View::drawnScene() const {
 void Ps1View::rebuild() {
     m_verts.clear();
     m_batches.clear();
+    m_shineSrc.clear();
+    m_shineBatches.clear();
     m_pick.clear();
     m_posed.reset();
     if (!m_doc) {
@@ -275,6 +278,7 @@ void Ps1View::rebuild() {
 
     // Collect geometry into per-texture buckets.
     std::map<unsigned, std::vector<Vertex>> buckets;
+    std::map<std::pair<unsigned, bool>, std::vector<ShineVert>> shineBuckets;
     std::map<std::string, splash::Mesh>& meshCache = m_meshCache;
     if (m_doc->loadId() != m_meshCacheLoad || m_doc->assetsId() != m_meshCacheAssets) {
         meshCache.clear();
@@ -359,6 +363,26 @@ void Ps1View::rebuild() {
                 bucket.push_back({wp[i].x, wp[i].y, -wp[i].z, uv.x, uv.y, col.x, col.y, col.z});
             }
             if (m_bakeCam) bakeClip(fo, *mesh, tri, &bucket[firstVertex]);
+            // Shine: the same corners with their normals, in render space.
+            // A normal goes through the object's rotation and the inverse of
+            // its scale (localToWorld is R * S: R * S^-1 n = M * S^-2 n).
+            if (!m_bakeCam && !mat.shine.texture.empty()) {
+                std::vector<ShineVert>& sb =
+                    shineBuckets[{textureFor(mat.shine.texture), mat.shine.blend == splash::ShineBlend::Half}];
+                const splash::Vec3 s = fo.lossyScale;
+                const float grey = std::clamp(mat.shine.strength, 0.0f, 1.0f) * 0.5f;
+                for (int idx : tri) {
+                    const splash::Vec3 n = mesh->normals[(size_t)idx];
+                    const splash::Vec3 q{s.x != 0 ? n.x / (s.x * s.x) : 0.f, s.y != 0 ? n.y / (s.y * s.y) : 0.f,
+                                         s.z != 0 ? n.z / (s.z * s.z) : 0.f};
+                    const splash::Mat34& m = fo.localToWorld;
+                    Vec3 wn = normalize(Vec3{m.m[0][0] * q.x + m.m[0][1] * q.y + m.m[0][2] * q.z,
+                                             m.m[1][0] * q.x + m.m[1][1] * q.y + m.m[1][2] * q.z,
+                                             -(m.m[2][0] * q.x + m.m[2][1] * q.y + m.m[2][2] * q.z)});
+                    const splash::Vec3& p = wp[(size_t)idx];
+                    sb.push_back({p.x, p.y, -p.z, wn.x, wn.y, wn.z, grey});
+                }
+            }
         }
     }
 
@@ -368,6 +392,12 @@ void Ps1View::rebuild() {
         int start = (int)m_verts.size();
         m_verts.insert(m_verts.end(), verts.begin(), verts.end());
         m_batches.push_back({tex, start, (int)verts.size()});
+    }
+    for (auto& [key, verts] : shineBuckets) {
+        if (verts.empty()) continue;
+        int start = (int)m_shineSrc.size();
+        m_shineSrc.insert(m_shineSrc.end(), verts.begin(), verts.end());
+        m_shineBatches.push_back({key.first, key.second, start, (int)verts.size()});
     }
 
     // Frame the scene bounds from the current eye direction so any scene fits.
@@ -426,6 +456,17 @@ bool Ps1View::init() {
     glBindVertexArray(m_vao);
     glGenBuffers(1, &m_vbo);
     glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, px));
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, u));
+    glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, r));
+    glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, pw));
+    for (int i = 0; i < 4; ++i) glEnableVertexAttribArray(i);
+    glBindVertexArray(0);
+
+    glGenVertexArrays(1, &m_shineVao);
+    glBindVertexArray(m_shineVao);
+    glGenBuffers(1, &m_shineVbo);
+    glBindBuffer(GL_ARRAY_BUFFER, m_shineVbo);
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, px));
     glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, u));
     glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, r));
@@ -541,6 +582,7 @@ unsigned Ps1View::render(int panelW, int panelH, int lines) {
     glUniform1f(glGetUniformLocation(m_prog, "uFogFar"), fogFar);
     glUniform1i(glGetUniformLocation(m_prog, "uTex"), 0);
     glUniform1i(glGetUniformLocation(m_prog, "uUntextured"), 0);
+    glUniform1f(glGetUniformLocation(m_prog, "uAlpha"), 1.0f);
     glActiveTexture_(GL_TEXTURE0);
     glBindVertexArray(m_vao);
     for (const Batch& b : m_batches) {
@@ -548,9 +590,50 @@ unsigned Ps1View::render(int panelW, int panelH, int lines) {
         glDrawArrays(GL_TRIANGLES, b.start, b.count);
     }
     glBindVertexArray(0);
+    // The overlay fades into the fog as the console's does (toward black:
+    // what it adds goes, the fog the triangle under it got stays).
+    if (!m_shineBatches.empty()) {
+        glUniform3f(glGetUniformLocation(m_prog, "uFog"), 0, 0, 0);
+        drawShine(bRight, bUp);
+    }
     glDisable(GL_DEPTH_TEST);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     return m_color;
+}
+
+// The reflection UVs psxsplash computes on the GTE, for this eye: the
+// normal's view-space x and y (y up here; the image's top row is at v = 1,
+// as textureFor loads it) map the image's centre to the normal facing the
+// eye and its edges to the normals across the view.
+void Ps1View::drawShine(Vec3 right, Vec3 up) {
+    m_shineVerts.resize(m_shineSrc.size());
+    for (size_t i = 0; i < m_shineSrc.size(); i++) {
+        const ShineVert& s = m_shineSrc[i];
+        const Vec3 n{s.nx, s.ny, s.nz};
+        Vertex& v = m_shineVerts[i];
+        v.px = s.px, v.py = s.py, v.pz = s.pz, v.pw = 1;
+        v.u = std::clamp(0.5f + 0.5f * dot(n, right), 0.0f, 0.999f);
+        v.v = std::clamp(0.5f + 0.5f * dot(n, up), 0.0f, 0.999f);
+        v.r = v.g = v.b = s.grey;
+    }
+    glBindVertexArray(m_shineVao);
+    glBindBuffer(GL_ARRAY_BUFFER, m_shineVbo);
+    glBufferData(GL_ARRAY_BUFFER, m_shineVerts.size() * sizeof(Vertex), m_shineVerts.data(), GL_STREAM_DRAW);
+    glEnable(GL_BLEND);
+    glDepthFunc(GL_LEQUAL);
+    glDepthMask(GL_FALSE);
+    for (const ShineBatch& b : m_shineBatches) {
+        if (b.half) glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        else glBlendFunc(GL_ONE, GL_ONE);
+        glUniform1f(glGetUniformLocation(m_prog, "uAlpha"), b.half ? 0.5f : 1.0f);
+        glBindTexture(GL_TEXTURE_2D, b.tex);
+        glDrawArrays(GL_TRIANGLES, b.start, b.count);
+    }
+    glUniform1f(glGetUniformLocation(m_prog, "uAlpha"), 1.0f);
+    glDepthMask(GL_TRUE);
+    glDepthFunc(GL_LESS);
+    glDisable(GL_BLEND);
+    glBindVertexArray(0);
 }
 
 // Each corner of a bake where psxsplash would put it: through the engine's
@@ -643,6 +726,7 @@ bool Ps1View::bake(const splash::BgCamera& cam, const std::vector<bool>& include
     glUniform1f(glGetUniformLocation(m_prog, "uFogScale"), 1e9f);
     glUniform1f(glGetUniformLocation(m_prog, "uFogFar"), fogFar);
     glUniform1i(glGetUniformLocation(m_prog, "uTex"), 0);
+    glUniform1f(glGetUniformLocation(m_prog, "uAlpha"), 1.0f);
     glActiveTexture_(GL_TEXTURE0);
     glBindVertexArray(m_vao);
     // Textured: texel x colour / 128, as the GPU modulates; untextured: the
