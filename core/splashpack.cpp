@@ -23,7 +23,9 @@
 #include "rooms.hh"
 #include "font.hh"
 #include "luacompile.hh"
+#include "luascan.hh"
 #include "navregion.hh"
+#include "shadow.hh"
 #include "skin.hh"
 #include "texture.hh"
 #include "vrampacker.hh"
@@ -2461,6 +2463,9 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
         try {
             std::string src = readFile(root / p);
             if (fs::path(p).extension() == ".blocks") src = blocksFileToLua(src, p);
+            // The bundled engines have no Lua compiler: text loaded at run time fails there.
+            std::string runtime = runtimeLuaWarning(p, runtimeLuaUses(src));
+            if (!runtime.empty()) res.warnings.push_back(std::move(runtime));
             luaSources.push_back(src);
             if (options.luaBytecode) {
                 std::vector<uint8_t> bc = compileLua(src, p);
@@ -2674,6 +2679,9 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
         }
         info.centroid = {cx, r.planeA * cx + r.planeB * cz + r.planeD, cz};
         info.floorY = info.centroid.y;
+        info.planeA = r.planeA;
+        info.planeB = r.planeB;
+        info.planeD = r.planeD;
         info.room = r.roomIndex == 0xFF ? -1 : int(r.roomIndex);
         info.surface = int(r.surfaceType);
         info.platform = (r.flags & 1) != 0;
@@ -2693,8 +2701,58 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     if (!agents.empty() && nav.regions.empty())
         res.warnings.push_back(agentNoNavWarning(agents.size() == 1 ? agents[0]->object->name : std::string()));
 
+    // Blob shadows (v28), in game object order. A streamed object cut into
+    // parts keeps one blob, on its first part.
+    struct ShadowOut {
+        uint16_t object;
+        uint8_t darkness;
+        uint16_t size;
+    };
+    std::vector<ShadowOut> shadows;
+    {
+        std::set<const FlatObject*> seen;
+        std::string dropped;
+        for (size_t oi = 0; oi < exporters.size(); oi++) {
+            const ExpObject& e = exporters[oi];
+            if (e.mc->shadow != ShadowMode::Blob || !seen.insert(e.flat).second) continue;
+            if (shadows.size() == size_t(shadow::kMaxSceneShadows)) {
+                dropped += (dropped.empty() ? "" : ", ") + e.obj->name;
+                continue;
+            }
+            const float size = std::clamp(e.mc->shadowSize, shadow::kMinSize, shadow::kMaxSize);
+            shadows.push_back({uint16_t(oi), shadow::darknessByte(e.mc->shadowDarkness),
+                               uint16_t(clampv(roundToInt(size / gte * 4096.f), 1, 65535))});
+            // On a scene with nav, a blob off it lies flat under the object.
+            // A static collider stands in a hole of the nav it cuts, on the
+            // ground, where that is right.
+            const bool staticProp = e.obj->collider && e.obj->collider->kind == ColliderKind::Static;
+            if (!st.navOutlines.empty() && !staticProp) {
+                const Bounds lb = e.pieceBounds ? *e.pieceBounds : e.mesh->bounds();
+                float bottom = 0, top = 0;
+                for (int c = 0; c < 8; c++) {
+                    const float y = e.flat->localToWorld.point(lb.center + Vec3{c & 1 ? lb.extents.x : -lb.extents.x,
+                                                                                c & 2 ? lb.extents.y : -lb.extents.y,
+                                                                                c & 4 ? lb.extents.z : -lb.extents.z}).y;
+                    bottom = c == 0 ? y : std::min(bottom, y);
+                    top = c == 0 ? y : std::max(top, y);
+                }
+                if (shadow::blobFor(e.flat->localToWorld.position(), bottom, top, size, e.mc->shadowDarkness,
+                                    st.navOutlines, st.navInfo).region < 0)
+                    res.warnings.push_back(e.obj->name +
+                                           ": its Blob shadow has no navigation floor under it where the scene starts, so "
+                                           "it lies flat under the object's bounds until the object moves over the floor");
+            }
+        }
+        if (!dropped.empty())
+            res.warnings.push_back("the scene has more blob shadows than the PS1 draws (" +
+                                   std::to_string(shadow::kMaxSceneShadows) + "); left out: " + dropped);
+    }
+    const bool hasShadows = !shadows.empty();
+    st.shadows = int(shadows.size());
+
     BinWriter w;
-    st.bumpAllocatorNeed = bumpAllocatorNeed(scene, exporters, streamed, st.streamDrawTris, canvases);
+    st.bumpAllocatorNeed = bumpAllocatorNeed(scene, exporters, streamed, st.streamDrawTris, canvases) +
+                           uint32_t(shadows.size()) * shadow::kBumpBytes;
     // A background showing adds a sprite (20 bytes as a fragment) and a TPage
     // (8) per image column and layer tile, every frame.
     {
@@ -2708,13 +2766,12 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     st.bumpAllocatorSize = scene.settings.bumpAllocatorSize > 0 ? (uint32_t(scene.settings.bumpAllocatorSize) + 3) & ~3u
                                                                  : st.bumpAllocatorNeed;
 
-    // ---- header (156 bytes, v25; 160 bytes, v28, with baked backgrounds).
-    // v27 stays the default: an engine that predates v28 reads a 156-byte
-    // header whatever the version says.
+    // ---- header (156 bytes, v27; 160 bytes, v28, with shadows or baked
+    // backgrounds)
     bool hasLights = !runtimeLights.empty();
     w.u8('S');
     w.u8('P');
-    w.u16(backgrounds.empty() ? 27 : 28);
+    w.u16(hasShadows || !backgrounds.empty() ? 28 : 27);
     w.u16(uint16_t(luaFiles.size()));
     w.u16(uint16_t(exporters.size()));
     res.stats.gameObjects = int(exporters.size());
@@ -2804,6 +2861,11 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     w.u32(0);
     w.u32(st.orderingTableSize);
     w.u32(st.bumpAllocatorSize);
+    size_t shadowTableOffsetPos = 0;
+    if (hasShadows) {
+        shadowTableOffsetPos = w.pos();
+        w.u32(0);
+    }
     size_t backgroundTableOffsetPos = 0;
     if (!backgrounds.empty()) {
         backgroundTableOffsetPos = w.pos();
@@ -3234,6 +3296,23 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
             w.patchU32(namePos[i], uint32_t(w.pos()));
             w.bytes(name.data(), name.size());
             w.u8(0);
+        }
+    }
+
+    // ---- shadows (v28): {u16 count, u16 0}, then 8-byte records
+    // {u16 object, u8 mode, u8 darkness, u16 size, u16 fade height}
+    if (hasShadows) {
+        w.align4();
+        w.patchU32(shadowTableOffsetPos, uint32_t(w.pos()));
+        w.u16(uint16_t(shadows.size()));
+        w.u16(0);
+        const uint16_t fade = uint16_t(clampv(roundToInt(shadow::kFadeHeight / gte * 4096.f), 1, 65535));
+        for (const ShadowOut& so : shadows) {
+            w.u16(so.object);
+            w.u8(shadow::kModeBlob);
+            w.u8(so.darkness);
+            w.u16(so.size);
+            w.u16(fade);
         }
     }
 

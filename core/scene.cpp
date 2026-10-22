@@ -65,6 +65,8 @@ const std::initializer_list<std::pair<const char*, DynamicLighting>> kDynamicLig
     {"on", DynamicLighting::On},
     {"off", DynamicLighting::Off},
     {"smooth", DynamicLighting::Smooth}};
+const std::initializer_list<std::pair<const char*, ShadowMode>> kShadowModes = {{"off", ShadowMode::Off},
+                                                                                  {"blob", ShadowMode::Blob}};
 const std::initializer_list<std::pair<const char*, SceneType>> kSceneTypes = {
     {"exterior", SceneType::Exterior}, {"interior", SceneType::Interior}};
 const std::initializer_list<std::pair<const char*, NavPartition>> kPartitions = {
@@ -134,6 +136,11 @@ json writeMesh(const MeshComponent& m) {
               {"uvOffsetMaterial", m.uvOffsetMaterial},
               {"dynamicLighting", enumTo(m.dynamicLighting, kDynamicLighting)}};
     if (m.keep3dInFixedCameras) j["keep3dInFixedCameras"] = true;
+    // Written only when not the default, so scenes without shadows keep their bytes.
+    const MeshComponent def;
+    if (m.shadow != def.shadow) j["shadow"] = enumTo(m.shadow, kShadowModes);
+    if (m.shadowSize != def.shadowSize) j["shadowSize"] = m.shadowSize;
+    if (m.shadowDarkness != def.shadowDarkness) j["shadowDarkness"] = m.shadowDarkness;
     putExtras(j, m.extra);
     return j;
 }
@@ -307,9 +314,17 @@ Object readObject(const json& j) {
             m.uvOffsetMaterial = c.value("uvOffsetMaterial", 0);
             if (c.contains("dynamicLighting")) m.dynamicLighting = enumFrom(c["dynamicLighting"], kDynamicLighting);
             m.keep3dInFixedCameras = c.value("keep3dInFixedCameras", false);
-            m.extra = extrasOf(c, writeMesh(m));
-            // Written only when on, so an explicit false is known too.
-            std::erase_if(m.extra, [](const auto& kv) { return kv.first == "keep3dInFixedCameras"; });
+            if (c.contains("shadow")) m.shadow = enumFrom(c["shadow"], kShadowModes);
+            m.shadowSize = c.value("shadowSize", m.shadowSize);
+            m.shadowDarkness = c.value("shadowDarkness", m.shadowDarkness);
+            {
+                // The shadow keys are the mesh's own even when they hold the default.
+                json written = writeMesh(m);
+                // keep3dInFixedCameras is written only when on, so an explicit false is known too.
+                for (const char* k : {"shadow", "shadowSize", "shadowDarkness", "keep3dInFixedCameras"})
+                    written[k] = nullptr;
+                m.extra = extrasOf(c, written);
+            }
             o.mesh = m;
         } else if (type == "collider") {
             ColliderComponent cc;
