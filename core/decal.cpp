@@ -113,6 +113,39 @@ DecalBuild buildDecal(const DecalComponent& d, Vec3 position, Quat rotation, Vec
     return out;
 }
 
+Quat decalRotation(Vec3 normal, Vec3 up) {
+    const Vec3 z = normalized(normal);
+    const Vec3 y = normalized(up - z * dot(up, z));
+    const Vec3 x = cross(y, z);
+    // Rotation matrix with columns x, y, z to a quaternion (Shepperd).
+    const float m00 = x.x, m01 = y.x, m02 = z.x, m10 = x.y, m11 = y.y, m12 = z.y, m20 = x.z, m21 = y.z, m22 = z.z;
+    const float tr = m00 + m11 + m22;
+    Quat q;
+    if (tr > 0) {
+        const float s = std::sqrt(tr + 1.0f) * 2;
+        q = {(m21 - m12) / s, (m02 - m20) / s, (m10 - m01) / s, 0.25f * s};
+    } else if (m00 > m11 && m00 > m22) {
+        const float s = std::sqrt(1.0f + m00 - m11 - m22) * 2;
+        q = {0.25f * s, (m01 + m10) / s, (m02 + m20) / s, (m21 - m12) / s};
+    } else if (m11 > m22) {
+        const float s = std::sqrt(1.0f + m11 - m00 - m22) * 2;
+        q = {(m01 + m10) / s, 0.25f * s, (m12 + m21) / s, (m02 - m20) / s};
+    } else {
+        const float s = std::sqrt(1.0f + m22 - m00 - m11) * 2;
+        q = {(m02 + m20) / s, (m12 + m21) / s, 0.25f * s, (m10 - m01) / s};
+    }
+    return q;
+}
+
+Quat decalPlacement(Vec3 normal, Vec3 viewForward) {
+    const Vec3 n = normalized(normal);
+    if (std::fabs(n.y) < 0.9f) return decalRotation(n, {0, 1, 0});
+    Vec3 up = viewForward - n * dot(viewForward, n);
+    if (sqrMagnitude(up) < 1e-8f) up = std::fabs(n.z) < 0.9f ? Vec3{0, 0, 1} : Vec3{1, 0, 0};
+    // Seen from the viewer the top is the far side; a ceiling, seen from below, reads that way too.
+    return decalRotation(n, normalized(up));
+}
+
 std::string decalExclusion(const Object& o) {
     if (o.skin) return "skinned";
     if (o.collider && o.collider->kind == ColliderKind::Dynamic) return "dynamic";

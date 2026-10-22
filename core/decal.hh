@@ -66,6 +66,14 @@ constexpr float kDecalMinFacing = 0.3f;
 DecalBuild buildDecal(const DecalComponent& d, Vec3 position, Quat rotation, Vec3 scale,
                       const std::vector<DecalSurface>& surfaces);
 
+// A rotation whose local +Z is `normal` and whose local +Y is `up` made
+// perpendicular to it (both unit, not parallel).
+Quat decalRotation(Vec3 normal, Vec3 up);
+// How a decal dropped on a surface faces: +Z out of the surface along
+// `normal`, its top (+Y) towards world up on a wall, and on a floor or ceiling
+// (normal within ~25 deg of vertical) away from the viewer looking along `viewForward`.
+Quat decalPlacement(Vec3 normal, Vec3 viewForward);
+
 // Why an object's mesh never takes a decal: "skinned" (it bends), "dynamic"
 // (a dynamic collider: it moves), or empty when it does.
 std::string decalExclusion(const Object& o);
