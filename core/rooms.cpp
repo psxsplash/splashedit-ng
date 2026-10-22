@@ -190,6 +190,7 @@ RoomSet buildRooms(const RoomObjects& ro, const std::vector<RoomInputObject>& ob
         std::vector<TriangleRef>& l = lists[ri];
         if (ri < n) {
             room.name = ro.rooms[ri]->object->name;
+            room.reverb = ro.rooms[ri]->object->room->reverb;
             room.min = box[ri].min();
             room.max = box[ri].max();
         } else {
@@ -299,7 +300,8 @@ void writeRooms(BinWriter& w, const RoomSet& rs, float gte) {
         w.u8(uint8_t(r.cellCount));
         w.u8(uint8_t(r.portalRefCount));
         w.u16(uint16_t(r.firstPortalRef));
-        w.u16(0);
+        w.u8(uint8_t(r.reverb));  // reverbPreset (was padding): 0 = the scene's
+        w.u8(0);
     }
     // PortalData, 40 bytes
     auto unit = [&](Vec3 v) {

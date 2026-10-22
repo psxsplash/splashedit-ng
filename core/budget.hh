@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <string>
 
+#include "reverb.hh"
 #include "splashpack.hh"
 
 namespace splash {
@@ -44,7 +45,24 @@ inline const char* budgetBand(float fraction) {
 }
 
 inline Budget vramBudget(const ExportStats& s) { return {s.vramBytes(), kVramCapacity}; }
-inline Budget spuBudget(const ExportStats& s) { return {s.spuEnd, kSpuRamCapacity}; }
+inline Budget spuBudget(const ExportStats& s) { return {s.spuEnd + s.reverbBytes, kSpuRamCapacity}; }
+// The clips and the reverb work area above them do not both fit: psxsplash
+// would refuse the clips that reach into the work area.
+inline bool reverbOverflowsSpu(const ExportStats& s) { return s.reverbBytes && s.spuEnd + s.reverbBytes > kSpuRamCapacity; }
+inline std::string reverbSpuWarning(const ExportStats& s) {
+    const ReverbPreset& p = kReverbPresets[s.reverbPreset];
+    int fits = 0;  // the largest preset that would fit
+    for (int i = 1; i < kReverbPresetCount; i++)
+        if (s.spuEnd + kReverbPresets[i].workAreaBytes <= kSpuRamCapacity &&
+            kReverbPresets[i].workAreaBytes > kReverbPresets[fits].workAreaBytes)
+            fits = i;
+    return std::string("SPU RAM: the sound clips end at ") + std::to_string(s.spuEnd / 1024) + " KB and the " + p.label +
+           " reverb needs " + std::to_string(p.workAreaBytes / 1024) + " KB above them, " +
+           std::to_string((s.spuEnd + p.workAreaBytes) / 1024) + " of " + std::to_string(kSpuRamCapacity / 1024) +
+           " KB: psxsplash would drop the clips that reach into it. Shrink the " + p.label + " reverb" +
+           (fits ? " to " + std::string(kReverbPresets[fits].label) + " or smaller, or shorten the clips."
+                 : std::string(": no preset fits beside these clips, shorten them."));
+}
 inline Budget triangleBudget(const ExportStats& s) { return {size_t(s.trianglesInView), kVisibleTriangleGuide}; }
 // What psxsplash allocates for each game object when a scene loads, none of
 // it in the splashpack. Measured on psxsplash 669fb6b in pcsx-redux, printing
