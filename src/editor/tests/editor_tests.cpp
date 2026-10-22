@@ -3498,8 +3498,9 @@ void testBlocksNewBlock() {
                                                                    eb::newBlock("repeat"), eb::newBlock("log")}}));
     CHECK(g.errors.empty() && g.lua.find("Debug.Log(\"\")") != std::string::npos);
     // The palette's categories, every block in one of them.
-    CHECK(splash::blockCategories().size() == 8 && splash::blockCategories().front() == "Events" &&
-          splash::blockCategories()[3] == "Sound and scenes" && splash::blockCategories().back() == "Debug");
+    CHECK(splash::blockCategories().size() == 9 && splash::blockCategories().front() == "Events" &&
+          splash::blockCategories()[3] == "Sound and scenes" && splash::blockCategories()[7] == "Debug" &&
+          splash::blockCategories().back() == "Screen");
     bool cats = true;
     for (const splash::BlockSpec& sp : splash::blockCatalogue())
         cats = cats && std::find(splash::blockCategories().begin(), splash::blockCategories().end(), sp.category) != splash::blockCategories().end() &&
@@ -8623,6 +8624,105 @@ void testTimelinePreviewMore() {
     CHECK(!l.enabled && l.intensity == 2.0f && std::fabs(l.range - 4) < 0.025f && std::fabs(posed.objects[0].transform.position.y - 5) < 0.025f);
     CHECK(d.scene().objects[0].light->enabled && d.scene().objects[0].light->intensity == 1.0f);
     CHECK(editor::samplePreview(d, ref, 3).lights.at("Lamp").enabled == true);
+}
+
+// Screen effect tracks (psxsplash TrackType 19-23) and blocks: names, encodings
+// as the exporter packs them, stepped fade colour, the Scene view's preview,
+// the cutscene-only rule, and the Screen blocks' Lua.
+void testScreenFx() {
+    namespace fs = std::filesystem;
+    using splash::TrackType;
+    namespace eb = editor::blk;
+    // Encodings: fade 0..1 -> 0..255, colour 0..1 -> 0..255, bars and shake in pixels (clamped), trail on/off.
+    CHECK(editor::encodeValue(TrackType::ScreenFade, {0.5f, 0, 0}, 100)[0] == 128);
+    CHECK(editor::encodeValue(TrackType::ScreenFade, {2, 0, 0}, 100)[0] == 255);
+    CHECK((editor::encodeValue(TrackType::ScreenFadeColor, {1, 0.5f, 0}, 100) == editor::FixedValue{255, 128, 0}));
+    CHECK(editor::encodeValue(TrackType::Letterbox, {300, 0, 0}, 100)[0] == 120);
+    CHECK(editor::encodeValue(TrackType::Shake, {100, 0, 0}, 100)[0] == 64);
+    CHECK(editor::encodeValue(TrackType::Trail, {0.7f, 0, 0}, 100)[0] == 1);
+    CHECK(std::fabs(editor::decodeValue(TrackType::ScreenFade, {255, 0, 0}, 100)[0] - 1) < 1e-6f);
+    // Kinds: no target, cutscenes only, trail on/off, the fade colour held key to key.
+    for (int t = 19; t <= 23; t++) {
+        CHECK(splash::isScreenTrack(TrackType(t)) && !editor::needsTarget(TrackType(t)));
+        CHECK(editor::allowedIn(editor::SeqKind::Cutscene, TrackType(t)) && !editor::allowedIn(editor::SeqKind::Animation, TrackType(t)));
+    }
+    CHECK(!splash::isScreenTrack(TrackType::LightEnabled));
+    CHECK(editor::isDiscrete(TrackType::Trail) && !editor::isDiscrete(TrackType::ScreenFadeColor));
+    CHECK(editor::isStepped(TrackType::ScreenFadeColor) && !editor::isStepped(TrackType::ScreenFade));
+    CHECK(editor::valueCount(TrackType::ScreenFadeColor) == 3 && editor::valueCount(TrackType::Letterbox) == 1);
+    auto keyed = [](TrackType type, std::initializer_list<std::pair<int, std::array<float, 3>>> keys) {
+        splash::CutsceneTrack t;
+        t.type = type;
+        for (auto [f, v] : keys) {
+            splash::Keyframe k;
+            k.frame = f;
+            k.value = v;
+            t.keyframes.push_back(k);
+        }
+        return t;
+    };
+    CHECK(editor::trackLabel(keyed(TrackType::Letterbox, {})) == "Screen: Letterbox");
+    splash::Cutscene cs;
+    cs.name = "intro";
+    cs.tracks.push_back(keyed(TrackType::ScreenFade, {{0, {0, 0, 0}}, {20, {1, 0, 0}}}));
+    cs.tracks.push_back(keyed(TrackType::ScreenFadeColor, {{0, {1, 0, 0}}, {20, {0, 0, 1}}}));
+    cs.tracks.push_back(keyed(TrackType::Letterbox, {{10, {32, 0, 0}}}));
+    cs.tracks.push_back(keyed(TrackType::Shake, {{0, {8, 0, 0}}, {10, {0, 0, 0}}}));
+    cs.tracks.push_back(keyed(TrackType::Trail, {{5, {1, 0, 0}}}));
+    splash::Scene sc;
+    sc.cutscenes.push_back(cs);
+    editor::Document d;
+    d.reset(sc);
+    const editor::SeqRef ref{editor::SeqKind::Cutscene, 0};
+    const editor::Preview p = editor::samplePreview(d, ref, 10);
+    // Half way: 255 * 2048 >> 12 = 127 of 255.
+    CHECK(p.screen.fade && std::fabs(*p.screen.fade - 127 / 255.0f) < 1e-6f);
+    // The colour holds its key until the next (no blend to purple).
+    CHECK(p.screen.fadeColor && (*p.screen.fadeColor == std::array<float, 3>{1, 0, 0}));
+    CHECK(p.screen.letterbox && *p.screen.letterbox == 32 && p.screen.shake && *p.screen.shake == 0);
+    CHECK(p.screen.trail == true && !p.empty());
+    CHECK(editor::samplePreview(d, ref, 4).screen.trail == false);  // the runtime's initial value: off
+    CHECK((*editor::samplePreview(d, ref, 20).screen.fadeColor == std::array<float, 3>{0, 0, 1}));
+    CHECK(editor::samplePreview(d, ref, 5).screen.letterbox && *editor::samplePreview(d, ref, 5).screen.letterbox == 16);
+
+    // The export: a cutscene with screen tracks packs, an animation with one is an error.
+    const fs::path project = g_outDir / "screenfx";
+    fs::remove_all(project);
+    fs::create_directories(project);
+    splash::Scene ex;
+    ex.cutscenes.push_back(cs);
+    splash::ExportOptions dry;
+    dry.dryRun = true;
+    CHECK(splash::exportSplashpack(ex, project, project / "a.splashpack", dry).ok());
+    splash::Animation an;
+    an.name = "wobble";
+    an.tracks.push_back(keyed(TrackType::Shake, {{0, {4, 0, 0}}}));
+    ex.animations.push_back(an);
+    splash::ExportResult bad = splash::exportSplashpack(ex, project, project / "b.splashpack", dry);
+    CHECK(!bad.ok() && std::any_of(bad.errors.begin(), bad.errors.end(), [](const std::string& e) {
+        return e.find("screen effect tracks only play in cutscenes") != std::string::npos;
+    }));
+
+    // Blocks: the colour field, its defaults and the Lua.
+    int r = 0, g = 0, b = 0;
+    CHECK(splash::parseBlockColor("#10a0FF", r, g, b) && r == 16 && g == 160 && b == 255);
+    CHECK(!splash::parseBlockColor("#10a0F", r, g, b) && !splash::parseBlockColor("10a0FF0", r, g, b) &&
+          !splash::parseBlockColor("#GG0000", r, g, b) && !splash::parseBlockColor("", r, g, b));
+    CHECK(eb::newBlock("fade_out").field == "#000000" && eb::newBlock("flash").field == "#FFFFFF");
+    CHECK(splash::findBlockSpec("screen_fading")->kind == splash::BlockKind::Boolean);
+    splash::Block fo = eb::newBlock("fade_out");
+    fo.field = "#10a0FF";
+    const splash::LuaGen lg = splash::blocksToLua(blockScript(
+        {}, {{eb::newBlock("on_create"), fo, eb::newBlock("fade_in"), eb::newBlock("flash"), eb::newBlock("shake"),
+              eb::newBlock("letterbox"), eb::newBlock("trail_on"), eb::newBlock("trail_off")}}));
+    CHECK(lg.errors.empty());
+    for (const char* want : {"Screen.FadeOut(16, 160, 255, 30)", "Screen.FadeIn(30)", "Screen.Flash(255, 255, 255, 30)",
+                             "Screen.Shake(8, 15)", "Screen.Letterbox(24, 15)", "Screen.Trail(1)", "Screen.Trail(0)"})
+        CHECK(lg.lua.find(want) != std::string::npos);
+    splash::Block nocolour = eb::newBlock("flash");
+    nocolour.field.clear();
+    CHECK(!splash::blocksToLua(blockScript({}, {{eb::newBlock("on_create"), nocolour}})).errors.empty());
+    CHECK(!splash::blockNameError("Screen").empty());  // a variable may not hide the API table
 }
 
 void testTimelinePreview() {
@@ -14532,6 +14632,7 @@ int main(int argc, char** argv) {
     testEditMany();
     testTimelineSample();
     testTimelineEdit();
+    testScreenFx();
     testTimelinePreview();
     testTimelineRenameDelete();
     testTimelineRetarget();

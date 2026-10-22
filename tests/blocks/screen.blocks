@@ -1,0 +1,121 @@
+{
+  "format": "splashedit-blocks",
+  "version": 1,
+  "variables": [],
+  "stacks": [
+    {
+      "x": 40,
+      "y": 40,
+      "blocks": [
+        {
+          "op": "on_interact"
+        },
+        {
+          "op": "fade_out",
+          "field": "#FF2000",
+          "args": [
+            {
+              "op": "number",
+              "field": "30"
+            }
+          ]
+        },
+        {
+          "op": "wait_until",
+          "args": [
+            {
+              "op": "not",
+              "args": [
+                {
+                  "op": "screen_fading"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "op": "letterbox",
+          "args": [
+            {
+              "op": "number",
+              "field": "24"
+            },
+            {
+              "op": "number",
+              "field": "15"
+            }
+          ]
+        },
+        {
+          "op": "trail_on"
+        },
+        {
+          "op": "fade_in",
+          "args": [
+            {
+              "op": "number",
+              "field": "15"
+            }
+          ]
+        },
+        {
+          "op": "wait",
+          "args": [
+            {
+              "op": "number",
+              "field": "2"
+            }
+          ]
+        },
+        {
+          "op": "trail_off"
+        },
+        {
+          "op": "letterbox",
+          "args": [
+            {
+              "op": "number",
+              "field": "0"
+            },
+            {
+              "op": "number",
+              "field": "15"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "x": 40,
+      "y": 400,
+      "blocks": [
+        {
+          "op": "on_touch_player"
+        },
+        {
+          "op": "flash",
+          "field": "#ffffff",
+          "args": [
+            {
+              "op": "number",
+              "field": "10"
+            }
+          ]
+        },
+        {
+          "op": "shake",
+          "args": [
+            {
+              "op": "number",
+              "field": "8"
+            },
+            {
+              "op": "number",
+              "field": "15"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

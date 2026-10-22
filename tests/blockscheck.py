@@ -45,6 +45,13 @@ for exp in sorted(glob.glob(os.path.join(blocks, 'expected', '*.lua'))):
     rc, _, err = run('luac', exp, '-o', os.path.join(tmp, name + 'c'))
     check('expected/' + name + ' compiles', rc == 0, err)
 
+# A colour field must be "#RRGGBB": anything else fails naming the block.
+sc = json.load(open(os.path.join(blocks, 'screen.blocks'), encoding='utf-8'))
+sc['stacks'][1]['blocks'][1]['field'] = 'red'
+open(os.path.join(tmp, 'badcolour.blocks'), 'w').write(json.dumps(sc))
+rc, out, err = run('blocks', os.path.join(tmp, 'badcolour.blocks'))
+check('a colour field that is not #RRGGBB fails', rc == 1 and out == '' and
+      'stack 2, block 2 (flash): not a colour: red' in err, (rc, err))
 rc, out, err = run('blocks', os.path.join(blocks, 'bad.blocks'))
 check('bad.blocks fails with the location', rc == 1 and out == '' and
       'bad.blocks: stack 1, block 3 (change_var): undeclared variable "missing"' in err, (rc, err))

@@ -26,6 +26,7 @@ constexpr float kDragStart = 4;  // pixels the pointer moves before a press is a
 constexpr float kBlockRadius = 5;
 const char* const kFieldId = "##blockfield";
 const char* const kPickId = "blocks.pick";
+const char* const kColourId = "blocks.colour";
 const char* const kNoLights = "No runtime lights";
 
 ImU32 categoryColor(std::string_view c) {
@@ -36,6 +37,7 @@ ImU32 categoryColor(std::string_view c) {
     if (c == "Variables") return blocks::variables;
     if (c == "Operators") return blocks::operators;
     if (c == "Input") return blocks::input;
+    if (c == "Screen") return blocks::screen;
     return blocks::debug;
 }
 
@@ -149,6 +151,16 @@ void drawLayout(ImDrawList* dl, const blk::Layout& l, ImVec2 o, const DrawOpts& 
                 } else if (pc.kind == blk::Piece::Field) {
                     const bool fieldHover = !d.hoveredField.empty() && d.hoveredField == b.path;
                     well(dl, r, false, false, fieldHover ? color::accentHover : lerpColor(color::border, cat, 0.35f));
+                    const splash::BlockSpec* fs2 = splash::findBlockSpec(b.op);
+                    int cr = 0, cg = 0, cb = 0;
+                    if (fs2 && fs2->field == splash::BlockField::Color && splash::parseBlockColor(pc.text, cr, cg, cb)) {
+                        // A colour: the well filled with it, the hex in black or white over it.
+                        dl->AddRectFilled(r.Min + ImVec2(2, 2), r.Max - ImVec2(2, 2), IM_COL32(cr, cg, cb, 255), 3);
+                        const bool light = cr * 299 + cg * 587 + cb * 114 > 140000;
+                        text(dl, ImVec2(r.Min.x + 7, textY(r, fs)), f.medium, fs, light ? rgb(0x000000) : rgb(0xffffff),
+                             pc.text.c_str());
+                        continue;
+                    }
                     const bool unknown = !pc.placeholder && d.unknown && d.unknown(b.op, pc.text);
                     text(dl, ImVec2(r.Min.x + 7, textY(r, fs)), f.medium, fs,
                          pc.placeholder ? color::textFaint : unknown ? color::warn : color::text, pc.text.c_str());
@@ -233,14 +245,14 @@ void BlocksView::reset(splash::BlockScript s) {
     m_history.reset(std::move(s));
     m_drag = {};
     m_press = {};
-    m_selected = m_editing = m_picking = {};
+    m_selected = m_editing = m_picking = m_colouring = {};
 }
 
 bool BlocksView::commit(splash::BlockScript s) {
     if (!m_history.commit(std::move(s))) return false;
     m_drag = {};
     m_press = {};
-    m_selected = m_editing = m_picking = {};
+    m_selected = m_editing = m_picking = m_colouring = {};
     return true;
 }
 
@@ -377,7 +389,7 @@ BlocksView::Result BlocksView::draw(ImDrawList* dl, ImRect r, bool* focused, con
     const blk::Layout curL = blk::layout(cur, tw, m);
 
     // The keyboard first, so a frame's undo comes before its edits.
-    if (*focused && !typing && m_picking.empty() && !m_drag.on) {
+    if (*focused && !typing && m_picking.empty() && m_colouring.empty() && !m_drag.on) {
         const bool ctrl = io.KeyCtrl, shift = io.KeyShift;
         if (ctrl && !shift && ImGui::IsKeyPressed(ImGuiKey_Z, true)) {
             if (m_history.undo()) {
@@ -510,6 +522,9 @@ BlocksView::Result BlocksView::draw(ImDrawList* dl, ImRect r, bool* focused, con
                     m_picking = h.path;
                     m_pickQuery.clear();
                     ImGui::OpenPopup(kPickId);
+                } else if (spec->field == splash::BlockField::Color) {
+                    m_colouring = h.path;
+                    ImGui::OpenPopup(kColourId);
                 } else {
                     m_editing = h.path;
                     beginTextEdit(kFieldId, b->field);
@@ -770,6 +785,35 @@ BlocksView::Result BlocksView::draw(ImDrawList* dl, ImRect r, bool* focused, con
             m_picking = {};
         }
         if (!ImGui::IsPopupOpen(kPickId)) m_picking = {};
+    }
+
+    // --- A colour field's picker: every change is the field's new "#RRGGBB" ---
+    if (!m_colouring.empty()) {
+        const splash::Block* cb = blk::blockAt(m_history.current(), m_colouring);
+        int cr = 0, cg = 0, cbl = 0;
+        if (cb) splash::parseBlockColor(cb->field, cr, cg, cbl);
+        ImVec2 at = mouse;
+        if (const blk::BlockBox* bx = curL.find(m_colouring)) at = ImVec2(o.x + bx->field.x0, o.y + bx->field.y1 + space::xs);
+        ImGui::SetNextWindowPos(at, ImGuiCond_Appearing);
+        if (ImGui::BeginPopup(kColourId)) {
+            float c[3] = {cr / 255.0f, cg / 255.0f, cbl / 255.0f};
+            const ImVec2 pickAt = ImGui::GetCursorScreenPos();
+            if (ImGui::ColorPicker3("##blockcolour", c,
+                                    ImGuiColorEditFlags_NoSidePreview | ImGuiColorEditFlags_NoAlpha |
+                                        ImGuiColorEditFlags_PickerHueBar | ImGuiColorEditFlags_DisplayHex)) {
+                char hex[8];
+                std::snprintf(hex, sizeof hex, "#%02X%02X%02X", int(c[0] * 255 + 0.5f), int(c[1] * 255 + 0.5f),
+                              int(c[2] * 255 + 0.5f));
+                if (cb && cb->field != hex) {
+                    if (auto ns = blk::setField(m_history.current(), m_colouring, hex)) edit(std::move(*ns), &res);
+                    std::printf("blocks: colour %s\n", hex);
+                }
+            }
+            nameRect("blocks.colourpicker", ImRect(pickAt, pickAt + ImVec2(ImGui::GetItemRectSize().x, ImGui::GetItemRectSize().y)));
+            ImGui::EndPopup();
+        } else {
+            m_colouring = {};
+        }
     }
 
     // --- Status line: the Lua check, else the help of the block pointed at or selected ---
