@@ -83,6 +83,8 @@ struct State {
     double noticeUntil = 0;
     // A file the notice offers to show in its folder (a written disc image); notify clears it.
     std::filesystem::path noticeReveal;
+    // Shown on hovering the notice (the disc's load estimates); notify clears it.
+    std::string noticeTip;
     // Add object (+ / Ctrl+A) and Add component pickers: open next frame, and the shared search text.
     bool openAddObject = false;
     bool openAddComponent = false;

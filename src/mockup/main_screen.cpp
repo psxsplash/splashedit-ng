@@ -1280,6 +1280,7 @@ static void notify(State& st, std::string msg, bool bad) {
     st.noticeBad = bad;
     st.noticeUntil = ImGui::GetTime() + 8;
     st.noticeReveal.clear();
+    st.noticeTip.clear();
 }
 
 // Shows a project Lua file in the script editor.
@@ -1791,7 +1792,22 @@ static void updateExport(State& st) {
     std::snprintf(size, sizeof size, "%.1f MB", r.disc.sectors * double(splash::kRawSectorSize) / (1024.0 * 1024.0));
     std::filesystem::path cue = p.discOut;
     cue.replace_extension(".cue");
-    notify(st, "Disc image written: " + utf8(p.discOut.filename()) + " + " + utf8(cue.filename()) + " (" + size + ")", false);
+    // Each scene's load time (splash::estimateSceneLoad), named as the build list names it.
+    std::string loads, tip = "Time to read each scene from the CD, estimated from the emulator's CD timing (2x drive). "
+                             "Uploads and scene setup add more, and a real drive also seeks.\n";
+    for (size_t i = 0; i < r.loads.size(); i++) {
+        const splash::SceneLoad& l = r.loads[i];
+        const std::string name = l.name.empty() ? "scene " + std::to_string(i) : l.name;
+        const std::string t = splash::loadTimeText(l.ms);
+        loads += (i ? ", " : "") + name + " " + t;
+        tip += "\n" + name + ": " + t + " (" + std::to_string(l.reads) + " reads, " + std::to_string(l.sectors) + " sectors)";
+        scriptLine(nullptr, "disc load: scene " + std::to_string(i) + " " + name + " " + t + " reads " + std::to_string(l.reads) +
+                                " sectors " + std::to_string(l.sectors));
+    }
+    notify(st, "Disc image written: " + utf8(p.discOut.filename()) + " + " + utf8(cue.filename()) + " (" + size + ")" +
+                   (loads.empty() ? std::string() : ". Load: " + loads),
+           false);
+    if (!loads.empty()) st.noticeTip = tip;
     st.noticeReveal = p.discOut;
     st.noticeUntil = ImGui::GetTime() + 20;
     p.discWritten = p.discOut;
@@ -10910,9 +10926,15 @@ static void statusBar(ImDrawList* dl, ImVec2 size, const editor::Document& doc, 
     text(dl, ImVec2(rx, bar.Min.y + (size::statusBar - s.y) * 0.5f), f.regular, type::caption,
          !st.saveError.empty() || (showNotice && st.noticeBad) ? color::bad : showNotice ? color::text : color::textFaint,
          shown.c_str());
-    if (cut) {
-        interact("notice", ImRect(ImVec2(rx, bar.Min.y), bar.Max));
-        tooltip(saved);
+    // Hovering shows a cut notice whole, and the notice's own tip (a disc's load estimates).
+    const bool tip = showNotice && !st.noticeTip.empty();
+    if (cut || tip) {
+        const ImRect nr(ImVec2(rx, bar.Min.y), bar.Max);
+        Hit nh = interact("notice", nr);
+        nameRect("notice", nr);
+        const std::string t = !tip ? std::string(saved) : cut ? std::string(saved) + "\n\n" + st.noticeTip : st.noticeTip;
+        if (tip && nh.hovered) scriptLine("notice.tip", "notice tip: shown");
+        tooltip(t.c_str());
     }
     if (reveal) {
         ImVec2 ls = measure(f.medium, type::caption, revealLabel);
