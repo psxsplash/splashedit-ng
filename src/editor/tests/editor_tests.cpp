@@ -13004,7 +13004,8 @@ void testFixedCameraBakeFiles() {
     CHECK(threw);
 }
 
-// The pack: v28 and a 160-byte header only with a baked Fixed camera, the
+// The pack: v29 and a 164-byte header only with a baked Fixed camera (the
+// background table at byte 160, the shadow slot at 156 left 0), the
 // table psxsplash reads (tests/host/test_background.cpp pins the same
 // layout), the hidden list = the baked objects, the stale warning and the
 // VRAM error.
@@ -13065,9 +13066,10 @@ void testFixedCameraPack() {
     CHECK(r.stats.backgrounds == 1);
     for (const std::string& w : r.warnings) CHECK(w.find("Fixed camera") == std::string::npos);
     const std::string b = bgtest::slurp(dir / "bg.splashpack");
-    CHECK(rd16(b, 2) == 28);
-    const size_t table = rd32(b, 156);
-    CHECK(table >= 160 && table % 4 == 0 && table + 4 + 64 <= b.size());
+    CHECK(b.size() > 164 && rd16(b, 2) == 29);
+    CHECK(rd32(b, 156) == 0);  // no shadows
+    const size_t table = rd32(b, 160);
+    CHECK(table >= 164 && table % 4 == 0 && table + 4 + 64 <= b.size());
     CHECK(rd16(b, table) == 1);
     const size_t rec = table + 4;
     CHECK(std::string(&b[rd32(b, rec)]) == "Yard cam");
@@ -13108,9 +13110,24 @@ void testFixedCameraPack() {
     for (uint16_t i = 0; i < hidden; i++) hid.push_back(rd16(b, hiddenAt + 2 * i));
     const std::vector<uint16_t> want = {0, 1, 2, 3, 4, 5, 6};  // Crate (2) kept 3D, Crate (3) named by the script
     CHECK(hid == want);
-    // Lua records start right after the 160-byte header.
-    const size_t luaAt = 160;
+    // Lua records start right after the 164-byte header.
+    const size_t luaAt = 164;
     CHECK(rd32(b, luaAt) > luaAt && rd32(b, luaAt) < b.size());
+
+    // With a blob shadow too: still v29, the shadow table at 156 and the
+    // background table at 160, each where its slot points.
+    {
+        splash::Scene both = scene;
+        both.objects[1].children[1].mesh->shadow = splash::ShadowMode::Blob;
+        const splash::ExportResult rb = splash::exportSplashpack(both, project, dir / "both.splashpack");
+        CHECK(rb.ok() && rb.stats.shadows == 1 && rb.stats.backgrounds == 1);
+        const std::string bb = bgtest::slurp(dir / "both.splashpack");
+        CHECK(bb.size() > 164 && rd16(bb, 2) == 29);
+        const size_t sh = rd32(bb, 156), bg = rd32(bb, 160);
+        CHECK(sh >= 164 && sh % 4 == 0 && sh + 4 + 8 <= bb.size() && rd16(bb, sh) == 1 && uint8_t(bb[sh + 6]) == 1);
+        CHECK(bg >= 164 && bg % 4 == 0 && bg + 4 + 64 <= bb.size() && bg != sh && rd16(bb, bg) == 1);
+        CHECK(std::string(&bb[rd32(bb, bg + 4)]) == "Yard cam");
+    }
 
     // A baked object moved: the bake is stale.
     scene.objects[0].children[3].transform.position.x += 0.5f;

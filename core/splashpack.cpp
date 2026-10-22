@@ -2766,12 +2766,13 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     st.bumpAllocatorSize = scene.settings.bumpAllocatorSize > 0 ? (uint32_t(scene.settings.bumpAllocatorSize) + 3) & ~3u
                                                                  : st.bumpAllocatorNeed;
 
-    // ---- header (156 bytes, v27; 160 bytes, v28, with shadows or baked
-    // backgrounds)
+    // ---- header (156 bytes, v27; 160 bytes, v28, with shadows; 164 bytes,
+    // v29, with baked backgrounds). A scene with neither exports exactly as
+    // before shadows existed.
     bool hasLights = !runtimeLights.empty();
     w.u8('S');
     w.u8('P');
-    w.u16(hasShadows || !backgrounds.empty() ? 28 : 27);
+    w.u16(!backgrounds.empty() ? 29 : hasShadows ? 28 : 27);
     w.u16(uint16_t(luaFiles.size()));
     w.u16(uint16_t(exporters.size()));
     res.stats.gameObjects = int(exporters.size());
@@ -2861,11 +2862,13 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     w.u32(0);
     w.u32(st.orderingTableSize);
     w.u32(st.bumpAllocatorSize);
+    // v28+: the shadow table at byte 156, left 0 in a v29 pack without shadows.
     size_t shadowTableOffsetPos = 0;
-    if (hasShadows) {
+    if (hasShadows || !backgrounds.empty()) {
         shadowTableOffsetPos = w.pos();
         w.u32(0);
     }
+    // v29: the baked background table at byte 160.
     size_t backgroundTableOffsetPos = 0;
     if (!backgrounds.empty()) {
         backgroundTableOffsetPos = w.pos();
@@ -3316,7 +3319,7 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
         }
     }
 
-    // ---- baked backgrounds (v28): names, image tiles, layer tiles and hidden
+    // ---- baked backgrounds (v29): names, image tiles, layer tiles and hidden
     // object lists, then the table {u16 count, u16 0} and its 64-byte records
     // (psxsplash backgroundmath.hh).
     if (!backgrounds.empty()) {

@@ -40,7 +40,7 @@ struct StreamWarning {
 constexpr uint32_t kOtMin = 256, kOtMax = 65536;
 
 struct ExportStats {
-    // Fixed cameras whose bake went into the pack (v28 background table).
+    // Fixed cameras whose bake went into the pack (v29 background table).
     int backgrounds = 0;
     struct BackgroundInfo {
         std::string object;
