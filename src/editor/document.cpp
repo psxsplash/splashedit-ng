@@ -199,6 +199,8 @@ void Document::cacheAssets(const splash::Object& o) {
         for (const splash::Material& mat : o.mesh->materials)
             if (!mat.texture.empty() && !m_textures.count(mat.texture)) m_textures[mat.texture] = analyseTexture(resolve(mat.texture));
     }
+    if (o.decal && !o.decal->texture.empty() && !m_textures.count(o.decal->texture))
+        m_textures[o.decal->texture] = analyseTexture(resolve(o.decal->texture));
     auto file = [&](const std::string& p) {
         if (!p.empty() && !m_files.count(p)) m_files[p] = isFile(resolve(p));
     };

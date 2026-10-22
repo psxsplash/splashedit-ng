@@ -8522,7 +8522,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
     // A component removed from its section menu goes once drawing is done,
     // since the sections below still read it this frame.
     std::optional<editor::ComponentKind> toRemove;
-    bool removedFlags[static_cast<int>(editor::ComponentKind::Agent) + 1] = {};
+    bool removedFlags[static_cast<int>(editor::ComponentKind::Decal) + 1] = {};
     auto removeFlag = [&](editor::ComponentKind k) { return &removedFlags[static_cast<int>(k)]; };
     float pos[3] = {t.position.x, t.position.y, t.position.z};
     FieldEdit fe = vec3Field("pos", row("lpos", "Position", "Where the object sits, in metres, relative to its parent."),

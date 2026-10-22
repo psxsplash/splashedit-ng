@@ -92,6 +92,7 @@ add_library(splashcore STATIC
     luascan.cpp
     import.cpp
     simplify.cpp
+    decal.cpp
     unity_import.cpp
     gpudump.cpp
     gpu_raster.cpp

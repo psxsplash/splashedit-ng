@@ -21,6 +21,7 @@ const std::vector<ComponentInfo>& components() {
         {ComponentKind::Portal, "Portal", "door doorway opening room link culling", "An opening between two Rooms the camera can see through."},
         {ComponentKind::Walkoff, "Nav walk-off zone", "ledge pit drop edge fall navigation", "Lets the player walk off nav edges inside this box."},
         {ComponentKind::Agent, "Agent (NPC)", "npc enemy guard ai patrol waypoint vision hearing chase", "A character that walks the nav regions, patrols and senses the player."},
+        {ComponentKind::Decal, "Decal", "sticker graffiti crack poster blood splat projector texture", "Projects a texture onto the walls and floors under it."},
     };
     return list;
 }
@@ -47,6 +48,7 @@ bool hasComponent(const splash::Object& o, ComponentKind k) {
         case ComponentKind::Portal: return o.portal.has_value();
         case ComponentKind::Walkoff: return o.walkoff.has_value();
         case ComponentKind::Agent: return o.agent.has_value();
+        case ComponentKind::Decal: return o.decal.has_value();
     }
     return false;
 }
@@ -55,6 +57,9 @@ std::string cannotAdd(const splash::Object& o, ComponentKind k) {
     if (hasComponent(o, k)) return "Already added";
     // The exporter only reads colliders and skins off mesh objects.
     if ((k == ComponentKind::Collider || k == ComponentKind::Skin) && !o.mesh) return "Needs a Mesh";
+    // Decal pieces are static triangles; a skinned object has none.
+    if (k == ComponentKind::Decal && o.skin) return "Not on a skinned mesh";
+    if (k == ComponentKind::Skin && o.decal) return "Not with a Decal";
     return {};
 }
 
@@ -75,6 +80,7 @@ bool addComponent(splash::Object& o, ComponentKind k) {
         case ComponentKind::Portal: o.portal.emplace(); break;
         case ComponentKind::Walkoff: o.walkoff.emplace(); break;
         case ComponentKind::Agent: o.agent.emplace(); break;
+        case ComponentKind::Decal: o.decal.emplace(); break;
     }
     return true;
 }
@@ -100,6 +106,7 @@ bool removeComponent(splash::Object& o, ComponentKind k) {
         case ComponentKind::Portal: o.portal.reset(); break;
         case ComponentKind::Walkoff: o.walkoff.reset(); break;
         case ComponentKind::Agent: o.agent.reset(); break;
+        case ComponentKind::Decal: o.decal.reset(); break;
     }
     return true;
 }
@@ -120,6 +127,7 @@ const std::vector<ObjectPreset>& presets() {
         {"Portal", "door doorway opening room link", "An opening between two Rooms the camera can see through.", {K::Portal}},
         {"Nav walk-off zone", "ledge pit drop edge fall navigation", "Lets the player walk off nav edges inside this box.", {K::Walkoff}},
         {"Agent (NPC)", "npc enemy guard ai patrol waypoint", "A character that walks the nav regions, patrols and senses the player.", {K::Agent}},
+        {"Decal", "sticker graffiti crack poster blood splat", "Projects a texture onto the walls and floors under it.", {K::Decal}},
     };
     return list;
 }
