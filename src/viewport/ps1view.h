@@ -88,6 +88,25 @@ class Ps1View {
     std::optional<int> pick(ImVec2 screen, ImVec2 panelMin, ImVec2 panelSize) const;
     // Where (GL space) that ray first meets drawn triangles, or nullopt.
     std::optional<Vec3> pickPoint(ImVec2 screen, ImVec2 panelMin, ImVec2 panelSize) const;
+    // The first surface that ray meets: the point and the hit face's normal,
+    // turned towards the eye, both in Unity space, and the object (flatten order).
+    struct SurfaceHit {
+        splash::Vec3 point, normal;
+        int object;
+    };
+    std::optional<SurfaceHit> pickSurface(ImVec2 screen, ImVec2 panelMin, ImVec2 panelSize) const;
+    // What the scene view's decal preview found for a decal object of the
+    // drawn scene (core/decal.hh), or null (no decal, or not drawn).
+    struct DecalInfo {
+        int pieces = 0;
+        int triangles = 0;                               // surface triangles covered
+        std::vector<std::pair<std::string, int>> covered;  // object name, triangles
+        std::vector<std::pair<std::string, std::string>> excluded;  // object name, why
+    };
+    const DecalInfo* decalInfo(const splash::Object* o) const {
+        auto it = m_decalInfo.find(o);
+        return it == m_decalInfo.end() ? nullptr : &it->second;
+    }
     // Bounds of the scene's geometry, false when it has none.
     bool sceneBounds(Vec3* lo, Vec3* hi) const;
     // Unit right, up and forward vectors of the camera.
@@ -123,6 +142,7 @@ class Ps1View {
         unsigned tex;
         int start;
         int count;
+        bool decal = false;  // drawn after the rest, pulled towards the eye by a polygon offset
     };
 
     void rebuild();
@@ -141,6 +161,7 @@ class Ps1View {
     std::map<std::string, unsigned> m_texCache;
     std::map<unsigned, std::pair<int, int>> m_texSize;  // by GL id, for the preview's UV offsets (texels)
     editor::PickMesh m_pick;  // drawn triangles in Unity world space, by object
+    std::map<const splash::Object*, DecalInfo> m_decalInfo;  // by object of drawnScene()
     std::map<std::string, splash::Mesh> m_meshCache;  // by project path, for the current load
     unsigned m_meshCacheLoad = ~0u;
     unsigned m_meshCacheAssets = 0;

@@ -11997,11 +11997,16 @@ void testDecalExport() {
     const std::vector<uint16_t> ff = flagsOf({splash::Vec3{-2, 0, -2}, {-2, 0, 2}, {2, 0, -2}});
     CHECK(ff.size() == 1 && (ff.empty() || (ff[0] & 0x8) == 0));
 
+    const splash::ExportStats on = r.stats;
     // Nothing under it: a warning, no pieces.
     scene.objects[1].transform.position = {10, 0, 0};
     r = splash::exportSplashpack(scene, dir, dir / "out" / "scene.splashpack");
     CHECK(r.ok() && std::any_of(r.warnings.begin(), r.warnings.end(),
                                 [](const std::string& w) { return w == "Decal: decal covers no triangles"; }));
+    // The meters: the pieces are ordinary triangles in view, and in the bump allocator's need.
+    CHECK(on.trianglesInView == r.stats.trianglesInView + b.pieces.size());
+    CHECK(on.triangles == r.stats.triangles + int(b.pieces.size()));
+    CHECK(on.bumpAllocatorNeed > r.stats.bumpAllocatorNeed);
 
     // Add component.
     splash::Object fresh = named("Empty");

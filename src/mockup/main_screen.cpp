@@ -45,6 +45,7 @@
 #include "ui/texture_image.h"
 #include "ui/widgets.h"
 #include "viewport/ps1view.h"
+#include "decal.hh"
 
 using namespace theme;
 using namespace ui;
@@ -70,6 +71,7 @@ constexpr ImU32 room = rgb(0x40e0d0);
 constexpr ImU32 portal = rgb(0xffe14d);
 constexpr ImU32 walkoff = rgb(0xff6a00);
 constexpr ImU32 agent = rgb(0xff5fa0);
+constexpr ImU32 decal = rgb(0xe05050);
 constexpr ImU32 hearing = rgb(0x6ad8ff);
 constexpr ImU32 prefab = rgb(0x6ab0ff);  // a prefab instance, and .prefab files in the Project panel
 }  // namespace kind
@@ -1017,6 +1019,7 @@ static ObjectLook lookOf(editor::ComponentKind k) {
         case K::Portal: return {icon::link, kind::portal};
         case K::Walkoff: return {icon::maximize, kind::walkoff};
         case K::Agent: return {icon::eye, kind::agent};
+        case K::Decal: return {icon::image, kind::decal};
     }
     return {icon::box, color::textDim};
 }
@@ -1033,6 +1036,7 @@ static ObjectLook lookOf(const splash::Object& o, bool expanded) {
     if (o.portal) return lookOf(K::Portal);
     if (o.room) return lookOf(K::Room);
     if (o.walkoff) return lookOf(K::Walkoff);
+    if (o.decal) return lookOf(K::Decal);
     if (!o.children.empty() && !o.collider) return {expanded ? icon::folderOpen : icon::folder, kind::folder};
     return {icon::box, color::textDim};
 }
@@ -1347,7 +1351,7 @@ static void pasteClipboard(State& st, editor::Document& doc, const std::optional
 // SceneLua and MemCardIcon: no target object. MemCardIcon replaces icon frame
 // `index`, or with index -1 adds the picked files as new frames.
 // UiTexture: a UI image's Texture; the target is {canvas, element}.
-enum class AssetSlot { Texture, Lua, TriggerLua, Clip, SkinClips, SceneLua, MemCardIcon, UiTexture };
+enum class AssetSlot { Texture, Lua, TriggerLua, Clip, SkinClips, SceneLua, MemCardIcon, UiTexture, DecalTexture };
 static AssetSlot g_assetSlot = AssetSlot::Texture;
 static editor::ObjectPath g_assetTarget;
 static int g_assetIndex = 0;
@@ -1371,7 +1375,7 @@ static void pickAsset(AssetSlot slot, const editor::ObjectPath& target, int inde
     static const SDL_DialogFileFilter lua[] = {{"Lua scripts", "lua"}};
     static const SDL_DialogFileFilter wav[] = {{"Audio (WAV, AIFF, MP3, Ogg, FLAC)", splash::kAudioExtensions}};
     static const SDL_DialogFileFilter anim[] = {{"Animation clips", "anim"}};
-    const SDL_DialogFileFilter* filter = slot == AssetSlot::Texture || slot == AssetSlot::MemCardIcon ? images
+    const SDL_DialogFileFilter* filter = slot == AssetSlot::Texture || slot == AssetSlot::MemCardIcon || slot == AssetSlot::DecalTexture ? images
                                          : slot == AssetSlot::Clip    ? wav
                                          : slot == AssetSlot::SkinClips ? anim
                                                                         : lua;
@@ -1388,7 +1392,9 @@ static void applyAssetFiles(State& st, editor::Document& doc, AssetSlot slot, co
                             const std::vector<std::string>& files, bool append = false, int index = -1) {
     const bool sceneWide = slot == AssetSlot::SceneLua || slot == AssetSlot::MemCardIcon || slot == AssetSlot::UiTexture;
     if (files.empty() || (!sceneWide && !doc.object(target))) return;
-    const char* folder = slot == AssetSlot::Texture || slot == AssetSlot::MemCardIcon || slot == AssetSlot::UiTexture ? "textures"
+    const char* folder = slot == AssetSlot::Texture || slot == AssetSlot::MemCardIcon || slot == AssetSlot::UiTexture ||
+                                 slot == AssetSlot::DecalTexture
+                             ? "textures"
                          : slot == AssetSlot::Clip      ? "audio"
                          : slot == AssetSlot::SkinClips ? "anims"
                                                         : "scripts";
@@ -1461,6 +1467,9 @@ static void applyAssetFiles(State& st, editor::Document& doc, AssetSlot slot, co
                     if (o.skin->clips.size() < 16 && std::find(o.skin->clips.begin(), o.skin->clips.end(), p) == o.skin->clips.end())
                         o.skin->clips.push_back(p);
                 break;
+            case AssetSlot::DecalTexture:
+                if (o.decal) o.decal->texture = first;
+                break;
             case AssetSlot::SceneLua:
             case AssetSlot::MemCardIcon:
             case AssetSlot::UiTexture:
@@ -1500,7 +1509,8 @@ static bool slotTakes(int slot, editor::AssetType t) {
         case AssetSlot::Clip: return t == T::Audio;
         case AssetSlot::SkinClips: return t == T::Animation;
         case AssetSlot::MemCardIcon:
-        case AssetSlot::UiTexture: return t == T::Texture;
+        case AssetSlot::UiTexture:
+        case AssetSlot::DecalTexture: return t == T::Texture;
     }
     return false;
 }
@@ -3140,13 +3150,25 @@ static std::optional<ModelTarget> modelTargetAt(State& st, const viewport::Ps1Vi
 // the viewport it would land on, outlined, and a hint saying so.
 static void assetDragHint(State& st, ImDrawList* dl, const editor::Document& doc) {
     const editor::AssetEntry* e = st.assets.dragging();
-    if (!e || (e->type != editor::AssetType::Model && e->type != editor::AssetType::Mesh && e->type != editor::AssetType::Prefab)) return;
+    if (!e || (e->type != editor::AssetType::Model && e->type != editor::AssetType::Mesh && e->type != editor::AssetType::Prefab &&
+               e->type != editor::AssetType::Texture))
+        return;
     const ImVec2 pos = ImGui::GetIO().MousePos;
     std::string hint;
     ImRect zone;
+    if (e->type == editor::AssetType::Texture) {
+        // A texture goes on an asset field (outlined by the field) or, on the scene view, becomes a decal.
+        for (const State::AssetSlotTarget& t : st.assetSlots)
+            if (t.rect.Contains(pos)) return;
+        if (st.viewportRect.GetWidth() <= 0 || !st.viewportRect.Contains(pos)) return;
+        zone = st.viewportRect;
+        hint = "Drop on a wall or floor to place " + e->name + " as a decal";
+    }
     for (const State::AssetSlotTarget& t : st.assetSlots)
         if (t.slot < 0 && t.rect.Contains(pos)) return;  // the Model field outlines itself
-    if (std::optional<editor::ObjectPath> rowPath = treeRowAt(st, pos)) {
+    if (!hint.empty()) {
+        // the texture's decal hint, above
+    } else if (std::optional<editor::ObjectPath> rowPath = treeRowAt(st, pos)) {
         for (const auto& [rect, path] : st.treeRows)
             if (path == *rowPath && doc.object(path)) {
                 zone = rect;
@@ -3172,6 +3194,58 @@ static void assetDragHint(State& st, ImDrawList* dl, const editor::Document& doc
     textCentered(dl, pill, f.medium, type::body, color::text, hint.c_str());
 }
 
+// A texture dropped on a surface in the scene view: a new object with a Decal
+// of it at the hit point, its +Z out of the surface and its top up a wall or
+// away from the viewer on a floor (splash::decalPlacement), 1 m wide and as
+// tall as the image's aspect, selected. One undo step.
+static void placeDecal(State& st, editor::Document& doc, const viewport::Ps1View& view, const std::string& texture, ImVec2 pos) {
+    const std::optional<viewport::Ps1View::SurfaceHit> hit = view.pickSurface(pos, st.viewportRect.Min, st.viewportRect.GetSize());
+    if (!hit) {
+        notify(st, "Drop the texture on a wall or floor to place a decal there", true);
+        return;
+    }
+    viewport::Vec3 right, up, fwd;
+    view.basis(&right, &up, &fwd);
+    const std::vector<splash::FlatObject> flats = splash::flatten(doc.scene());
+    const std::string onto = hit->object >= 0 && size_t(hit->object) < flats.size() ? flats[size_t(hit->object)].object->name : "?";
+    splash::DecalComponent d;
+    d.texture = texture;
+    int w = 0, h = 0;
+    if (const editor::TextureInfo* ti = doc.texture(texture); ti && ti->width > 0) {
+        w = ti->width;
+        h = ti->height;
+    } else {
+        try {
+            const splash::Image img = splash::loadImage(doc.resolve(texture));
+            w = img.width;
+            h = img.height;
+        } catch (const std::exception&) {
+        }
+    }
+    if (w > 0 && h > 0) d.height = d.width * float(h) / float(w);
+    splash::Object obj;
+    obj.name = editor::uniqueName("Decal " + utf8(std::filesystem::path(std::u8string(texture.begin(), texture.end())).stem()),
+                                  doc.scene().objects);
+    obj.transform.position = hit->point;
+    obj.transform.rotation = splash::decalPlacement(hit->normal, {fwd.x, fwd.y, -fwd.z});
+    obj.decal = d;
+    const std::string name = obj.name;
+    if (!doc.insertObject({int(doc.scene().objects.size())}, std::move(obj))) {
+        notify(st, "There is nowhere to put the decal", true);
+        return;
+    }
+    doc.refreshAssets({texture});
+    auto f2 = [](float v) {
+        char b[32];
+        std::snprintf(b, sizeof b, "%.2f", double(v) == 0.0 ? 0.0 : double(v));  // no "-0.00"
+        return std::string(b);
+    };
+    scriptLine(nullptr, "decal: placed " + name + " on " + onto + " at " + f2(hit->point.x) + " " + f2(hit->point.y) + " " +
+                            f2(hit->point.z) + " normal " + f2(hit->normal.x) + " " + f2(hit->normal.y) + " " + f2(hit->normal.z) +
+                            " size " + f2(d.width) + "x" + f2(d.height));
+    notify(st, "Added " + name, false);
+}
+
 // What the Project panel asked for this frame: files dropped on the scene or
 // an asset field, opened, reimported, or an object to show.
 static void assetRequests(State& st, editor::Document& doc, const viewport::Ps1View& view) {
@@ -3191,6 +3265,10 @@ static void assetRequests(State& st, editor::Document& doc, const viewport::Ps1V
                         for (char& c : what) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
                         notify(st, "That field does not take " + what, true);
                     }
+                    break;
+                }
+                if (r.type == T::Texture) {
+                    if (st.viewportRect.GetWidth() > 0 && st.viewportRect.Contains(r.pos)) placeDecal(st, doc, view, r.path, r.pos);
                     break;
                 }
                 if (r.type != T::Model && r.type != T::Mesh && r.type != T::Prefab) break;
@@ -10233,6 +10311,84 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                             " hearing " + fmtShort(ag.hearingRange) + " alert " + std::to_string(ag.alertTimeout) + " waypoints " +
                             std::to_string(ag.waypoints.size()) + " clips " + clipLine + " bytes " + std::to_string(bytes) +
                             " warnings " + std::to_string(warns.size()));
+        sectionEnd(top);
+    }
+
+    if (o->decal) {
+        // A copy: every edit below goes through doc.edit.
+        const splash::DecalComponent dc = *o->decal;
+        const std::string name = o->name;
+        top = y;
+        compSection("s_decal", editor::ComponentKind::Decal);
+        auto caption = [&](const std::string& id, const std::string& t, ImU32 col) {
+            const float tx = x0 + space::sm, w = x1 - space::sm - tx;
+            const ImVec2 at(tx, y + space::xs);
+            const ImVec2 ts = f.regular->CalcTextSizeA(type::caption, FLT_MAX, w, t.c_str());
+            dl->AddText(f.regular, type::caption, at, col, t.c_str(), nullptr, w);
+            nameRect(id, ImRect(at, at + ts));
+            y += ts.y + space::xs + space::sm;
+        };
+        const bool found = !dc.texture.empty() && doc.fileExists(dc.texture);
+        const ImRect texRow = row("ldtex", "Texture",
+                                  "The image projected onto the surfaces under the box. Texels under half alpha are "
+                                  "holes; exported at 8 bpp. Click to pick an image, or drag one from the Project panel.");
+        nameRect("obj.dtexture", texRow);
+        if (slotField(st, static_cast<int>(AssetSlot::DecalTexture), path, "dtexture", texRow, icon::image,
+                      found ? color::textDim : color::warn, dc.texture.empty() ? "None" : fileName(dc.texture).c_str(), nullptr))
+            pickAsset(AssetSlot::DecalTexture, path);
+        number("dwidth", "Width", "Width of the box along the object's X: how wide the texture lands.", dc.width, "m", "dwidth",
+               0.01f, 1000, [](splash::Object& ob, float v) { ob.decal->width = v; });
+        number("dheight", "Height", "Height of the box along the object's Y: how tall the texture lands.", dc.height, "m", "dheight",
+               0.01f, 1000, [](splash::Object& ob, float v) { ob.decal->height = v; });
+        number("ddepth", "Depth",
+               "Thickness of the box along the object's Z: surfaces within half of it in front of or behind the object "
+               "take the decal. The decal projects along the object's -Z.",
+               dc.depth, "m", "ddepth", 0.01f, 1000, [](splash::Object& ob, float v) { ob.decal->depth = v; });
+        {
+            const ImRect colRow = row("ldcol", "Colour", "Tints the texture; white keeps it as it is. Lit like the surface under it.");
+            nameRect("obj.dcol", colRow);
+            const ColorFieldHit hit = colorField("dcol", colRow, dc.color, "obj.dcol");
+            if (hit.clicked) ImGui::OpenPopup("##dcolpick");
+            if (hit.pasted) doc.edit(path, [&](splash::Object& ob) { ob.decal->color = *hit.pasted; });
+            ImGui::SetNextWindowPos(ImVec2(colRow.Max.x, colRow.Max.y + space::xs), ImGuiCond_Always, ImVec2(1, 0));
+            pushPopupStyle();
+            if (ImGui::BeginPopup("##dcolpick")) {
+                float c[3] = {dc.color[0], dc.color[1], dc.color[2]};
+                ImGui::SetNextItemWidth(220);
+                if (ImGui::ColorPicker3("##dcolwheel", c, ImGuiColorEditFlags_NoSidePreview | ImGuiColorEditFlags_DisplayHex |
+                                                              ImGuiColorEditFlags_NoAlpha))
+                    doc.edit(path, [&](splash::Object& ob) { ob.decal->color = {c[0], c[1], c[2]}; }, "dcol");
+                if (ImGui::IsItemDeactivated()) doc.endMerge();
+                ImGui::EndPopup();
+            }
+            ImGui::PopStyleVar(4);
+            ImGui::PopStyleColor(2);
+        }
+        // What the scene view's preview (the exporter's own clipping) found under the box.
+        const viewport::Ps1View::DecalInfo* di = view.decalInfo(o);
+        std::string covers;  // empty until the scene view has drawn it
+        if (!di) {
+            caption("obj.dcovers", "Not drawn: the object or a parent is off.", color::textFaint);
+        } else {
+            covers = "decal: " + name;
+            const int objects = int(di->covered.size());
+            const std::string line = "Covers " + std::to_string(di->triangles) + (di->triangles == 1 ? " triangle" : " triangles") +
+                                     " on " + std::to_string(objects) + (objects == 1 ? " object." : " objects.");
+            caption("obj.dcovers", line, di->triangles > 0 ? color::textDim : color::warn);
+            if (di->triangles == 0)
+                caption("obj.dnothing", "Nothing under it: move the box onto a wall or floor, or make it deeper.", color::warn);
+            if (dc.texture.empty()) caption("obj.dnotex", "No texture: it draws nothing.", color::warn);
+            for (const auto& [ex, why] : di->excluded)
+                caption("obj.dexcluded." + ex, ex + " is " + why + " and is not decalled: only meshes that never move take decals.",
+                        color::warn);
+            covers += " texture " + (dc.texture.empty() ? std::string("none") : fileName(dc.texture)) + " size " +
+                      fmtShort(dc.width) + "x" + fmtShort(dc.height) + " depth " + fmtShort(dc.depth) + " colour " +
+                      colourHex({dc.color[0], dc.color[1], dc.color[2]}) + " covers " + std::to_string(di->triangles) +
+                      " triangles on " + std::to_string(objects) + " objects pieces " + std::to_string(di->pieces);
+            for (const auto& [ob, n] : di->covered) covers += " | " + ob + " " + std::to_string(n);
+            for (const auto& [ex, why] : di->excluded) covers += " | skipped " + ex + " " + why;
+        }
+        report("decal", covers);
         sectionEnd(top);
     }
 
