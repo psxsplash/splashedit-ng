@@ -14593,6 +14593,202 @@ void testShadows() {
     CHECK(flat.region < 0 && flat.centre.y == 3.f && flat.radius == 0.5f && flat.darkness == 1.f && flat.visible);
 }
 
+// ---- Shine (psxsplash shinemath.hh, splashpack v30): a material's shine
+// round-trips through the scene file, written only when it has a texture; a
+// shiny Crate exports v30 (header 168, shineTableOffset at 164) with its
+// Tris flagged 0x4, one record {object, tris, tpage, clut, u0 v0 w-1 h-1,
+// strength 0..128, blend} and 3 normals per Tri; the reflection texture is
+// packed with STP on every texel; the budgets count the overlay.
+void testShine() {
+    namespace fs = std::filesystem;
+    const fs::path project = fs::path(SPLASHEDIT_SOURCE_DIR) / "examples" / "courtyard";
+    const fs::path dir = g_outDir / "shine";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    const splash::Scene base = splash::loadScene(project / "courtyard.scene");
+    auto find = [](splash::Scene& sc, const std::string& name) -> splash::Object* {
+        std::function<splash::Object*(std::vector<splash::Object>&)> walk = [&](std::vector<splash::Object>& v) -> splash::Object* {
+            for (splash::Object& o : v) {
+                if (o.name == name) return &o;
+                if (splash::Object* c = walk(o.children)) return c;
+            }
+            return nullptr;
+        };
+        return walk(sc.objects);
+    };
+    auto slurp = [](const fs::path& p) {
+        std::ifstream in(p, std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(in), {});
+    };
+    using roomtest::rd16;
+    using roomtest::rd32;
+
+    // JSON: no texture, no key; a shine round-trips, as a field.
+    {
+        splash::Scene sc = base;
+        splash::Object* crate = find(sc, "Crate");
+        CHECK(crate && crate->mesh && crate->mesh->materials.size() == 1 && crate->mesh->materials[0].shine.texture.empty());
+        CHECK(crate->mesh->materials[0].shine.strength == 0.5f && crate->mesh->materials[0].shine.blend == splash::ShineBlend::Add);
+        crate->mesh->materials[0].shine.strength = 0.8f;  // no texture: not written
+        splash::saveScene(sc, dir / "plain.scene");
+        CHECK(slurp(dir / "plain.scene").find("shine") == std::string::npos);
+        crate->mesh->materials[0].shine = {"textures/brick.png", 0.25f, splash::ShineBlend::Half};
+        splash::saveScene(sc, dir / "shine.scene");
+        const std::string text = slurp(dir / "shine.scene");
+        CHECK(text.find("\"shine\"") != std::string::npos && text.find("\"half\"") != std::string::npos);
+        splash::Scene back = splash::loadScene(dir / "shine.scene");
+        const splash::Shine& bs = find(back, "Crate")->mesh->materials[0].shine;
+        CHECK(bs.texture == "textures/brick.png" && bs.strength == 0.25f && bs.blend == splash::ShineBlend::Half);
+        splash::saveScene(back, dir / "shine2.scene");
+        CHECK(slurp(dir / "shine2.scene") == text);
+        // A bad blend is an error, a strength out of range is clamped.
+        std::string bad = text;
+        bad.replace(bad.find("\"half\""), 6, "\"glow\"");
+        std::ofstream(dir / "bad.scene") << bad;
+        bool threw = false;
+        try {
+            splash::loadScene(dir / "bad.scene");
+        } catch (const std::exception&) {
+            threw = true;
+        }
+        CHECK(threw);
+        std::string big = text;
+        big.replace(big.find("\"strength\": 0.25"), 16, "\"strength\": 7.0");
+        std::ofstream(dir / "big.scene") << big;
+        splash::Scene bigScene = splash::loadScene(dir / "big.scene");
+        CHECK(find(bigScene, "Crate")->mesh->materials[0].shine.strength == 1.f);
+    }
+
+    // Export: without shine v27; a shiny Crate, v30.
+    splash::Scene plain = base;
+    splash::ExportResult ra = splash::exportSplashpack(plain, project, dir / "plain.splashpack");
+    CHECK(ra.ok() && ra.stats.shineTriangles == 0 && ra.stats.shinyObjects == 0);
+    const std::string a = slurp(dir / "plain.splashpack");
+    CHECK(a.size() > 160 && rd16(a, 2) == 27);
+    splash::Scene sc = base;
+    find(sc, "Crate")->mesh->materials[0].shine.texture = "textures/brick.png";
+    splash::ExportResult r = splash::exportSplashpack(sc, project, dir / "shine.splashpack");
+    CHECK(r.ok() && r.stats.shinyObjects == 1);
+    const std::string b = slurp(dir / "shine.splashpack");
+    CHECK(b.size() > 168 && rd16(b, 2) == 30);
+    CHECK(rd32(b, 156) == 0 && rd32(b, 160) == 0);  // no shadows, no backgrounds
+    const uint32_t table = uint32_t(rd32(b, 164));
+    CHECK(table != 0 && table % 4 == 0 && table + 20 <= b.size());
+    if (table == 0 || table + 20 > b.size()) return;
+    const size_t nlua = rd16(b, 4), ngo = rd16(b, 6);
+    CHECK(rd16(b, table) == 1 && rd16(b, table + 2) == 0);
+    const size_t obj = rd16(b, table + 4), tris = rd16(b, table + 6);
+    CHECK(obj < ngo);
+    if (obj >= ngo) return;
+    const size_t at = 168 + 8 * nlua + 92 * obj;
+    // The Crate: at (0, 0.5, 1), its Tri count in the record.
+    const float gte = sc.settings.gteScaling;
+    CHECK(rd32(b, at + 4) == splash::toWorldFixed12(0.f) && rd32(b, at + 8) == splash::toWorldFixed12(-0.5f / gte) &&
+          rd32(b, at + 12) == splash::toWorldFixed12(1.f / gte));
+    CHECK(tris == rd16(b, at + 52) && tris > 0);
+    CHECK(r.stats.shineTriangles == tris);
+    // Its Tris carry flag 0x4, no other object's do.
+    for (size_t i = 0; i < ngo; i++) {
+        const size_t go = 168 + 8 * nlua + 92 * i;
+        const uint32_t polys = uint32_t(rd32(b, go));
+        bool all = true, none = true;
+        for (size_t t = 0; t < rd16(b, go + 52); t++) {
+            const bool f = (rd16(b, polys + 52 * t + 50) & 4) != 0;
+            all &= f;
+            none &= !f;
+        }
+        CHECK(i == obj ? all : none);
+    }
+    // The record: the brick texture where the packer put it, as an 8 bpp
+    // texture page with the dither bit, default strength 0.5 (64), add.
+    const splash::ExportStats::TexturePlacement* tp = nullptr;
+    for (const auto& t : r.stats.textures)
+        if (t.source == "shine:8:textures/brick.png") tp = &t;
+    CHECK(tp != nullptr);
+    if (!tp) return;
+    // The page is the atlas's (an 8 bpp page spans 128 words, from a
+    // multiple of 64), u0 the texture's offset in it in texels (2 per word).
+    const uint16_t tpage = uint16_t(rd16(b, table + 8));
+    const int pageX = (tpage & 0xF) * 64, pageY = ((tpage >> 4) & 1) * 256;
+    CHECK(tp->bitDepth == 8 && (tpage & ~0x1Fu) == ((1u << 7) | 0x200u));
+    CHECK(pageX <= tp->x && tp->x + tp->width / 2 <= pageX + 128 && pageY <= tp->y && tp->y + tp->height <= pageY + 256);
+    CHECK(rd16(b, table + 10) * 16 == tp->clutX && rd16(b, table + 12) == tp->clutY);
+    CHECK(uint8_t(b[table + 14]) == (tp->x - pageX) * 2 && uint8_t(b[table + 15]) == tp->y - pageY);
+    CHECK(uint8_t(b[table + 16]) == tp->width - 1 && uint8_t(b[table + 17]) == tp->height - 1);
+    CHECK(uint8_t(b[table + 18]) == 64 && uint8_t(b[table + 19]) == 0);
+    // The normals: unit, and the first corner's the same as the Tri's own
+    // (the Crate is not scaled), for every Tri.
+    CHECK(table + 20 + 18 * tris <= b.size());
+    const uint32_t polys = uint32_t(rd32(b, at));
+    for (size_t t = 0; t < tris && table + 20 + 18 * tris <= b.size(); t++) {
+        for (int k = 0; k < 3; k++) {
+            const size_t n = table + 20 + 18 * t + 6 * size_t(k);
+            const double x = int16_t(rd16(b, n)), y = int16_t(rd16(b, n + 2)), z = int16_t(rd16(b, n + 4));
+            CHECK(std::abs(std::sqrt(x * x + y * y + z * z) - 4096.0) < 4.0);
+        }
+        CHECK(b.compare(table + 20 + 18 * t, 6, b, polys + 52 * t + 18, 6) == 0);
+    }
+    // The reflection texture's CLUT in the .vram file: STP on every entry but
+    // a transparent 0. The Crate's own texture keeps its CLUT as it was.
+    {
+        const std::string v = slurp(dir / "shine.vram");
+        size_t p = 8;
+        const size_t atlases = rd16(v, 2), cluts = rd16(v, 4);
+        for (size_t i = 0; i < atlases; i++) {
+            p += 8 + size_t(rd16(v, p + 4)) * rd16(v, p + 6) * 2;
+            p = (p + 3) & ~size_t(3);
+        }
+        bool found = false;
+        for (size_t i = 0; i < cluts; i++) {
+            const size_t x = rd16(v, p), y = rd16(v, p + 2), len = rd16(v, p + 4);
+            if (int(x) * 16 == tp->clutX && int(y) == tp->clutY) {
+                found = true;
+                bool stp = true;
+                for (size_t k = 0; k < len; k++) {
+                    const uint16_t c = uint16_t(rd16(v, p + 8 + 2 * k));
+                    stp &= c == 0 || (c & 0x8000) != 0;
+                }
+                CHECK(stp);
+            }
+            p += 8 + len * 2;
+        }
+        CHECK(found);
+    }
+    // Budgets: each shiny Tri one more textured triangle (40 bytes) and in
+    // view, plus one texture page a frame; the ordering table does not grow
+    // (the overlay sits in its triangle's bucket).
+    CHECK(r.stats.trianglesInView == ra.stats.trianglesInView + tris);
+    CHECK(r.stats.bumpAllocatorNeed == ra.stats.bumpAllocatorNeed + uint32_t(40 * tris + 8));
+    CHECK(r.stats.orderingTableNeed == ra.stats.orderingTableNeed);
+    // Half blend under fog: a texture page more per shiny Tri, before its fog
+    // pass; strength 1 is 128.
+    {
+        splash::Scene fa = base, fb = base;
+        fa.settings.fog.enabled = fb.settings.fog.enabled = true;
+        find(fb, "Crate")->mesh->materials[0].shine = {"textures/brick.png", 1.f, splash::ShineBlend::Half};
+        splash::ExportResult rfa = splash::exportSplashpack(fa, project, dir / "foga.splashpack");
+        splash::ExportResult rfb = splash::exportSplashpack(fb, project, dir / "fogb.splashpack");
+        CHECK(rfa.ok() && rfb.ok());
+        CHECK(rfb.stats.bumpAllocatorNeed == rfa.stats.bumpAllocatorNeed + uint32_t(48 * tris + 8));
+        const std::string fbb = slurp(dir / "fogb.splashpack");
+        const uint32_t ft = uint32_t(rd32(fbb, 164));
+        CHECK(ft != 0 && uint8_t(fbb[ft + 18]) == 128 && uint8_t(fbb[ft + 19]) == 1);
+    }
+    // Two shiny materials that differ: one record, the first's, and a warning.
+    {
+        splash::Scene s2 = base;
+        splash::MeshComponent& mc = *find(s2, "Crate")->mesh;
+        mc.materials[0].shine.texture = "textures/brick.png";
+        mc.materials.push_back(mc.materials[0]);
+        mc.materials[1].shine.texture = "textures/stone.png";
+        splash::ExportResult r2 = splash::exportSplashpack(s2, project, dir / "two.splashpack");
+        CHECK(r2.ok() && r2.stats.shinyObjects == 1);
+        bool warned = false;
+        for (const std::string& w : r2.warnings) warned |= w.find("shine differently") != std::string::npos;
+        CHECK(warned);
+    }
+}
+
 void testGpuRaster() {
     using gpuraster::Gpu;
     auto px = [](const Gpu& g, int x, int y) { return g.at(x, y); };
@@ -14903,6 +15099,7 @@ int main(int argc, char** argv) {
     testGpuDecode();
     testGpuRaster();
     testShadows();
+    testShine();
     testListScroll();
     testFixedCameraModel();
     testFixedCameraBakedSet();

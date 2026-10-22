@@ -62,8 +62,14 @@ struct ExportStats {
     int triangles = 0;
     // Most triangles that can be in view in one frame: every triangle of the
     // objects that do not stream plus streamDrawTris (the same worst case
-    // bumpAllocatorNeed sizes the render buffer for).
+    // bumpAllocatorNeed sizes the render buffer for). A shiny triangle counts
+    // twice (its overlay is another textured triangle); in streamed objects,
+    // streamDrawTris times their share of shiny triangles.
     uint64_t trianglesInView = 0;
+    // Shine (v30): shiny triangles exported and the objects with a shine
+    // record.
+    uint64_t shineTriangles = 0;
+    int shinyObjects = 0;
     // psxsplash render buffers. The *Need values are the exporter's worst case
     // for this scene; the plain ones are what the splashpack carries, which is
     // the scene's override when it has one.

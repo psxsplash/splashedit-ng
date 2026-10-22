@@ -108,7 +108,10 @@ void visitObjectPaths(SceneT& o, const std::string& names, std::vector<int>& pat
     }
     if (o.mesh) {
         fn("Mesh", names, path, o.mesh->mesh);
-        for (auto& m : o.mesh->materials) fn("Texture", names, path, m.texture);
+        for (auto& m : o.mesh->materials) {
+            fn("Texture", names, path, m.texture);
+            fn("Shine", names, path, m.shine.texture);
+        }
     }
     if (o.skin)
         for (auto& c : o.skin->clips) fn("Skin clip", names, path, c);

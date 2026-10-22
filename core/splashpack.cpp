@@ -134,14 +134,33 @@ uint32_t hashSceneId(const std::string& id) {
 
 namespace {
 
+// Sets STP on every texel a shine overlay draws (palette entries, or 16bpp
+// words), leaving a cutout's transparent 0 alone: the GPU blends a
+// semi-transparent primitive only over texels with STP set.
+// A shine strength 0..1 as the overlay's grey: 128 draws the reflection
+// texture as it is.
+uint8_t shineStrengthByte(float s) { return uint8_t(std::lround(std::clamp(s, 0.f, 1.f) * 128.f)); }
+
+void setAllStp(PsxTexture& t) {
+    if (t.hasPalette) {
+        for (uint16_t& c : t.palette)
+            if (c != 0) c |= 0x8000;
+    } else {
+        for (uint16_t& c : t.imageData)
+            if (c != 0) c |= 0x8000;
+    }
+}
+
 struct PsxVert {
     int16_t vx, vy, vz, nx, ny, nz;
     uint8_t u, v, r, g, b;
+    int16_t snx = 0, sny = 0, snz = 0;  // shine: the normal under the object's scale, 4.12, PSX axes
 };
 
 struct PsxTri {
     PsxVert v[3];
     int textureIndex;  // -1 = untextured
+    bool shine = false;  // drawn again through the object's reflection texture (Tri flag 0x4)
 };
 
 struct Color {
@@ -168,6 +187,8 @@ struct ExpObject {
     bool dynamicLit = false;                 // runtime point lights are applied on the console
     bool dynamicLitSmooth = false;           // per vertex instead of per triangle
     std::optional<Bounds> pieceBounds{};     // streaming cut this object: mesh-space bounds of its part
+    const Shine* shine = nullptr;            // the shine the object draws (its first shiny material's)
+    PsxTexture* shineTexture = nullptr;      // its reflection texture, every texel STP
 };
 
 // A runtime point light (light table, v24). Scene order is table order, which
@@ -422,6 +443,11 @@ void buildTris(ExpObject& e, float gte, const std::vector<SceneLight>& lights, E
         res.errors.push_back(e.obj->name + ": mesh component has no materials");
         return;
     }
+    if (e.shine && !e.vertexBone.empty()) {
+        res.warnings.push_back(e.obj->name + ": a skinned mesh does not shine on the console yet; its Shine is left out");
+        e.shine = nullptr;
+        e.shineTexture = nullptr;
+    }
     const std::vector<Color> colors = meshColors(fo, mc, m, lights);
     std::vector<Vec2> uvs = m.uv;
     if (uvs.empty()) uvs.assign(m.positions.size(), {});
@@ -436,15 +462,29 @@ void buildTris(ExpObject& e, float gte, const std::vector<SceneLight>& lights, E
                     texIndex = int(i);
                     break;
                 }
+        const bool shiny = e.shine && !mat.shine.texture.empty();
         auto convert = [&](const Corner& k) {
             Vec3 v = scale(k.pos, fo.lossyScale);
             Color c = k.color;
+            PsxVert p;
             if (texIndex == -1) {
                 c = {c.r * mat.color[0], c.g * mat.color[1], c.b * mat.color[2]};
-                return toPsxVertex(v, gte, k.normal, {}, 0, 0, c);
+                p = toPsxVertex(v, gte, k.normal, {}, 0, 0, c);
+            } else {
+                const PsxTexture* t = e.textures[size_t(texIndex)];
+                p = toPsxVertex(v, gte, k.normal, k.uv, t->width, t->height, c);
             }
-            const PsxTexture* t = e.textures[size_t(texIndex)];
-            return toPsxVertex(v, gte, k.normal, k.uv, t->width, t->height, c);
+            if (shiny) {
+                // The engine turns it by the object's rotation only (the scale
+                // is in the vertices), so the normal of the scaled surface.
+                const Vec3 s = fo.lossyScale;
+                const Vec3 n = normalized(Vec3{s.x != 0 ? k.normal.x / s.x : 0.f, s.y != 0 ? k.normal.y / s.y : 0.f,
+                                               s.z != 0 ? k.normal.z / s.z : 0.f});
+                p.snx = toPsxCoord(n.x);
+                p.sny = toPsxCoord(-n.y);
+                p.snz = toPsxCoord(n.z);
+            }
+            return p;
         };
         auto corner = [&](int idx, int slot) {
             size_t i = size_t(idx);
@@ -469,14 +509,14 @@ void buildTris(ExpObject& e, float gte, const std::vector<SceneLight>& lights, E
             std::vector<std::array<Corner, 3>> pieces;
             if (texIndex == -1 || !tileTriangle(k, pieces)) {
                 // One texture copy covers it: emit it as authored, corners in mesh order for the BVH.
-                e.tris.push_back({{convert(k[0]), convert(k[1]), convert(k[2])}, texIndex});
+                e.tris.push_back({{convert(k[0]), convert(k[1]), convert(k[2])}, texIndex, shiny});
                 for (int v : {tri[i], tri[i + 1], tri[i + 2]}) e.triPositions.push_back(m.positions[size_t(v)]);
                 if (!e.vertexBone.empty())
                     for (const Corner& q : k) e.triBones.push_back(bonesFor(q));
                 continue;
             }
             for (const auto& pc : pieces) {
-                e.tris.push_back({{convert(pc[0]), convert(pc[1]), convert(pc[2])}, texIndex});
+                e.tris.push_back({{convert(pc[0]), convert(pc[1]), convert(pc[2])}, texIndex, shiny});
                 for (const Corner& q : pc) e.triPositions.push_back(q.pos);
                 if (!e.vertexBone.empty())
                     for (const Corner& q : pc) e.triBones.push_back(bonesFor(q));
@@ -1509,12 +1549,24 @@ static uint32_t bumpAllocatorNeed(const Scene& scene, const std::vector<ExpObjec
                                   uint64_t streamTris, const std::vector<UICanvas>& canvases) {
     const bool fog = scene.settings.fog.enabled;
     uint64_t n = kFragTPage + kNearPlaneAllowance;
+    // A shiny triangle draws its overlay (a textured triangle), and with a
+    // half blend under fog a texture page before the fog pass; a scene with
+    // any shine one more texture page a frame (psxsplash insertShinePass).
+    bool anyShine = false, streamShine = false;
+    auto shineBytes = [&](const ExpObject& e, const PsxTri& t) -> uint64_t {
+        if (!t.shine || !e.shineTexture) return 0;
+        const bool half = e.shine && e.shine->blend == ShineBlend::Half;
+        return kFragTexturedTri + (fog && half && t.textureIndex >= 0 ? kFragTPage : 0);
+    };
     for (size_t i = 0; i < objs.size(); i++) {
-        if (streamed[i]) continue;
-        for (const PsxTri& t : objs[i].tris)
-            n += t.textureIndex < 0 ? kFragGouraudTri : kFragTexturedTri + (fog ? kFragGouraudTri : 0);
+        for (const PsxTri& t : objs[i].tris) {
+            if (t.shine && objs[i].shineTexture) (streamed[i] ? streamShine : anyShine) = true;
+            if (streamed[i]) continue;
+            n += (t.textureIndex < 0 ? kFragGouraudTri : kFragTexturedTri + (fog ? kFragGouraudTri : 0)) + shineBytes(objs[i], t);
+        }
     }
-    n += streamTris * (kFragTexturedTri + (fog ? kFragGouraudTri : 0));
+    if (anyShine || streamShine) n += kFragTPage;
+    n += streamTris * (kFragTexturedTri + (fog ? kFragGouraudTri : 0) + (streamShine ? kFragTexturedTri + kFragTPage : 0));
     for (const UICanvas& cv : canvases)
         for (const UIElement& el : cv.elements) switch (el.type) {
                 case UIElementType::Box: n += kFragRect; break;
@@ -1956,6 +2008,7 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     }
 
     std::vector<ExpObject> exporters;
+    std::map<std::string, PsxTexture*> shineCache;  // reflection textures by bit depth and path
     for (const FlatObject& fo : flat) {
         // An object that is off, or under an off parent, is not in the pack at
         // all (Unity's FindObjectsByType skips it), so its components are not
@@ -2007,6 +2060,38 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
             textureStore.back().source = mat.texture;
             cache[mat.texture] = &textureStore.back();
             e.textures.push_back(&textureStore.back());
+        }
+        // Shine: one reflection per object, its first shiny material's. Every
+        // texel gets STP, which the GPU blends only where it is set.
+        for (size_t mi = 0; mi < e.mc->materials.size(); mi++) {
+            const Shine& sh = e.mc->materials[mi].shine;
+            if (sh.texture.empty()) continue;
+            if (!e.shine) {
+                e.shine = &sh;
+                continue;
+            }
+            if (sh.texture != e.shine->texture || sh.strength != e.shine->strength || sh.blend != e.shine->blend)
+                res.warnings.push_back(e.obj->name + ": its materials shine differently; the console draws one reflection per "
+                                       "object, so every shiny material uses the first one's texture, strength and blend");
+        }
+        if (e.shine) {
+            const std::string key = "shine:" + std::to_string(int(e.mc->bitDepth)) + ":" + e.shine->texture;
+            auto it = shineCache.find(key);
+            if (it != shineCache.end()) {
+                e.shineTexture = it->second;
+            } else {
+                try {
+                    const Image& img = imageFor(e.shine->texture);
+                    textureStore.push_back(convertTexture(img, e.mc->bitDepth, hasCutoutTexels(img)));
+                    PsxTexture& t = textureStore.back();
+                    setAllStp(t);
+                    t.source = key;
+                    shineCache[key] = &t;
+                    e.shineTexture = &t;
+                } catch (const std::exception& ex) {
+                    res.errors.push_back(ex.what());
+                }
+            }
         }
         exporters.push_back(std::move(e));
     }
@@ -2291,6 +2376,8 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     // VRAM packing over every object's texture list in object order.
     std::vector<PsxTexture*> all;
     for (ExpObject& e : exporters) all.insert(all.end(), e.textures.begin(), e.textures.end());
+    for (ExpObject& e : exporters)
+        if (e.shineTexture) all.push_back(e.shineTexture);
     for (auto& cv : uiTextures)
         for (PsxTexture* t : cv)
             if (t) all.push_back(t);
@@ -2750,6 +2837,31 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     const bool hasShadows = !shadows.empty();
     st.shadows = int(shadows.size());
 
+    // Shine (v30): the objects whose triangles shine, in game object order;
+    // psxsplash keeps the first kMaxSceneShines (MAX_SCENE_SHINES).
+    constexpr size_t kMaxSceneShines = 64;
+    std::vector<size_t> shiny;
+    {
+        std::string dropped;
+        for (size_t oi = 0; oi < exporters.size(); oi++) {
+            ExpObject& e = exporters[oi];
+            if (!e.shineTexture) continue;
+            const bool any = std::any_of(e.tris.begin(), e.tris.end(), [](const PsxTri& t) { return t.shine; });
+            if (!any) continue;
+            if (shiny.size() == kMaxSceneShines) {
+                dropped += (dropped.empty() ? "" : ", ") + e.obj->name;
+                e.shineTexture = nullptr;
+                continue;
+            }
+            shiny.push_back(oi);
+        }
+        if (!dropped.empty())
+            res.warnings.push_back("the scene has more shiny objects than the PS1 draws (" + std::to_string(kMaxSceneShines) +
+                                   "); left out: " + dropped);
+    }
+    const bool hasShine = !shiny.empty();
+    st.shinyObjects = int(shiny.size());
+
     BinWriter w;
     st.bumpAllocatorNeed = bumpAllocatorNeed(scene, exporters, streamed, st.streamDrawTris, canvases) +
                            uint32_t(shadows.size()) * shadow::kBumpBytes;
@@ -2761,18 +2873,32 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
         st.bumpAllocatorNeed += uint32_t(most * 28);
     }
     st.trianglesInView = st.streamDrawTris;
-    for (size_t i = 0; i < exporters.size(); i++)
-        if (!streamed[i]) st.trianglesInView += exporters[i].tris.size();
+    {
+        uint64_t streamTotal = 0, streamShiny = 0;
+        for (size_t i = 0; i < exporters.size(); i++) {
+            uint64_t shiny = 0;
+            if (exporters[i].shineTexture)
+                for (const PsxTri& t : exporters[i].tris) shiny += t.shine;
+            st.shineTriangles += shiny;
+            if (streamed[i]) {
+                streamTotal += exporters[i].tris.size();
+                streamShiny += shiny;
+            } else {
+                st.trianglesInView += exporters[i].tris.size() + shiny;
+            }
+        }
+        if (streamTotal > 0) st.trianglesInView += (st.streamDrawTris * streamShiny + streamTotal - 1) / streamTotal;
+    }
     st.bumpAllocatorSize = scene.settings.bumpAllocatorSize > 0 ? (uint32_t(scene.settings.bumpAllocatorSize) + 3) & ~3u
                                                                  : st.bumpAllocatorNeed;
 
     // ---- header (156 bytes, v27; 160 bytes, v28, with shadows; 164 bytes,
-    // v29, with baked backgrounds). A scene with neither exports exactly as
-    // before shadows existed.
+    // v29, with baked backgrounds; 168 bytes, v30, with shine). A scene with
+    // none of them exports exactly as before shadows existed.
     bool hasLights = !runtimeLights.empty();
     w.u8('S');
     w.u8('P');
-    w.u16(!backgrounds.empty() ? 29 : hasShadows ? 28 : 27);
+    w.u16(hasShine ? 30 : !backgrounds.empty() ? 29 : hasShadows ? 28 : 27);
     w.u16(uint16_t(luaFiles.size()));
     w.u16(uint16_t(exporters.size()));
     res.stats.gameObjects = int(exporters.size());
@@ -2864,14 +2990,20 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     w.u32(st.bumpAllocatorSize);
     // v28+: the shadow table at byte 156, left 0 in a v29 pack without shadows.
     size_t shadowTableOffsetPos = 0;
-    if (hasShadows || !backgrounds.empty()) {
+    if (hasShadows || !backgrounds.empty() || hasShine) {
         shadowTableOffsetPos = w.pos();
         w.u32(0);
     }
     // v29: the baked background table at byte 160.
     size_t backgroundTableOffsetPos = 0;
-    if (!backgrounds.empty()) {
+    if (!backgrounds.empty() || hasShine) {
         backgroundTableOffsetPos = w.pos();
+        w.u32(0);
+    }
+    // v30: the shine table at byte 164.
+    size_t shineTableOffsetPos = 0;
+    if (hasShine) {
+        shineTableOffsetPos = w.pos();
         w.u32(0);
     }
 
@@ -3055,6 +3187,7 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
             w.u8(0);
         }
         uint16_t flags = e.mc->uvOffsetMaterial == t.textureIndex ? 1 : 0;
+        if (t.shine && e.shineTexture) flags |= 4;
         if (t.textureIndex < 0) {
             for (int i = 0; i < 6; i++) w.u8(0);
             w.u16(0);
@@ -3386,6 +3519,41 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
             w.u32(hidden.empty() ? 0 : o.hiddenAt);
         }
         res.stats.backgrounds = int(backgrounds.size());
+    }
+
+    // ---- shine (v30, psxsplash shinemath.hh): {u16 count, u16 0}, then per
+    // shiny object a 16-byte record {u16 object, u16 tris, u16 tpage, u16 clut
+    // x / 16, u16 clut y, u8 u0, v0, w - 1, h - 1, strength 0..128, blend}
+    // and its vertex normals, 3 x (x, y, z) 4.12 for every triangle in Tri
+    // order (the dull ones too).
+    if (hasShine) {
+        w.align4();
+        w.patchU32(shineTableOffsetPos, uint32_t(w.pos()));
+        w.u16(uint16_t(shiny.size()));
+        w.u16(0);
+        for (size_t oi : shiny) {
+            const ExpObject& e = exporters[oi];
+            const PsxTexture* tex = e.shineTexture;
+            const int expander = tex->bitDepth == BitDepth::Bpp4 ? 4 : tex->bitDepth == BitDepth::Bpp8 ? 2 : 1;
+            const uint16_t mode = tex->bitDepth == BitDepth::Bpp4 ? 0 : tex->bitDepth == BitDepth::Bpp8 ? 1 : 2;
+            w.u16(uint16_t(oi));
+            w.u16(uint16_t(e.tris.size()));
+            w.u16(uint16_t((tex->texpageX & 0xF) | ((tex->texpageY & 1) << 4) | (mode << 7) | 0x200));
+            w.u16(tex->clutPackingX);
+            w.u16(tex->clutPackingY);
+            w.u8(uint8_t(tex->packingX * expander));
+            w.u8(tex->packingY);
+            w.u8(uint8_t(std::clamp(tex->width, 1, 256) - 1));
+            w.u8(uint8_t(std::clamp(tex->height, 1, 256) - 1));
+            w.u8(shineStrengthByte(e.shine->strength));
+            w.u8(e.shine->blend == ShineBlend::Half ? 1 : 0);
+            for (const PsxTri& t : e.tris)
+                for (const PsxVert& v : t.v) {
+                    w.i16(v.snx);
+                    w.i16(v.sny);
+                    w.i16(v.snz);
+                }
+        }
     }
 
     // ---- memory card (v21): one 464-byte record, 0 in the header when off
