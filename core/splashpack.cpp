@@ -1523,6 +1523,26 @@ static uint32_t orderingTableNeed(const Scene& scene, const std::vector<ExpObjec
 // Streamed objects count as the most of their triangles within the draw
 // distance of one camera position (`streamTris`, whole regions, all around the
 // camera), each at the costliest fragment size.
+// What a frame's palette cycling uploads take from the bump allocator at most: per cycled CLUT a
+// 16-byte head (chain entry, GP0 A0h and its rectangle), the even-widened span of its ranges and
+// a cache flush word (psxsplash PaletteCycler::emit).
+static uint32_t clutCycleBumpBytes(const VramLayout& vram) {
+    uint32_t n = 0;
+    for (const Atlas& a : vram.atlases)
+        for (const PsxTexture* t : a.textures) {
+            if (t->cycles.empty()) continue;
+            unsigned lo = 256, hi = 0;
+            for (const ClutCycle& c : t->cycles) {
+                lo = std::min<unsigned>(lo, c.first);
+                hi = std::max<unsigned>(hi, unsigned(c.first) + c.count);
+            }
+            lo &= ~1u;
+            hi = std::min<unsigned>((hi + 1) & ~1u, unsigned((t->palette.size() + 1) & ~size_t(1)));
+            n += 16 + 4 * ((hi - lo) / 2 + 1);
+        }
+    return n;
+}
+
 static uint32_t bumpAllocatorNeed(const Scene& scene, const std::vector<ExpObject>& objs, const std::vector<bool>& streamed,
                                   uint64_t streamTris, const std::vector<UICanvas>& canvases) {
     // The edge fade draws the same second fragment as fog, fog on or off.
@@ -2111,7 +2131,9 @@ static ExportResult exportSplashpackBaked(const Scene& scene, const fs::path& ro
                 // Texels under half alpha become word 0, which the GPU
                 // skips; an image without any converts exactly as before.
                 const Image& img = imageFor(mat.texture);
-                textureStore.push_back(convertTexture(img, e.mc->bitDepth, hasCutoutTexels(img)));
+                // A <texture>.palette.json beside it fixes, overrides or cycles its palette.
+                textureStore.push_back(
+                    convertTextureWithSidecar(img, e.mc->bitDepth, hasCutoutTexels(img), root / mat.texture));
             } catch (const std::exception& ex) {
                 res.errors.push_back(ex.what());
                 continue;
@@ -2738,7 +2760,7 @@ static ExportResult exportSplashpackBaked(const Scene& scene, const fs::path& ro
 
     BinWriter w;
     st.bumpAllocatorNeed = bumpAllocatorNeed(scene, exporters, streamed, st.streamDrawTris, canvases) +
-                           uint32_t(shadows.size()) * shadow::kBumpBytes;
+                           uint32_t(shadows.size()) * shadow::kBumpBytes + clutCycleBumpBytes(vram);
     st.trianglesInView = st.streamDrawTris;
     for (size_t i = 0; i < exporters.size(); i++)
         if (!streamed[i]) st.trianglesInView += exporters[i].tris.size();
@@ -2990,15 +3012,37 @@ static ExportResult exportSplashpackBaked(const Scene& scene, const fs::path& ro
         w.u16(uint16_t(a.positionX));
         w.u16(uint16_t(a.positionY));
     }
+    // A CLUT with palette cycling sets pad bit 0 and points clutOffset at its record, right after
+    // the table (psxsplash palettecycle.hh): ClutCycleHeader {u16 length, u8 rangeCount, u8 pad},
+    // the CLUT's words padded to an even length, then {u8 first, u8 count, u16 period,
+    // i8 direction, u8 pad} per range. Readers that predate it skip the table and see neither.
+    std::vector<std::pair<size_t, const PsxTexture*>> cycleRecords;
     for (Atlas& a : vram.atlases)
         for (PsxTexture* t : a.textures) {
             if (!t->hasPalette) continue;
+            if (!t->cycles.empty()) cycleRecords.push_back({w.pos(), t});
             w.u32(0);
             w.u16(t->clutPackingX);
             w.u16(t->clutPackingY);
             w.u16(uint16_t(t->palette.size()));
-            w.u16(0);
+            w.u16(t->cycles.empty() ? 0 : 1);
         }
+    for (const auto& [at, t] : cycleRecords) {
+        w.align4();
+        w.patchU32(at, uint32_t(w.pos()));
+        const size_t length = (t->palette.size() + 1) & ~size_t(1);
+        w.u16(uint16_t(length));
+        w.u8(uint8_t(t->cycles.size()));
+        w.u8(0);
+        for (size_t i = 0; i < length; i++) w.u16(i < t->palette.size() ? t->palette[i] : 0);
+        for (const ClutCycle& c : t->cycles) {
+            w.u8(c.first);
+            w.u8(c.count);
+            w.u16(c.period);
+            w.u8(uint8_t(c.direction));
+            w.u8(0);
+        }
+    }
 
     // ---- Lua data
     for (size_t i = 0; i < luaData.size(); i++) {

@@ -2,8 +2,13 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
+#include <sstream>
+#include <cctype>
+#include <nlohmann/json.hpp>
 #include <stdexcept>
 
 #include "stb_image.h"
@@ -475,7 +480,7 @@ bool hasCutoutTexels(const Image& img) {
     return false;
 }
 
-PsxTexture convertTexture(const Image& img, BitDepth depth, bool cutout) {
+PsxTexture convertTexture(const Image& img, BitDepth depth, bool cutout, const std::vector<uint16_t>* fixedPalette) {
     PsxTexture t;
     t.bitDepth = depth;
     t.cutout = cutout;
@@ -500,11 +505,39 @@ PsxTexture convertTexture(const Image& img, BitDepth depth, bool cutout) {
     int maxColors = depth == BitDepth::Bpp4 ? 16 : 256;
     std::vector<bool> use(img.pixels.size());
     for (size_t i = 0; i < use.size(); i++) use[i] = opaque(img.pixels[i]);
-    Quantized q = quantize(img, use, cutout ? maxColors - 1 : maxColors);
+    Quantized q;
     int base = cutout ? 1 : 0;
     t.hasPalette = true;
-    if (cutout) t.palette.push_back(0);
-    t.palette.insert(t.palette.end(), q.palette.begin(), q.palette.end());
+    if (fixedPalette) {
+        // The given words as they are, each texel on its nearest entry; indices are final.
+        if (fixedPalette->empty()) throw std::runtime_error("fixed palette is empty");
+        if (int(fixedPalette->size()) > maxColors)
+            throw std::runtime_error("fixed palette has " + std::to_string(fixedPalette->size()) + " colours, more than the " +
+                                     std::to_string(maxColors) + " a " + std::to_string(depth == BitDepth::Bpp4 ? 4 : 8) +
+                                     " bpp texture holds");
+        t.palette = *fixedPalette;
+        if (cutout) t.palette[0] = 0;
+        std::vector<Lab> palLab;
+        std::vector<int> entryOf;  // palLab index -> palette index
+        for (size_t i = 0; i < t.palette.size(); i++) {
+            if (t.palette[i] == 0) continue;  // the transparent word never stands for an opaque texel
+            palLab.push_back(wordLab(t.palette[i]));
+            entryOf.push_back(int(i));
+        }
+        if (palLab.empty()) throw std::runtime_error("fixed palette has no opaque colour");
+        NearestSearch search(palLab);
+        q.indices.assign(img.pixels.size(), -1);
+        for (size_t i = 0; i < img.pixels.size(); i++) {
+            if (!use[i]) continue;
+            float bd;
+            q.indices[i] = entryOf[size_t(search.find(oklab(img.pixels[i].r, img.pixels[i].g, img.pixels[i].b), bd))];
+        }
+        base = 0;
+    } else {
+        q = quantize(img, use, cutout ? maxColors - 1 : maxColors);
+        if (cutout) t.palette.push_back(0);
+        t.palette.insert(t.palette.end(), q.palette.begin(), q.palette.end());
+    }
     // Keep the CLUT a whole number of 4-word units, as the 2.4 writer did
     // (it appended 1..4 entries, even to an already aligned palette).
     t.palette.resize((t.palette.size() + 3) / 4 * 4, 0);
@@ -600,6 +633,304 @@ TextureError measureTexture(const Image& source, const PsxTexture& t) {
         for (bool u : used) e.colorsUsed += u;
     }
     return e;
+}
+
+// ---- Palette sidecars and palette files
+
+namespace {
+
+[[noreturn]] void paletteError(const std::filesystem::path& f, const std::string& what) {
+    throw std::runtime_error(f.string() + ": " + what);
+}
+
+uint16_t rgbWord(int r, int g, int b) { return opaqueWord(r / 255.f, g / 255.f, b / 255.f); }
+
+// "#rrggbb" -> r, g, b; false when it is not one.
+bool parseHex(const std::string& h, int& r, int& g, int& b) {
+    if (h.size() != 7 || h[0] != '#') return false;
+    for (size_t i = 1; i < 7; i++)
+        if (!std::isxdigit((unsigned char)h[i])) return false;
+    long v = std::strtol(h.c_str() + 1, nullptr, 16);
+    r = int(v >> 16) & 255;
+    g = int(v >> 8) & 255;
+    b = int(v) & 255;
+    return true;
+}
+
+std::string readText(const std::filesystem::path& f) {
+    std::ifstream in(f, std::ios::binary);
+    if (!in) throw std::runtime_error("cannot open " + f.string());
+    return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+}
+
+std::vector<std::string> lines(const std::string& text) {
+    std::vector<std::string> out;
+    std::istringstream in(text);
+    std::string l;
+    while (std::getline(in, l)) {
+        while (!l.empty() && (l.back() == '\r' || l.back() == ' ' || l.back() == '\t')) l.pop_back();
+        out.push_back(l);
+    }
+    return out;
+}
+
+// Three integers 0..255 at the start of a line; false otherwise.
+bool rgbLine(const std::string& l, int& r, int& g, int& b) {
+    std::istringstream in(l);
+    if (!(in >> r >> g >> b)) return false;
+    return r >= 0 && r <= 255 && g >= 0 && g <= 255 && b >= 0 && b <= 255;
+}
+
+void checkCount(const std::filesystem::path& f, size_t n) {
+    if (n == 0) paletteError(f, "no colours");
+    if (n > 256) paletteError(f, std::to_string(n) + " colours, more than 256");
+}
+
+}  // namespace
+
+std::filesystem::path paletteSidecarPath(const std::filesystem::path& image) {
+    return std::filesystem::path(image.string() + ".palette.json");
+}
+
+PaletteSidecar parsePaletteSidecar(const std::string& text, const std::filesystem::path& sidecar) {
+    nlohmann::json j;
+    try {
+        j = nlohmann::json::parse(text);
+    } catch (const std::exception& ex) {
+        paletteError(sidecar, std::string("not JSON: ") + ex.what());
+    }
+    if (!j.is_object()) paletteError(sidecar, "not a JSON object");
+    if (!j.contains("version") || !j["version"].is_number_integer() || j["version"].get<int>() != 1)
+        paletteError(sidecar, "version must be 1");
+    PaletteSidecar sc;
+    std::string source = j.value("source", std::string("quantize"));
+    if (source == "file") {
+        if (!j.contains("file") || !j["file"].is_string() || j["file"].get<std::string>().empty())
+            paletteError(sidecar, "source \"file\" needs a \"file\"");
+        sc.fromFile = true;
+        sc.fileText = j["file"].get<std::string>();
+        sc.file = sidecar.parent_path() / std::filesystem::path(std::u8string(sc.fileText.begin(), sc.fileText.end()));
+    } else if (source != "quantize") {
+        paletteError(sidecar, "source must be \"quantize\" or \"file\", not \"" + source + "\"");
+    }
+    if (j.contains("entries")) {
+        if (!j["entries"].is_object()) paletteError(sidecar, "\"entries\" must be an object");
+        for (auto& [key, v] : j["entries"].items()) {
+            char* end = nullptr;
+            long idx = std::strtol(key.c_str(), &end, 10);
+            if (key.empty() || *end || idx < 0 || idx > 255) paletteError(sidecar, "entry \"" + key + "\" is not an index 0..255");
+            std::string hex;
+            bool stp = false;
+            if (v.is_string()) {
+                hex = v.get<std::string>();
+            } else if (v.is_object() && v.contains("color") && v["color"].is_string()) {
+                hex = v["color"].get<std::string>();
+                if (v.contains("stp")) {
+                    if (!v["stp"].is_boolean()) paletteError(sidecar, "entry " + key + ": \"stp\" must be true or false");
+                    stp = v["stp"].get<bool>();
+                }
+            } else {
+                paletteError(sidecar, "entry " + key + " must be \"#rrggbb\" or {\"color\": \"#rrggbb\", \"stp\": bool}");
+            }
+            int r, g, b;
+            if (!parseHex(hex, r, g, b)) paletteError(sidecar, "entry " + key + ": \"" + hex + "\" is not #rrggbb");
+            uint16_t w = rgbWord(r, g, b);
+            sc.entries[int(idx)] = stp ? uint16_t(w | 0x8000) : w;
+        }
+    }
+    if (j.contains("cycles")) {
+        if (!j["cycles"].is_array()) paletteError(sidecar, "\"cycles\" must be an array");
+        for (auto& c : j["cycles"]) {
+            if (!c.is_object() || !c.contains("first") || !c.contains("count") || !c.contains("stepSeconds") ||
+                !c["first"].is_number_integer() || !c["count"].is_number_integer() || !c["stepSeconds"].is_number())
+                paletteError(sidecar, "a cycle needs integer \"first\" and \"count\" and a number \"stepSeconds\"");
+            PaletteCycleSpec spec;
+            spec.first = c["first"].get<int>();
+            spec.count = c["count"].get<int>();
+            spec.stepSeconds = c["stepSeconds"].get<double>();
+            spec.direction = 1;
+            if (c.contains("direction")) {
+                if (!c["direction"].is_number_integer()) paletteError(sidecar, "\"direction\" must be 1 or -1");
+                spec.direction = c["direction"].get<int>();
+            }
+            sc.cycles.push_back(spec);
+        }
+    }
+    return sc;
+}
+
+std::vector<ClutCycle> resolveCycles(const std::vector<PaletteCycleSpec>& specs, size_t paletteSize) {
+    if (specs.size() > size_t(kMaxClutCycles))
+        throw std::runtime_error(std::to_string(specs.size()) + " cycles, more than " + std::to_string(kMaxClutCycles));
+    std::vector<ClutCycle> out;
+    for (size_t i = 0; i < specs.size(); i++) {
+        const PaletteCycleSpec& s = specs[i];
+        const std::string what = "cycle " + std::to_string(i) + " (first " + std::to_string(s.first) + ", count " +
+                                 std::to_string(s.count) + ")";
+        if (s.first < 0 || s.count < 2) throw std::runtime_error(what + ": needs first >= 0 and count >= 2");
+        if (size_t(s.first) + size_t(s.count) > paletteSize)
+            throw std::runtime_error(what + ": runs past the palette, which has " + std::to_string(paletteSize) + " entries");
+        if (s.direction != 1 && s.direction != -1) throw std::runtime_error(what + ": direction must be 1 or -1");
+        if (!(s.stepSeconds > 0)) throw std::runtime_error(what + ": stepSeconds must be above 0");
+        const double units = std::round(s.stepSeconds * kClutCyclePeriodHz);
+        if (units > 65535)
+            throw std::runtime_error(what + ": stepSeconds " + std::to_string(s.stepSeconds) + " is longer than " +
+                                     std::to_string(65535 / kClutCyclePeriodHz) + " s");
+        ClutCycle c;
+        c.first = uint8_t(s.first);
+        c.count = uint8_t(s.count);
+        c.period = uint16_t(std::max(1.0, units));
+        c.direction = int8_t(s.direction);
+        for (const ClutCycle& o : out)
+            if (c.first < o.first + o.count && o.first < c.first + c.count)
+                throw std::runtime_error(what + ": overlaps another cycle");
+        out.push_back(c);
+    }
+    return out;
+}
+
+std::vector<uint16_t> readPaletteFile(const std::filesystem::path& f) {
+    std::string ext = f.extension().string();
+    std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+    std::vector<uint16_t> out;
+    if (ext == ".act") {
+        std::string d = readText(f);
+        if (d.size() != 768 && d.size() != 772) paletteError(f, "an .act palette is 768 or 772 bytes, not " + std::to_string(d.size()));
+        size_t n = 256;
+        if (d.size() == 772) n = size_t((uint8_t(d[768]) << 8) | uint8_t(d[769]));
+        if (n == 0 || n > 256) n = 256;
+        for (size_t i = 0; i < n; i++) out.push_back(rgbWord(uint8_t(d[i * 3]), uint8_t(d[i * 3 + 1]), uint8_t(d[i * 3 + 2])));
+    } else if (ext == ".pal") {
+        auto ls = lines(readText(f));
+        if (ls.size() < 3 || ls[0] != "JASC-PAL") paletteError(f, "not a JASC palette (first line JASC-PAL)");
+        char* end = nullptr;
+        long n = std::strtol(ls[2].c_str(), &end, 10);
+        checkCount(f, n < 0 ? 0 : size_t(n));
+        if (ls.size() < size_t(3 + n)) paletteError(f, "says " + std::to_string(n) + " colours but has fewer lines");
+        for (long i = 0; i < n; i++) {
+            int r, g, b;
+            if (!rgbLine(ls[size_t(3 + i)], r, g, b)) paletteError(f, "line " + std::to_string(4 + i) + " is not \"r g b\"");
+            out.push_back(rgbWord(r, g, b));
+        }
+    } else if (ext == ".gpl") {
+        auto ls = lines(readText(f));
+        if (ls.empty() || ls[0] != "GIMP Palette") paletteError(f, "not a GIMP palette (first line GIMP Palette)");
+        for (size_t i = 1; i < ls.size(); i++) {
+            const std::string& l = ls[i];
+            if (l.empty() || l[0] == '#' || l.rfind("Name:", 0) == 0 || l.rfind("Columns:", 0) == 0) continue;
+            int r, g, b;
+            if (!rgbLine(l, r, g, b)) paletteError(f, "line " + std::to_string(i + 1) + " is not \"r g b [name]\"");
+            out.push_back(rgbWord(r, g, b));
+        }
+    } else if (ext == ".bin") {
+        std::string d = readText(f);
+        if (d.size() % 2) paletteError(f, "a .bin palette is 16-bit words, but has an odd size");
+        for (size_t i = 0; i < d.size(); i += 2) out.push_back(uint16_t(uint8_t(d[i]) | (uint8_t(d[i + 1]) << 8)));
+    } else if (ext == ".png") {
+        Image img = loadImage(f);
+        if (img.height != 1) paletteError(f, "a PNG palette is a strip one pixel high, not " + std::to_string(img.height));
+        for (const Image::Px& p : img.pixels) out.push_back(p.a < kCutoutAlpha ? uint16_t(0) : opaqueWord(p.r, p.g, p.b));
+    } else {
+        paletteError(f, "unknown palette format (.act, .pal, .gpl, .bin or .png)");
+    }
+    checkCount(f, out.size());
+    return out;
+}
+
+void writePaletteBin(const std::filesystem::path& f, const std::vector<uint16_t>& words) {
+    std::ofstream o(f, std::ios::binary);
+    if (!o) throw std::runtime_error("cannot write " + f.string());
+    for (uint16_t w : words) {
+        const char b[2] = {char(w & 0xff), char(w >> 8)};
+        o.write(b, 2);
+    }
+    if (!o) throw std::runtime_error("cannot write " + f.string());
+}
+
+PsxTexture convertTextureForSidecar(const Image& img, BitDepth depth, bool cutout, const PaletteSidecar& side,
+                                    const std::filesystem::path& sc) {
+    if (depth == BitDepth::Bpp16) paletteError(sc, "the texture is 16 bpp, which has no palette");
+    std::vector<uint16_t> fixed;
+    if (side.fromFile) fixed = readPaletteFile(side.file);
+    try {
+        return convertTexture(img, depth, cutout, side.fromFile ? &fixed : nullptr);
+    } catch (const std::exception& ex) {
+        paletteError(sc, ex.what());
+    }
+}
+
+void applyPaletteSidecar(PsxTexture& t, const PaletteSidecar& side, const std::filesystem::path& sc) {
+    for (const auto& [idx, word] : side.entries) {
+        if (size_t(idx) >= t.palette.size())
+            paletteError(sc, "entry " + std::to_string(idx) + " is past the palette, which has " +
+                                 std::to_string(t.palette.size()) + " entries");
+        if (t.cutout && idx == 0) paletteError(sc, "entry 0 is the transparent word of a cutout texture");
+        t.palette[size_t(idx)] = word;
+    }
+    try {
+        t.cycles = resolveCycles(side.cycles, t.palette.size());
+    } catch (const std::exception& ex) {
+        paletteError(sc, ex.what());
+    }
+}
+
+PsxTexture convertTextureWithSidecar(const Image& img, BitDepth depth, bool cutout, const std::filesystem::path& imagePath) {
+    const std::filesystem::path sc = paletteSidecarPath(imagePath);
+    std::error_code ec;
+    if (!std::filesystem::exists(sc, ec)) return convertTexture(img, depth, cutout);
+    PaletteSidecar side = parsePaletteSidecar(readText(sc), sc);
+    PsxTexture t = convertTextureForSidecar(img, depth, cutout, side, sc);
+    applyPaletteSidecar(t, side, sc);
+    return t;
+}
+
+std::string paletteWordHex(uint16_t w) {
+    auto widen = [](unsigned v) { return (v * 255 + 15) / 31; };
+    char buf[8];
+    std::snprintf(buf, sizeof buf, "#%02x%02x%02x", widen(w & 31), widen((w >> 5) & 31), widen((w >> 10) & 31));
+    return buf;
+}
+
+std::string paletteSidecarJson(const PaletteSidecar& side) {
+    nlohmann::ordered_json j;
+    j["version"] = 1;
+    j["source"] = side.fromFile ? "file" : "quantize";
+    if (side.fromFile) j["file"] = side.fileText;
+    if (!side.entries.empty()) {
+        nlohmann::ordered_json e = nlohmann::ordered_json::object();
+        for (const auto& [idx, word] : side.entries) {
+            // Black is 0x8000 whatever "stp" says (rgbWord), so only a coloured word spells it out.
+            const bool stp = (word & 0x8000) && (word & 0x7fff);
+            if (stp) e[std::to_string(idx)] = {{"color", paletteWordHex(word)}, {"stp", true}};
+            else e[std::to_string(idx)] = paletteWordHex(word);
+        }
+        j["entries"] = e;
+    }
+    if (!side.cycles.empty()) {
+        nlohmann::ordered_json c = nlohmann::ordered_json::array();
+        for (const PaletteCycleSpec& s : side.cycles)
+            c.push_back({{"first", s.first}, {"count", s.count}, {"stepSeconds", s.stepSeconds}, {"direction", s.direction}});
+        j["cycles"] = c;
+    }
+    return j.dump(2) + "\n";
+}
+
+int clutCycleStepAt(const ClutCycle& c, double seconds) {
+    if (c.count < 2 || c.period == 0 || !(seconds > 0)) return 0;
+    const double steps = std::floor(seconds * kClutCyclePeriodHz / c.period);
+    return int(std::fmod(steps, double(c.count)));
+}
+
+std::vector<uint16_t> cycledPalette(const std::vector<uint16_t>& base, const std::vector<ClutCycle>& cycles, double seconds) {
+    std::vector<uint16_t> out = base;
+    for (const ClutCycle& c : cycles) {
+        if (c.count < 2 || size_t(c.first) + c.count > base.size()) continue;
+        const int step = clutCycleStepAt(c, seconds);
+        // palcycle::rotationFor: direction -1 turns the other way.
+        const int k = c.direction < 0 && step ? c.count - step : step;
+        for (int i = 0; i < c.count; i++) out[size_t(c.first) + i] = base[size_t(c.first) + (i + k) % c.count];
+    }
+    return out;
 }
 
 }  // namespace splash

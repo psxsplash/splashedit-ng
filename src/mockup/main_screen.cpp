@@ -5316,6 +5316,12 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
     // In pixels, so the clean view stays sharp at any UI scale or pixel density.
     const ImVec2 fb = ImGui::GetIO().DisplayFramebufferScale;
     unsigned tex = view.render((int)(r.GetWidth() * fb.x), (int)(r.GetHeight() * fb.y), 240);
+    if (namedRectsOn()) {
+        // Which textures the view cycles (their steps change too often to print).
+        std::string cyc;
+        for (const std::string& l : view.cyclingTextures()) cyc += (cyc.empty() ? "" : ", ") + l.substr(0, l.find(" step "));
+        scriptLine("vpcycling", "viewport: cycling " + (cyc.empty() ? std::string("none") : cyc));
+    }
     ui::addTextureImageRounded(dl, (ImTextureID)(intptr_t)tex, r.Min, r.Max, ImVec2(0, 1), ImVec2(1, 0), IM_COL32_WHITE, radius::window);
 
     ImVec2 mn = r.Min, sz = r.GetSize();
@@ -9131,7 +9137,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
     };
     report("offvia", offVia.empty() ? std::string() : "object: " + o->name + " off via " + offVia);
     // This object's mesh colour, audio and skin lines; cleared when it has none.
-    std::string meshColLine, materialLines, uvOffLine, audioLine, skinLine, interactLine, texHolesLine, flatColLine;
+    std::string meshColLine, materialLines, uvOffLine, audioLine, skinLine, interactLine, texHolesLine, flatColLine, paletteLine;
 
     // Mesh.
     // A labelled on/off switch; a click flips it through `flip` (one undo step).
@@ -9307,7 +9313,20 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
         // cutout when it has texels under half alpha (splash::hasCutoutTexels).
         if (nMat <= 1 && !folded && texSt == editor::AssetStatus::Ok && !texPath.empty()) {
             const bool holes = ti && ti->holes;
-            y += texturePreview(st.texPreview, dl, x0 + space::sm, x1 - space::sm, y, doc, texPath, m.bitDepth, holes) + space::sm;
+            y += texturePreview(st.texPreview, dl, x0 + space::sm, x1 - space::sm, y, doc, texPath, m.bitDepth, holes, true) + space::sm;
+            // The image's palette sidecar (export reads it for mesh textures only), and who shares it.
+            ui::PaletteUsers users;
+            for (const splash::FlatObject& fo : splash::flatten(doc.scene())) {
+                if (fo.object == o || !fo.object->mesh) continue;
+                const splash::MeshComponent& om = *fo.object->mesh;
+                if (std::none_of(om.materials.begin(), om.materials.end(), [&](const splash::Material& mt) { return mt.texture == texPath; }))
+                    continue;
+                if (om.bitDepth == m.bitDepth) users.sameDepth++;
+                else if (om.bitDepth == splash::BitDepth::Bpp16) users.at16++;
+                else users.otherDepth++;
+            }
+            y += texturePalette(st.texPreview, dl, x0 + space::sm, x1 - space::sm, y, doc, texPath, m.bitDepth, holes, users) + space::sm;
+            paletteLine = st.texPreview.paletteShown;
             if (holes) {
                 // Word-wrapped to the inspector's width.
                 const char* const msg = "Texels under half alpha are see-through on the console. At 4 and 8 bpp this costs one palette colour.";
@@ -10975,6 +10994,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
     report("materials", materialLines);
     report("uvoffset", uvOffLine);
     report("texholes", texHolesLine);
+    report("palette", paletteLine);
     report("audio", audioLine);
     report("skin", skinLine);
     report("interact", interactLine);

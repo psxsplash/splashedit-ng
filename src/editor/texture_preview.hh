@@ -13,6 +13,7 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "scene.hh"
@@ -21,10 +22,18 @@
 namespace editor {
 
 struct TexturePreviewKey {
+    TexturePreviewKey(std::filesystem::path f = {}, splash::BitDepth d = splash::BitDepth::Bpp8, bool c = false,
+                      std::filesystem::path pal = {})
+        : file(std::move(f)), depth(d), cutout(c), paletteFile(std::move(pal)) {}
     std::filesystem::path file;  // absolute (resolved) image file
     splash::BitDepth depth = splash::BitDepth::Bpp8;
     bool cutout = false;  // UI images: texels under half alpha are transparent
-    bool operator==(const TexturePreviewKey& o) const { return file == o.file && depth == o.depth && cutout == o.cutout; }
+    // A palette sidecar's palette file (resolved); empty = quantized. Its entries and cycles are not
+    // part of the key: the view puts them on basePalette itself (editor/palette_edit.hh).
+    std::filesystem::path paletteFile;
+    bool operator==(const TexturePreviewKey& o) const {
+        return file == o.file && depth == o.depth && cutout == o.cutout && paletteFile == o.paletteFile;
+    }
     bool operator!=(const TexturePreviewKey& o) const { return !(*this == o); }
 };
 
@@ -42,6 +51,10 @@ struct TexturePreview {
     double deltaE = 0;     // mean OKLab distance x100 per drawn texel (splash::measureTexture)
     double deltaEBlur = 0;
     double psnr = 0;
+    // At 4 and 8 bpp: the CLUT as converted (before a sidecar's entries) and each texel's index into
+    // it, top-down like `ps1`, so the palette can be edited and cycled without converting again.
+    std::vector<uint16_t> basePalette;
+    std::vector<uint8_t> indices;
     int vramBytes = 0;  // image + CLUT
     double convertMs = 0;  // load + convert + decode + measure, wall time
 };

@@ -4,11 +4,14 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdio>
+#include <fstream>
+#include <iterator>
 #include <set>
 
 #include <stb_image.h>
 
 #include "editor/document.hh"
+#include "editor/palette_edit.hh"
 #include "editor/pick.hh"
 #include "gl.h"
 #include "scene.hh"
@@ -251,6 +254,113 @@ unsigned Ps1View::textureFor(const std::string& projectPath) {
     return id;
 }
 
+unsigned Ps1View::cyclingTextureFor(const std::string& projectPath, splash::BitDepth depth) {
+    const std::string key = projectPath + " " + std::to_string(int(depth));
+    if (auto seen = m_cycleSeen.find(key); seen != m_cycleSeen.end()) return seen->second;
+    const unsigned id = cyclingTextureLoad(key, projectPath, depth);
+    m_cycleSeen[key] = id;
+    return id;
+}
+
+unsigned Ps1View::cyclingTextureLoad(const std::string& key, const std::string& projectPath, splash::BitDepth depth) {
+    const std::filesystem::path file = m_doc->resolve(projectPath);
+    const std::filesystem::path scPath = splash::paletteSidecarPath(file);
+    std::string text;
+    {
+        std::ifstream in(scPath, std::ios::binary);
+        if (in) text.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    }
+    auto drop = [&]() -> unsigned {
+        auto it = m_cycling.find(key);
+        if (it != m_cycling.end()) {
+            if (it->second.id) {
+                m_texSize.erase(it->second.id);
+                glDeleteTextures(1, &it->second.id);
+            }
+            m_cycling.erase(it);
+        }
+        return 0;
+    };
+    if (text.empty()) return drop();
+    auto it = m_cycling.find(key);
+    if (it != m_cycling.end() && it->second.sidecarText == text) {
+        it->second.used = true;
+        return it->second.id;
+    }
+    splash::PaletteSidecar side;
+    try {
+        side = splash::parsePaletteSidecar(text, scPath);
+    } catch (const std::exception&) {
+        return drop();
+    }
+    if (side.cycles.empty()) return drop();
+    CyclingTex& c = m_cycling[key];
+    try {
+        const std::string baseKey = std::to_string(int(depth)) + (side.fromFile ? " file " + side.file.string() : " quantize");
+        if (c.baseKey != baseKey || c.base.imageData.empty()) {
+            const splash::Image img = splash::loadImage(file);
+            c.base = splash::convertTextureForSidecar(img, depth, splash::hasCutoutTexels(img), side, scPath);
+            c.baseKey = baseKey;
+        }
+        splash::PsxTexture t = c.base;
+        splash::applyPaletteSidecar(t, side, scPath);
+        c.palette = t.palette;
+        c.cycles = t.cycles;
+        c.w = t.width, c.h = t.height;
+        const int per = depth == splash::BitDepth::Bpp8 ? 2 : 4, bits = 16 / per;
+        c.indices.assign(size_t(t.width) * t.height, 0);
+        // imageData rows run top-down; the GL texture's row 0 is the bottom (UV v = 0).
+        for (int row = 0; row < t.height; row++)
+            for (int x = 0; x < t.width; x++)
+                c.indices[size_t(t.height - 1 - row) * t.width + x] =
+                    uint8_t((t.word(x / per, row) >> ((x % per) * bits)) & ((1 << bits) - 1));
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "viewport: palette cycling %s: %s\n", projectPath.c_str(), e.what());
+        return drop();
+    }
+    c.sidecarText = text;
+    c.used = true;
+    c.steps.clear();
+    const std::vector<uint8_t> rgba = editor::palettedRgba(c.indices, splash::cycledPalette(c.palette, c.cycles, editor::paletteClockSeconds()));
+    if (!c.id) glGenTextures(1, &c.id);
+    glBindTexture(GL_TEXTURE_2D, c.id);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, c.w, c.h, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    m_texSize[c.id] = {c.w, c.h};
+    for (const splash::ClutCycle& cy : c.cycles) c.steps.push_back(splash::clutCycleStepAt(cy, editor::paletteClockSeconds()));
+    return c.id;
+}
+
+// Each frame: a cycling texture whose ranges stepped since its last upload gets the new image.
+void Ps1View::tickCycles() {
+    const double now = editor::paletteClockSeconds();
+    for (auto& [key, c] : m_cycling) {
+        if (!c.id) continue;
+        std::vector<int> steps;
+        for (const splash::ClutCycle& cy : c.cycles) steps.push_back(splash::clutCycleStepAt(cy, now));
+        if (steps == c.steps) continue;
+        c.steps = steps;
+        const std::vector<uint8_t> rgba = editor::palettedRgba(c.indices, splash::cycledPalette(c.palette, c.cycles, now));
+        glBindTexture(GL_TEXTURE_2D, c.id);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, c.w, c.h, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+        glBindTexture(GL_TEXTURE_2D, 0);
+    }
+}
+
+std::vector<std::string> Ps1View::cyclingTextures() const {
+    std::vector<std::string> out;
+    for (const auto& [key, c] : m_cycling) {
+        std::string l = key.substr(0, key.rfind(' ')) + " " + key.substr(key.rfind(' ') + 1) + "bpp step ";
+        for (size_t i = 0; i < c.steps.size(); i++) l += (i ? "," : "") + std::to_string(c.steps[i]);
+        out.push_back(l);
+    }
+    return out;
+}
+
 const splash::Scene* Ps1View::drawnScene() const {
     if (m_posed) return &*m_posed;
     return m_doc ? &m_doc->scene() : nullptr;
@@ -274,6 +384,8 @@ void Ps1View::rebuild() {
     }
     const splash::Scene& scene = m_posed ? *m_posed : m_doc->scene();
     std::vector<splash::FlatObject> flats = splash::flatten(scene);
+    for (auto& [key, c] : m_cycling) c.used = false;
+    m_cycleSeen.clear();
 
     // Collect geometry into per-texture buckets.
     std::map<unsigned, std::vector<Vertex>> buckets;
@@ -284,7 +396,12 @@ void Ps1View::rebuild() {
         if (m_doc->assetsId() != m_meshCacheAssets)
             for (auto& [path, id] : m_texCache)
                 if (id != m_white && id != m_fallback) glDeleteTextures(1, &id);
-        if (m_doc->assetsId() != m_meshCacheAssets) m_texCache.clear();
+        if (m_doc->assetsId() != m_meshCacheAssets) {
+            m_texCache.clear();
+            for (auto& [key, c] : m_cycling)
+                if (c.id) glDeleteTextures(1, &c.id);
+            m_cycling.clear();
+        }
         m_meshCacheLoad = m_doc->loadId();
         m_meshCacheAssets = m_doc->assetsId();
     }
@@ -349,8 +466,9 @@ void Ps1View::rebuild() {
 
         for (size_t sub = 0; sub < mesh->submeshes.size(); ++sub) {
             const splash::Material& mat = mc.materials[std::min(sub, mc.materials.size() - 1)];
-            unsigned tex = textureFor(mat.texture);
             bool textured = !mat.texture.empty();
+            unsigned tex = textured && mc.bitDepth != splash::BitDepth::Bpp16 ? cyclingTextureFor(mat.texture, mc.bitDepth) : 0;
+            if (!tex) tex = textureFor(mat.texture);
             splash::Vec2 duv{0, 0};
             if (uvOff && textured && splash::uvTextureSlot(mc, std::min(sub, mc.materials.size() - 1)) == mc.uvOffsetMaterial) {
                 // PSX u = uv.x * (w - 1), v = (1 - uv.y) * (h - 1).
@@ -416,6 +534,18 @@ void Ps1View::rebuild() {
         m_eye = center + dir * dist;
     }
 
+    // Cycling textures no object draws any more.
+    for (auto it = m_cycling.begin(); it != m_cycling.end();) {
+        if (it->second.used) {
+            ++it;
+            continue;
+        }
+        if (it->second.id) {
+            m_texSize.erase(it->second.id);
+            glDeleteTextures(1, &it->second.id);
+        }
+        it = m_cycling.erase(it);
+    }
     m_built = true;
 }
 
@@ -477,6 +607,7 @@ unsigned Ps1View::render(int panelW, int panelH, int lines) {
         glBufferData(GL_ARRAY_BUFFER, m_verts.size() * sizeof(Vertex), m_verts.data(), GL_STATIC_DRAW);
         m_vboCap = m_verts.size();
     }
+    tickCycles();
 
     int h = clean ? panelH : lines;
     int w = clean ? panelW : std::max(1, (int)std::round((float)lines * panelW / panelH));

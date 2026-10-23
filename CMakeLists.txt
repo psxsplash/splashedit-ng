@@ -112,6 +112,7 @@ add_library(splasheditdoc STATIC
     src/editor/log_view.cpp
     src/editor/psxmon.cpp
     src/editor/texture_preview.cpp
+    src/editor/palette_edit.cpp
     src/editor/unirom.cpp
     src/editor/ui_canvas.cpp)
 target_include_directories(splasheditdoc PUBLIC src)

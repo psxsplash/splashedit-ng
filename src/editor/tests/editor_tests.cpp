@@ -54,6 +54,7 @@
 #include "editor/psxmon.hh"
 #include "editor/serial.hh"
 #include "editor/skin_clips.hh"
+#include "editor/palette_edit.hh"
 #include "editor/texture_preview.hh"
 #include "editor/strings_edit.hh"
 #include "editor/timeline.hh"
@@ -12023,6 +12024,373 @@ void testMeshAlpha() {
     }
 }
 
+// Palette sidecars (<image>.palette.json): each palette file reader on a small fixture, the .bin
+// writer, the sidecar's errors, cycle resolution, conversion onto a fixed palette, and the exact
+// bytes the export writes for a cycled CLUT (pad bit 0, clutOffset, the record after the table).
+void testPaletteSidecar() {
+    namespace fs = std::filesystem;
+    const fs::path dir = g_outDir / "palsidecar";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir / "out", ec);
+    auto put = [&](const char* name, const std::string& bytes) {
+        std::ofstream o(dir / name, std::ios::binary);
+        o.write(bytes.data(), std::streamsize(bytes.size()));
+    };
+    // What an 8-bit colour becomes: 5-bit channels, black kept drawn as 0x8000.
+    auto word = [](int r, int g, int b) {
+        auto c5 = [](int c) { return uint16_t(std::lround(c / 255.0 * 31.0)); };
+        uint16_t w = uint16_t((c5(b) << 10) | (c5(g) << 5) | c5(r));
+        return w ? w : uint16_t(0x8000);
+    };
+    auto throws = [](auto fn) {
+        try {
+            fn();
+        } catch (const std::exception&) {
+            return true;
+        }
+        return false;
+    };
+    const int rgb[4][3] = {{255, 0, 0}, {0, 255, 0}, {0, 0, 255}, {0, 0, 0}};
+    std::vector<uint16_t> four;
+    for (auto& c : rgb) four.push_back(word(c[0], c[1], c[2]));
+
+    // .act: 768 bytes, and 772 with a big-endian colour count trailer.
+    std::string act(768, '\0');
+    for (int i = 0; i < 4; i++)
+        for (int k = 0; k < 3; k++) act[size_t(i * 3 + k)] = char(rgb[i][k]);
+    put("p.act", act);
+    std::vector<uint16_t> a = splash::readPaletteFile(dir / "p.act");
+    CHECK(a.size() == 256 && std::equal(four.begin(), four.end(), a.begin()) && a[4] == 0x8000);
+    put("p4.act", act + std::string("\x00\x04\xff\xff", 4));
+    CHECK(splash::readPaletteFile(dir / "p4.act") == four);
+    put("short.act", act.substr(0, 700));
+    CHECK(throws([&] { splash::readPaletteFile(dir / "short.act"); }));
+    // JASC .pal, CRLF line ends.
+    put("p.pal", "JASC-PAL\r\n0100\r\n4\r\n255 0 0\r\n0 255 0\r\n0 0 255\r\n0 0 0\r\n");
+    CHECK(splash::readPaletteFile(dir / "p.pal") == four);
+    put("bad.pal", "JASC-PAL\n0100\n5\n255 0 0\n");
+    CHECK(throws([&] { splash::readPaletteFile(dir / "bad.pal"); }));
+    put("nothdr.pal", "RIFF....");
+    CHECK(throws([&] { splash::readPaletteFile(dir / "nothdr.pal"); }));
+    // GIMP .gpl with its header lines, a comment and names.
+    put("p.gpl", "GIMP Palette\nName: test\nColumns: 4\n#\n255   0   0\tRed\n  0 255   0\tGreen\n  0   0 255\n  0   0   0 Black\n");
+    CHECK(splash::readPaletteFile(dir / "p.gpl") == four);
+    put("bad.gpl", "GIMP Palette\n255 0\n");
+    CHECK(throws([&] { splash::readPaletteFile(dir / "bad.gpl"); }));
+    // Raw .bin: words verbatim, STP bits and the transparent word included; the writer round trips.
+    const std::vector<uint16_t> raw = {0x0000, 0x8000, 0x7fff, 0x801f, 0x1234};
+    splash::writePaletteBin(dir / "p.bin", raw);
+    CHECK(fs::file_size(dir / "p.bin", ec) == 10);
+    CHECK(splash::readPaletteFile(dir / "p.bin") == raw);
+    put("odd.bin", std::string("\x01\x02\x03", 3));
+    CHECK(throws([&] { splash::readPaletteFile(dir / "odd.bin"); }));
+    put("big.bin", std::string(514, '\x01'));
+    CHECK(throws([&] { splash::readPaletteFile(dir / "big.bin"); }));
+    // PNG strip, one pixel high; a transparent pixel is the transparent word.
+    splash::Image strip;
+    strip.width = 5, strip.height = 1;
+    strip.pixels = {{1, 0, 0, 1}, {0, 1, 0, 1}, {0, 0, 1, 1}, {0, 0, 0, 1}, {1, 1, 1, 0}};
+    splash::savePng(strip, dir / "p.png");
+    std::vector<uint16_t> fromPng = four;
+    fromPng.push_back(0);
+    CHECK(splash::readPaletteFile(dir / "p.png") == fromPng);
+    strip.height = 2, strip.width = 2;
+    strip.pixels.resize(4);
+    splash::savePng(strip, dir / "tall.png");
+    CHECK(throws([&] { splash::readPaletteFile(dir / "tall.png"); }));
+    put("p.xyz", "x");
+    CHECK(throws([&] { splash::readPaletteFile(dir / "p.xyz"); }));
+
+    // Sidecar parsing.
+    const fs::path sc = dir / "t.png.palette.json";
+    CHECK(splash::paletteSidecarPath(dir / "t.png") == sc);
+    splash::PaletteSidecar side = splash::parsePaletteSidecar(
+        R"({"version":1,"source":"file","file":"p.gpl","entries":{"2":"#ffffff","3":{"color":"#ff0000","stp":true}},)"
+        R"("cycles":[{"first":0,"count":3,"stepSeconds":0.25},{"first":3,"count":2,"stepSeconds":1,"direction":-1}]})",
+        sc);
+    CHECK(side.fromFile && side.file == dir / "p.gpl");
+    CHECK(side.entries.size() == 2 && side.entries[2] == 0x7fff && side.entries[3] == (word(255, 0, 0) | 0x8000));
+    CHECK(side.cycles.size() == 2 && side.cycles[0].direction == 1 && side.cycles[1].direction == -1);
+    for (const char* bad : {R"({"source":"quantize"})", R"({"version":2})", R"({"version":1,"source":"x"})",
+                            R"({"version":1,"source":"file"})", R"({"version":1,"entries":{"300":"#000000"}})",
+                            R"({"version":1,"entries":{"a":"#000000"}})", R"({"version":1,"entries":{"1":"#00000"}})",
+                            R"({"version":1,"entries":{"1":{"color":"#000000","stp":1}}})",
+                            R"({"version":1,"cycles":[{"first":0,"count":2}]})", R"({"version":1,"cycles":{}})", "[1]",
+                            "{not json"})
+        CHECK(throws([&] { splash::parsePaletteSidecar(bad, sc); }));
+
+    // Cycle resolution: 1/7680 s units, the engine's checks.
+    auto spec = [](int first, int count, double s, int dir = 1) { return splash::PaletteCycleSpec{first, count, s, dir}; };
+    std::vector<splash::ClutCycle> cy = splash::resolveCycles({spec(0, 18, 0.25), spec(18, 2, 1.0 / 30, -1)}, 20);
+    CHECK(cy.size() == 2 && cy[0].first == 0 && cy[0].count == 18 && cy[0].period == 1920 && cy[0].direction == 1);
+    CHECK(cy[1].period == 256 && cy[1].direction == -1);
+    CHECK(splash::resolveCycles({spec(0, 2, 65535 / 7680.0)}, 4)[0].period == 65535);
+    CHECK(splash::resolveCycles({spec(0, 2, 1e-6)}, 4)[0].period == 1);
+    CHECK(throws([&] { splash::resolveCycles({spec(0, 2, 8.6)}, 4); }));
+    CHECK(throws([&] { splash::resolveCycles({spec(0, 2, 0)}, 4); }));
+    CHECK(throws([&] { splash::resolveCycles({spec(3, 2, 1)}, 4); }));  // past the palette
+    CHECK(throws([&] { splash::resolveCycles({spec(0, 1, 1)}, 4); }));
+    CHECK(throws([&] { splash::resolveCycles({spec(0, 2, 1, 0)}, 4); }));
+    CHECK(throws([&] { splash::resolveCycles({spec(0, 3, 1), spec(2, 2, 1)}, 8); }));  // overlap
+    CHECK(splash::resolveCycles({spec(0, 2, 1), spec(2, 2, 1)}, 4).size() == 2);      // touching is fine
+    std::vector<splash::PaletteCycleSpec> nine;
+    for (int i = 0; i < 9; i++) nine.push_back(spec(i * 2, 2, 1));
+    CHECK(throws([&] { splash::resolveCycles(nine, 32); }));
+
+    // A 16x16 image in the four colours, quadrant by quadrant.
+    splash::Image img;
+    img.width = 16, img.height = 16;
+    img.pixels.resize(256);
+    for (int y = 0; y < 16; y++)
+        for (int x = 0; x < 16; x++) {
+            const int* c = rgb[(x / 8) + 2 * (y / 8)];
+            img.pixels[size_t(y) * 16 + x] = {c[0] / 255.f, c[1] / 255.f, c[2] / 255.f, 1};
+        }
+    // Fixed palette, reversed: every texel takes its own colour's entry, no dithering.
+    std::vector<uint16_t> rev(four.rbegin(), four.rend());
+    splash::PsxTexture f = splash::convertTexture(img, splash::BitDepth::Bpp4, false, &rev);
+    CHECK(f.palette.size() == 4 && f.palette == rev);
+    bool exact = true;
+    for (int y = 0; y < 16; y++)
+        for (int x = 0; x < 16; x++) {
+            int idx = (f.word(x / 4, 15 - y) >> ((x % 4) * 4)) & 15;  // word rows are top first
+            exact &= idx == 3 - ((x / 8) + 2 * (y / 8));
+        }
+    CHECK(exact);
+    std::vector<uint16_t> seventeen(17, 0x7fff);
+    CHECK(throws([&] { splash::convertTexture(img, splash::BitDepth::Bpp4, false, &seventeen); }));
+    // With cutout, entry 0 is forced transparent and never stands for an opaque texel.
+    splash::PsxTexture fc = splash::convertTexture(img, splash::BitDepth::Bpp4, true, &four);
+    CHECK(fc.palette[0] == 0);
+    bool noZero = true;
+    for (int y = 0; y < 16; y++)
+        for (int x = 0; x < 16; x++) noZero &= ((fc.word(x / 4, y) >> ((x % 4) * 4)) & 15) != 0;
+    CHECK(noZero);
+
+    // Export: crate mesh with the image; the same scene with and without the sidecar.
+    fs::copy_file(fs::path(SPLASHEDIT_SOURCE_DIR) / "examples/courtyard/meshes/crate.mesh", dir / "crate.mesh", ec);
+    splash::savePng(img, dir / "t.png");
+    auto exportScene = [&](splash::ExportResult& r, std::vector<uint8_t>& pack) {
+        splash::Scene scene;
+        splash::Object o = named("Quad");
+        splash::MeshComponent m;
+        m.mesh = "crate.mesh";
+        m.materials.push_back({"t.png", {1, 1, 1, 1}, {}});
+        m.bitDepth = splash::BitDepth::Bpp4;
+        o.mesh = m;
+        scene.objects.push_back(o);
+        r = splash::exportSplashpack(scene, dir, dir / "out" / "scene.splashpack");
+        std::ifstream in(dir / "out" / "scene.splashpack", std::ios::binary);
+        pack.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    };
+    auto find = [](const std::vector<uint8_t>& hay, const std::vector<uint8_t>& needle) {
+        std::vector<size_t> at;
+        for (size_t i = 0; i + needle.size() <= hay.size(); i++)
+            if (std::equal(needle.begin(), needle.end(), hay.begin() + long(i))) at.push_back(i);
+        return at;
+    };
+    auto le = [](std::vector<uint8_t>& v, uint32_t x, int n) {
+        for (int i = 0; i < n; i++) v.push_back(uint8_t(x >> (8 * i)));
+    };
+    splash::ExportResult plain, cycled;
+    std::vector<uint8_t> plainPack, pack;
+    exportScene(plain, plainPack);
+    CHECK(plain.ok() && plain.stats.textures.size() == 1);
+    put("t.png.palette.json",
+        R"({"version":1,"source":"file","file":"p.gpl","entries":{"2":"#ffffff"},)"
+        R"("cycles":[{"first":0,"count":2,"stepSeconds":0.25},{"first":2,"count":2,"stepSeconds":0.5,"direction":-1}]})");
+    exportScene(cycled, pack);
+    CHECK(cycled.ok() && cycled.stats.textures.size() == 1);
+    if (plain.ok() && cycled.ok() && cycled.stats.textures.size() == 1) {
+        const auto& t = cycled.stats.textures[0];
+        CHECK(t.clutLength == 4);
+        // The CLUT in the .vram: the .gpl's colours, entry 2 overridden.
+        std::vector<uint16_t> vram = vramFromFile(dir / "out" / "scene.vram");
+        const uint16_t want[4] = {four[0], four[1], 0x7fff, four[3]};
+        bool clutOk = !vram.empty();
+        for (int i = 0; i < 4 && clutOk; i++) clutOk &= vram[size_t(t.clutY) * 1024 + t.clutX + i] == want[i];
+        CHECK(clutOk);
+        // The record: header {4, 2 ranges}, the 4 words, then the ranges; exactly once, 4-aligned.
+        std::vector<uint8_t> rec;
+        le(rec, 4, 2), le(rec, 2, 1), le(rec, 0, 1);
+        for (uint16_t w : want) le(rec, w, 2);
+        for (uint32_t v : {0u, 2u}) le(rec, v, 1);
+        le(rec, 1920, 2), le(rec, 1, 1), le(rec, 0, 1);
+        for (uint32_t v : {2u, 2u}) le(rec, v, 1);
+        le(rec, 3840, 2), le(rec, 0xff, 1), le(rec, 0, 1);
+        std::vector<size_t> recAt = find(pack, rec);
+        CHECK(recAt.size() == 1 && recAt[0] % 4 == 0);
+        // The CLUT table entry points at it with pad bit 0 set.
+        std::vector<uint8_t> entry;
+        le(entry, recAt.empty() ? 0 : uint32_t(recAt[0]), 4);
+        le(entry, uint32_t(t.clutX / 16), 2), le(entry, uint32_t(t.clutY), 2), le(entry, 4, 2), le(entry, 1, 2);
+        CHECK(find(pack, entry).size() == 1);
+        // Without the sidecar: the same entry with offset 0 and pad 0, and no record.
+        std::vector<uint8_t> plainEntry;
+        const auto& pt = plain.stats.textures[0];
+        le(plainEntry, 0, 4);
+        le(plainEntry, uint32_t(pt.clutX / 16), 2), le(plainEntry, uint32_t(pt.clutY), 2);
+        le(plainEntry, uint32_t(pt.clutLength), 2), le(plainEntry, 0, 2);
+        CHECK(find(plainPack, plainEntry).size() == 1);
+        // The record is all the pack grew by (it is 4-aligned and 24 bytes long).
+        CHECK(pack.size() == plainPack.size() + 24);
+        // Bump: one 16-byte upload head, the span 0..3 (2 words) and the flush word.
+        CHECK(cycled.stats.bumpAllocatorNeed == plain.stats.bumpAllocatorNeed + 16 + 4 * 3);
+    }
+    // A sidecar the export cannot use stops it, naming the file.
+    put("t.png.palette.json", R"({"version":1,"cycles":[{"first":2,"count":9,"stepSeconds":1}]})");
+    splash::ExportResult bad;
+    std::vector<uint8_t> badPack;
+    exportScene(bad, badPack);
+    bool named_ = false;
+    for (const std::string& e : bad.errors) named_ |= e.find("t.png.palette.json") != std::string::npos;
+    CHECK(!bad.ok() && named_);
+    // A 16 bpp texture has no palette to cycle.
+    put("t.png.palette.json", R"({"version":1})");
+    CHECK(throws([&] { splash::convertTextureWithSidecar(img, splash::BitDepth::Bpp16, false, dir / "t.png"); }));
+}
+
+// The Palette section's pieces without UI (editor/palette_edit.hh): the sidecar written back, a
+// range from a drag, the engine's refusals, step timing, the palette at a time t and the undo step.
+void testPaletteEdit() {
+    namespace fs = std::filesystem;
+    const fs::path dir = g_outDir / "paledit";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir, ec);
+
+    // Written and read back: the same words, file text and cycles. Every 5-bit level survives the hex.
+    splash::PaletteSidecar s;
+    s.fromFile = true;
+    s.fileText = "../palettes/p.gpl";
+    s.entries[3] = splash::packVram(20, 12, 5, false);
+    s.entries[4] = splash::packVram(31, 0, 7, true);  // STP spelled out
+    s.entries[5] = 0x8000;                            // black, STP implied
+    s.cycles = {{1, 2, 0.1, 1}, {8, 4, 0.25, -1}};
+    const fs::path sc = dir / "t.png.palette.json";
+    splash::PaletteSidecar back = splash::parsePaletteSidecar(splash::paletteSidecarJson(s), sc);
+    CHECK(back.fromFile && back.fileText == s.fileText && back.file == dir / "../palettes/p.gpl");
+    CHECK(back.entries == s.entries);
+    CHECK(back.cycles.size() == 2 && back.cycles[1].first == 8 && back.cycles[1].count == 4 && back.cycles[1].stepSeconds == 0.25 &&
+          back.cycles[1].direction == -1);
+    bool levels = true;
+    for (uint16_t v = 0; v < 32; v++) {
+        splash::PaletteSidecar one;
+        one.entries[0] = splash::packVram(v, uint16_t(31 - v), v, false);
+        if (!(one.entries[0] & 0x7fff)) one.entries[0] = 0x8000;
+        levels &= splash::parsePaletteSidecar(splash::paletteSidecarJson(one), sc).entries == one.entries;
+    }
+    CHECK(levels);
+    CHECK(splash::paletteSidecarJson(splash::PaletteSidecar()).find("\"source\": \"quantize\"") != std::string::npos);
+
+    // A drag either way round; a click is one entry.
+    splash::PaletteCycleSpec d = editor::cycleFromDrag(9, 4, 0.2);
+    CHECK(d.first == 4 && d.count == 6 && d.stepSeconds == 0.2 && d.direction == 1);
+    CHECK(editor::cycleFromDrag(7, 7, 0.1).count == 1);
+
+    // Refusals, as the engine's parseRecord refuses.
+    const std::vector<splash::PaletteCycleSpec> have = {{4, 4, 0.1, 1}};
+    CHECK(editor::cycleProblem(have, {8, 4, 0.1, 1}, 16).empty());  // touching, not overlapping
+    CHECK(editor::cycleProblem(have, {6, 4, 0.1, 1}, 16).find("overlap the cycle on 4-7") != std::string::npos);
+    CHECK(editor::cycleProblem(have, {2, 3, 0.1, 1}, 16).find("overlap") != std::string::npos);
+    CHECK(editor::cycleProblem(have, {5, 6, 0.1, 1}, 16, 0).empty());  // the cycle itself, edited
+    CHECK(editor::cycleProblem(have, {9, 1, 0.1, 1}, 16).find("at least two") != std::string::npos);
+    CHECK(editor::cycleProblem(have, {12, 8, 0.1, 1}, 16).find("past the palette") != std::string::npos);
+    CHECK(!editor::cycleProblem(have, {8, 2, 0, 1}, 16).empty());
+    CHECK(!editor::cycleProblem(have, {8, 2, 9.0, 1}, 16).empty());
+    CHECK(!editor::cycleProblem(have, {8, 2, 0.1, 0}, 16).empty());
+    std::vector<splash::PaletteCycleSpec> eight;
+    for (int i = 0; i < 8; i++) eight.push_back({i * 2, 2, 0.1, 1});
+    CHECK(editor::cycleProblem(eight, {20, 2, 0.1, 1}, 32).find("at most 8") != std::string::npos);
+    // Whatever cycleProblem lets through, the export takes.
+    std::vector<splash::PaletteCycleSpec> ok = have;
+    ok.push_back({8, 4, 0.1, 1});
+    CHECK(splash::resolveCycles(ok, 16).size() == 2);
+
+    // Step readout: the stored period and what it plays at.
+    editor::CycleTiming t = editor::cycleTiming(0.1);
+    CHECK(t.period == 768 && std::abs(t.stepsPerSecond - 10.0) < 1e-9);
+    CHECK(editor::cycleTiming(1.0 / 60).period == 128 && std::abs(editor::cycleTiming(1.0 / 60).stepsPerSecond - 60.0) < 1e-9);
+    CHECK(editor::cycleTiming(0.00001).period == 1);
+    CHECK(editor::cycleTiming(8.53).period == 65510 && editor::cycleTiming(8.6).period == 0 && editor::cycleTiming(0).period == 0);
+
+    // The palette at time t: step = floor(t * 7680 / period) % count; +1 shows base[first + (i + s) % count].
+    std::vector<uint16_t> base;
+    for (uint16_t i = 0; i < 8; i++) base.push_back(uint16_t(0x100 + i));
+    splash::ClutCycle fwd{2, 4, 768, 1}, rev{2, 4, 768, -1};
+    CHECK(splash::clutCycleStepAt(fwd, 0) == 0 && splash::clutCycleStepAt(fwd, 0.0999) == 0);
+    CHECK(splash::clutCycleStepAt(fwd, 0.1001) == 1 && splash::clutCycleStepAt(fwd, 0.35) == 3 && splash::clutCycleStepAt(fwd, 0.41) == 0);
+    std::vector<uint16_t> p1 = splash::cycledPalette(base, {fwd}, 0.15);
+    CHECK(p1[0] == base[0] && p1[1] == base[1] && p1[2] == base[3] && p1[3] == base[4] && p1[4] == base[5] && p1[5] == base[2] &&
+          p1[6] == base[6]);
+    std::vector<uint16_t> r1 = splash::cycledPalette(base, {rev}, 0.15);
+    CHECK(r1[2] == base[5] && r1[3] == base[2] && r1[4] == base[3] && r1[5] == base[4]);
+    CHECK(splash::cycledPalette(base, {fwd}, 0.45) == base);
+
+    // A preview frame: each texel's index through the palette at that time.
+    std::vector<uint16_t> pal(8, 0x8000);
+    pal[2] = splash::packVram(31, 0, 0, false);
+    pal[3] = splash::packVram(0, 31, 0, false);
+    pal[7] = 0;  // see-through
+    const std::vector<uint8_t> idx = {2, 3, 7};
+    std::vector<uint8_t> f0 = editor::paletteFrameAt(idx, pal, {{2, 2, 0.1, 1}}, 0.05);
+    std::vector<uint8_t> f1 = editor::paletteFrameAt(idx, pal, {{2, 2, 0.1, 1}}, 0.15);
+    CHECK(f0.size() == 12 && f0[0] == 255 && f0[1] == 0 && f0[5] == 255 && f0[11] == 0);
+    CHECK(f1[0] == 0 && f1[1] == 255 && f1[4] == 255 && f1[5] == 0 && f1[11] == 0);
+    // A refused set of cycles shows the palette standing still.
+    CHECK(editor::paletteFrameAt(idx, pal, {{2, 2, 0.1, 1}, {3, 2, 0.1, 1}}, 0.15) == editor::palettedRgba(idx, pal));
+    CHECK(editor::paletteWithEntries(pal, s)[3] == s.entries[3] && editor::paletteWithEntries(pal, s)[2] == pal[2]);
+
+    // The undo step: written, merged while a drag goes on, undone to no file, redone.
+    editor::Document doc;
+    doc.reset(splash::Scene{}, dir, "game");
+    const fs::path image = dir / "t.png";
+    CHECK(!editor::loadPaletteSidecar(image).exists);
+    splash::PaletteSidecar a;
+    a.cycles = {{0, 4, 0.1, 1}};
+    CHECK(editor::setPaletteSidecar(doc, image, a, "step"));
+    a.cycles[0].stepSeconds = 0.2;
+    CHECK(editor::setPaletteSidecar(doc, image, a, "step"));
+    CHECK(doc.historySize() == 1);
+    editor::PaletteSidecarState st = editor::loadPaletteSidecar(image);
+    CHECK(st.exists && st.error.empty() && st.side.cycles.size() == 1 && st.side.cycles[0].stepSeconds == 0.2);
+    doc.endMerge();
+    a.entries[1] = 0x7fff;
+    CHECK(editor::setPaletteSidecar(doc, image, a));
+    CHECK(doc.historySize() == 2);
+    CHECK(editor::setPaletteSidecar(doc, image, a) && doc.historySize() == 2);  // no change, no step
+    CHECK(doc.undo() && editor::loadPaletteSidecar(image).side.entries.empty());
+    CHECK(doc.undo() && !fs::exists(splash::paletteSidecarPath(image)));
+    CHECK(doc.redo() && editor::loadPaletteSidecar(image).side.cycles[0].stepSeconds == 0.2);
+    // Back to nothing: the file goes, as one more step.
+    CHECK(editor::setPaletteSidecar(doc, image, splash::PaletteSidecar()) && !fs::exists(splash::paletteSidecarPath(image)));
+    CHECK(doc.undo() && fs::exists(splash::paletteSidecarPath(image)));
+    // A broken file says why and reads as no sidecar.
+    {
+        std::ofstream o(splash::paletteSidecarPath(image), std::ios::binary);
+        o << "{\"version\": 2}";
+    }
+    st = editor::loadPaletteSidecar(image);
+    CHECK(st.exists && st.error.find("version must be 1") != std::string::npos && editor::paletteSidecarIsDefault(st.side));
+
+    // The two halves the editor uses are the export's conversion.
+    splash::Image img;
+    img.width = 8;
+    img.height = 2;
+    for (int i = 0; i < 16; i++) img.pixels.push_back({float(i % 4) / 3.f, float(i / 4) / 3.f, 0.5f, 1.f});
+    {
+        std::ofstream o(splash::paletteSidecarPath(image), std::ios::binary);
+        o << R"({"version":1,"entries":{"1":"#ff0000"},"cycles":[{"first":0,"count":3,"stepSeconds":0.1}]})";
+    }
+    splash::PsxTexture whole = splash::convertTextureWithSidecar(img, splash::BitDepth::Bpp4, false, image);
+    splash::PaletteSidecar side = editor::loadPaletteSidecar(image).side;
+    splash::PsxTexture halves = splash::convertTextureForSidecar(img, splash::BitDepth::Bpp4, false, side, splash::paletteSidecarPath(image));
+    splash::applyPaletteSidecar(halves, side, splash::paletteSidecarPath(image));
+    CHECK(halves.palette == whole.palette && halves.imageData == whole.imageData && halves.cycles.size() == 1 &&
+          whole.cycles.size() == 1 && halves.cycles[0].period == whole.cycles[0].period);
+}
+
 // Sprite sheets: the scene JSON round trip, the exact sprite table of the
 // tests/sprite fixture (2 sheets, 3 animations), each error export refuses
 // with, and the inspector's edits as undo steps.
@@ -15764,6 +16132,8 @@ int main(int argc, char** argv) {
     testQuantizer();
     testTexturePreview();
     testMeshAlpha();
+    testPaletteSidecar();
+    testPaletteEdit();
     testAssetBrowser();
     testBlocksConvert();
     testUiLayout();
