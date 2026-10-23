@@ -1,0 +1,12 @@
+GIMP Palette
+Name: palettecheck
+Columns: 4
+#
+  0   0   0 black
+255 255 255 white
+200  40  40 red
+ 40 200  40 green
+ 40  40 200 blue
+200 200  40 yellow
+ 40 200 200 cyan
+140  90  50 brown
