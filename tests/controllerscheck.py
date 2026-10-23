@@ -34,7 +34,7 @@ START = {'format': 'splashedit-blocks', 'version': 1, 'variables': [], 'stacks':
 WANT_LUA = ('function onButtonPress(self, button, byPlayer)\n'
             '    if button == Input.CROSS then\n'
             '        if byPlayer == 3 then\n'
-            '            if Input.IsHeld(8, Input.MOUSE_LEFT) then\n'
+            '            if (Input.GetDevice(8) == "mouse" and Input.IsHeld(8, Input.MOUSE_LEFT)) then\n'
             '                Debug.Log("held")\n'
             '            end\n'
             '        end\n'
