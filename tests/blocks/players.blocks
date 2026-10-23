@@ -1,0 +1,179 @@
+{
+  "format": "splashedit-blocks",
+  "version": 2,
+  "variables": [
+    {
+      "name": "steps",
+      "value": "0"
+    }
+  ],
+  "stacks": [
+    {
+      "x": 40,
+      "y": 40,
+      "blocks": [
+        {
+          "op": "on_update"
+        },
+        {
+          "op": "if",
+          "args": [
+            {
+              "op": "device_is",
+              "field": "mouse"
+            }
+          ],
+          "bodies": [
+            [
+              {
+                "op": "change_var",
+                "field": "steps",
+                "args": [
+                  {
+                    "op": "mouse_x"
+                  }
+                ]
+              }
+            ]
+          ]
+        },
+        {
+          "op": "if",
+          "args": [
+            {
+              "op": "button_pressed",
+              "field": "CROSS",
+              "player": "3"
+            }
+          ],
+          "bodies": [
+            [
+              {
+                "op": "log",
+                "args": [
+                  {
+                    "op": "join",
+                    "args": [
+                      {
+                        "op": "text",
+                        "field": "p3 y "
+                      },
+                      {
+                        "op": "stick",
+                        "field": "left y",
+                        "player": "3"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          ]
+        },
+        {
+          "op": "if",
+          "args": [
+            {
+              "op": "button_released",
+              "field": "MOUSE_RIGHT"
+            }
+          ],
+          "bodies": [
+            [
+              {
+                "op": "log",
+                "args": [
+                  {
+                    "op": "mouse_y",
+                    "player": "2"
+                  }
+                ]
+              }
+            ]
+          ]
+        },
+        {
+          "op": "if",
+          "args": [
+            {
+              "op": "button_held",
+              "field": "SQUARE",
+              "player": "8"
+            }
+          ],
+          "bodies": [
+            [
+              {
+                "op": "log",
+                "args": [
+                  {
+                    "op": "text",
+                    "field": "held"
+                  }
+                ]
+              }
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "x": 40,
+      "y": 300,
+      "blocks": [
+        {
+          "op": "on_button_press",
+          "field": "CROSS"
+        },
+        {
+          "op": "log",
+          "args": [
+            {
+              "op": "text",
+              "field": "anyone"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "x": 40,
+      "y": 400,
+      "blocks": [
+        {
+          "op": "on_button_press",
+          "field": "CROSS",
+          "player": "5"
+        },
+        {
+          "op": "log",
+          "args": [
+            {
+              "op": "text",
+              "field": "player 5"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "x": 40,
+      "y": 500,
+      "blocks": [
+        {
+          "op": "on_button_press",
+          "field": "MOUSE_LEFT"
+        },
+        {
+          "op": "log",
+          "args": [
+            {
+              "op": "text",
+              "field": "click"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

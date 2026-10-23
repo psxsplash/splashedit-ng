@@ -10,6 +10,10 @@
 //           number/text/bool literal, a sound clip, a cutscene name, a
 //           runtime light's object name or a Persist key.
 //           position_x/_y/_z take the object here; the axis is in the op.
+//   player  a controller block's player: "1" to "8"; a button hat's filter,
+//           "1" to "8" or empty for any player. Left out at its default
+//           (empty: player 1, a hat any player); a file holding one is
+//           version 2.
 //   args    inputs in order; a block with an empty op is an empty slot
 //   bodies  the statement lists of a C block (if_else: then, else)
 // A stack's first block is its hat; a stack without a hat is loose and makes
@@ -28,6 +32,7 @@ struct Block {
     std::string field;
     std::vector<Block> args;
     std::vector<std::vector<Block>> bodies;
+    std::string player;
     bool operator==(const Block&) const = default;
 };
 
@@ -60,11 +65,13 @@ std::string saveBlocks(const BlockScript& script);
 enum class BlockKind { Hat, Statement, CBlock, Reporter, Boolean };
 // StringKey: a key of the project's string table (core/strings.hh); UiText:
 // a UI text element as "Canvas/Element".
-enum class BlockField { None, Variable, Object, Button, Number, Text, Bool, Sound, Cutscene, Light, Key, StringKey, UiText };
+// Device: "pad", "analog", "mouse" or "none" (Input.GetDevice's answers);
+// Stick: "left x", "left y", "right x" or "right y".
+enum class BlockField { None, Variable, Object, Button, Number, Text, Bool, Sound, Cutscene, Light, Key, StringKey, UiText, Device, Stick };
 
 // Label templates (English, for the block editor): %f is the field, %1..%9
 // the inputs; '|' separates the label shown before each body after the
-// first (if_else: "if %1 then|else").
+// first (if_else: "if %1 then|else"); %p is the block's player.
 struct BlockSpec {
     std::string_view op;
     BlockKind kind;
@@ -81,10 +88,23 @@ const BlockSpec* findBlockSpec(std::string_view op);
 // The psxsplash function a hat's stack becomes ("on_interact" -> "onInteract");
 // empty when op is not a hat.
 std::string_view hatCallback(std::string_view op);
-// Button names a Button field takes, in the order Input numbers them.
+// Button names a Button field takes: the pad's, in the order Input numbers
+// them, then MOUSE_LEFT and MOUSE_RIGHT (the bits of R1 and L1).
 const std::vector<std::string_view>& blockButtons();
+// How the block editor shows a button: "mouse left" for MOUSE_LEFT, the name
+// itself for the rest.
+std::string blockButtonLabel(std::string_view button);
+// The values a Device or Stick field takes, in list order.
+const std::vector<std::string_view>& blockDevices();
+const std::vector<std::string_view>& blockSticks();
+// Whether the block's label has a player (%p): the controller blocks and
+// the button hats.
+bool blockTakesPlayer(const BlockSpec& spec);
+// How many players a player field picks from (1 to this).
+inline constexpr int kBlockPlayers = 8;
 // The palette's sections, in order: Events (every hat), Control, Objects,
-// Sound and scenes, Paths, Variables, Operators, Input, Debug, Text.
+// Sound and scenes, Paths, Variables, Operators, Input, Controllers, Debug,
+// Text.
 const std::vector<std::string_view>& blockCategories();
 
 // Why name can't be a variable: not an identifier, a Lua keyword, an event

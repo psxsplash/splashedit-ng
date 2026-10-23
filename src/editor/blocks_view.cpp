@@ -36,7 +36,7 @@ ImU32 categoryColor(std::string_view c) {
     if (c == "Paths") return blocks::paths;
     if (c == "Variables") return blocks::variables;
     if (c == "Operators") return blocks::operators;
-    if (c == "Input") return blocks::input;
+    if (c == "Input" || c == "Controllers") return blocks::input;
     if (c == "Text") return blocks::strings;
     return blocks::debug;
 }
@@ -80,6 +80,7 @@ struct DrawOpts {
     Path selected;
     Path hovered;       // the block under the pointer
     Path hoveredField;  // whose field is under it
+    bool hoveredPlayer = false;  // its player's well, not its field
     bool names = false;
     // A field value the script or the scene does not have: drawn in the warning colour.
     std::function<bool(std::string_view op, const std::string& value)> unknown;
@@ -149,9 +150,9 @@ void drawLayout(ImDrawList* dl, const blk::Layout& l, ImVec2 o, const DrawOpts& 
                 if (pc.kind == blk::Piece::Text) {
                     text(dl, ImVec2(r.Min.x, textY(r, fs)), f.medium, fs, blocks::text, pc.text.c_str());
                 } else if (pc.kind == blk::Piece::Field) {
-                    const bool fieldHover = !d.hoveredField.empty() && d.hoveredField == b.path;
+                    const bool fieldHover = !d.hoveredField.empty() && d.hoveredField == b.path && d.hoveredPlayer == pc.player;
                     well(dl, r, false, false, fieldHover ? color::accentHover : lerpColor(color::border, cat, 0.35f));
-                    const bool unknown = !pc.placeholder && d.unknown && d.unknown(b.op, pc.text);
+                    const bool unknown = !pc.placeholder && !pc.player && d.unknown && d.unknown(b.op, pc.text);
                     text(dl, ImVec2(r.Min.x + 7, textY(r, fs)), f.medium, fs,
                          pc.placeholder ? color::textFaint : unknown ? color::warn : color::text, pc.text.c_str());
                 } else if (!pc.filled) {
@@ -169,6 +170,7 @@ void drawLayout(ImDrawList* dl, const blk::Layout& l, ImVec2 o, const DrawOpts& 
             for (size_t i = 0; i < b.slots.size(); i++)
                 if (b.slots[i].w() > 0) nameRect("blocks.slot." + ps + "." + std::to_string(i), screen(b.slots[i], o));
             if (b.hasField) nameRect("blocks.field." + ps, screen(b.field, o));
+            if (b.hasPlayer) nameRect("blocks.player." + ps, screen(b.player, o));
         }
     }
 }
@@ -265,6 +267,10 @@ bool BlocksView::known(splash::BlockField f, const std::string& value, const Con
         case splash::BlockField::Light: return in(c.lights);
         case splash::BlockField::StringKey: return in(c.stringKeys);
         case splash::BlockField::UiText: return in(c.uiTexts);
+        case splash::BlockField::Device:
+            return std::find(splash::blockDevices().begin(), splash::blockDevices().end(), value) != splash::blockDevices().end();
+        case splash::BlockField::Stick:
+            return std::find(splash::blockSticks().begin(), splash::blockSticks().end(), value) != splash::blockSticks().end();
         default: return true;
     }
 }
@@ -505,14 +511,22 @@ BlocksView::Result BlocksView::draw(ImDrawList* dl, ImRect r, bool* focused, con
             const blk::Hit& h = m_press.hit;
             const splash::Block* b = blk::blockAt(cur, h.path);
             const splash::BlockSpec* spec = b ? splash::findBlockSpec(b->op) : nullptr;
-            if (h.kind == blk::Hit::Field && spec) {
+            if (h.kind == blk::Hit::Field && spec && h.player) {
+                m_picking = h.path;
+                m_pickPlayer = true;
+                m_pickQuery.clear();
+                ImGui::OpenPopup(kPickId);
+                m_selected = dragOwner(cur, h.path);
+            } else if (h.kind == blk::Hit::Field && spec) {
                 if (spec->field == splash::BlockField::Bool) {
                     if (auto out = blk::setField(cur, h.path, b->field == "true" ? "false" : "true")) edit(std::move(*out), &res);
                 } else if (spec->field == splash::BlockField::Button || spec->field == splash::BlockField::Variable ||
                            spec->field == splash::BlockField::Object || spec->field == splash::BlockField::Sound ||
                            spec->field == splash::BlockField::Cutscene || spec->field == splash::BlockField::Light ||
-                           spec->field == splash::BlockField::StringKey || spec->field == splash::BlockField::UiText) {
+                           spec->field == splash::BlockField::StringKey || spec->field == splash::BlockField::UiText ||
+                           spec->field == splash::BlockField::Device || spec->field == splash::BlockField::Stick) {
                     m_picking = h.path;
+                    m_pickPlayer = false;
                     m_pickQuery.clear();
                     ImGui::OpenPopup(kPickId);
                 } else {
@@ -566,7 +580,10 @@ BlocksView::Result BlocksView::draw(ImDrawList* dl, ImRect r, bool* focused, con
         if (h.kind != blk::Hit::None) opts.hovered = dragOwner(shown, h.path);
         if (const splash::Block* b = h.kind != blk::Hit::None ? blk::blockAt(shown, h.path) : nullptr; b && !help)
             help = splash::findBlockSpec(b->op);
-        if (h.kind == blk::Hit::Field) opts.hoveredField = h.path;
+        if (h.kind == blk::Hit::Field) {
+            opts.hoveredField = h.path;
+            opts.hoveredPlayer = h.player;
+        }
     }
     drawLayout(dl, *shownL, o, opts);
     // Where the dragged blocks would go.
@@ -701,12 +718,19 @@ BlocksView::Result BlocksView::draw(ImDrawList* dl, ImRect r, bool* focused, con
     if (!m_picking.empty()) {
         const splash::Block* pb = blk::blockAt(m_history.current(), m_picking);
         const splash::BlockSpec* ps = pb ? splash::findBlockSpec(pb->op) : nullptr;
-        const splash::BlockField kind = ps ? ps->field : splash::BlockField::None;
-        const std::string value = pb ? pb->field : std::string();
+        const splash::BlockField kind = m_pickPlayer ? splash::BlockField::None : ps ? ps->field : splash::BlockField::None;
+        // The player's list: "any" (a hat's) and 1 to 8, stored as setPlayer keeps them.
+        std::string value = pb ? pb->field : std::string();
+        if (m_pickPlayer && pb) value = pb->player.empty() ? (ps && ps->kind == splash::BlockKind::Hat ? "any" : "1") : pb->player;
         std::vector<std::string> all;
         const char* title = "Button";
         const char* ic = icon::gamepad;
         ImU32 col = blocks::input;
+        if (m_pickPlayer) {
+            title = "Player";
+            ic = icon::users;
+            if (ps) all = blk::playerChoices(*ps);
+        }
         switch (kind) {
             case splash::BlockField::Button:
                 for (std::string_view b : splash::blockButtons()) all.emplace_back(b);
@@ -754,8 +778,22 @@ BlocksView::Result BlocksView::draw(ImDrawList* dl, ImRect r, bool* focused, con
                 col = blocks::strings;
                 all = context.uiTexts;
                 break;
+            case splash::BlockField::Device:
+                title = "Device";
+                for (std::string_view d : splash::blockDevices()) all.emplace_back(d);
+                break;
+            case splash::BlockField::Stick:
+                title = "Stick axis";
+                for (std::string_view a : splash::blockSticks()) all.emplace_back(a);
+                break;
             default: break;
         }
+        // What a row shows: a mouse button and a player in words, the rest as stored.
+        auto shown = [&](const std::string& v) {
+            if (m_pickPlayer) return v == "any" ? std::string("any player") : "player " + v;
+            if (kind == splash::BlockField::Button) return splash::blockButtonLabel(v);
+            return v;
+        };
         // The value the field has, kept in the list when it is not one of them.
         const bool stray = !value.empty() && std::find(all.begin(), all.end(), value) == all.end();
         if (stray) all.insert(all.begin(), value);
@@ -763,10 +801,13 @@ BlocksView::Result BlocksView::draw(ImDrawList* dl, ImRect r, bool* focused, con
         const std::string q = lower(m_pickQuery);
         std::vector<std::string> labels;
         for (const std::string& a : all)
-            if (q.empty() || lower(a).find(q) != std::string::npos) labels.push_back(a);
-        std::stable_partition(labels.begin(), labels.end(), [&](const std::string& a) { return q.empty() || lower(a).rfind(q, 0) == 0; });
+            if (q.empty() || lower(shown(a)).find(q) != std::string::npos) labels.push_back(a);
+        std::stable_partition(labels.begin(), labels.end(), [&](const std::string& a) { return q.empty() || lower(shown(a)).rfind(q, 0) == 0; });
+        std::vector<std::string> texts;
+        for (const std::string& l : labels) texts.push_back(shown(l));
         std::vector<PickerItem> items;
-        for (const std::string& l : labels) {
+        for (size_t li = 0; li < labels.size(); li++) {
+            const std::string& l = labels[li];
             const bool odd = stray && l == value;
             const char* blurb = odd ? (kind == splash::BlockField::Variable ? "Not a variable of this script"
                                        : kind == splash::BlockField::Light  ? "Not a runtime light in this scene"
@@ -774,17 +815,22 @@ BlocksView::Result BlocksView::draw(ImDrawList* dl, ImRect r, bool* focused, con
                                                                             : "Not in this scene")
                                 : l == "self" && kind == splash::BlockField::Object ? "The object this script is on"
                                                                                      : "";
-            items.push_back({odd ? icon::warning : ic, odd ? color::warn : col, l.c_str(), blurb, nullptr});
+            items.push_back({odd ? icon::warning : ic, odd ? color::warn : col, texts[li].c_str(), blurb, nullptr});
         }
         // No runtime lights: say how to make one rather than show an empty list.
         // It cannot be picked, and sits past `labels` so no pick maps to it.
         const bool noLights = kind == splash::BlockField::Light && context.lights.empty();
         if (noLights) items.push_back({icon::lightbulb, color::textFaint, kNoLights, nullptr, "Turn on Runtime in a point light's inspector"});
         ImVec2 at = mouse;
-        if (const blk::BlockBox* b = curL.find(m_picking)) at = ImVec2(o.x + b->field.x0, o.y + b->field.y1 + space::xs);
+        if (const blk::BlockBox* b = curL.find(m_picking)) {
+            const blk::Rect& w = m_pickPlayer ? b->player : b->field;
+            at = ImVec2(o.x + w.x0, o.y + w.y1 + space::xs);
+        }
         const int pick = picker(kPickId, at, noLights ? 300 : 240, title, &m_pickQuery, items);
         if (pick >= 0 && size_t(pick) < labels.size()) {
-            if (auto ns = blk::setField(m_history.current(), m_picking, labels[size_t(pick)])) edit(std::move(*ns), &res);
+            const std::string& v = labels[size_t(pick)];
+            if (auto ns = m_pickPlayer ? blk::setPlayer(m_history.current(), m_picking, v) : blk::setField(m_history.current(), m_picking, v))
+                edit(std::move(*ns), &res);
             m_picking = {};
         }
         if (!ImGui::IsPopupOpen(kPickId)) m_picking = {};
