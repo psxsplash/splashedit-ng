@@ -1941,16 +1941,17 @@ void Importer::skinnedObject(int idx, const UComp& exp, const std::string& path,
         const std::string a = clipOf(r, path);
         if (!a.empty() && std::find(sk.clips.begin(), sk.clips.end(), a) == sk.clips.end()) sk.clips.push_back(a);
     }
-    if (sk.clips.size() > 16) {
-        item(ReportItem::Changed, path, std::to_string(sk.clips.size()) + " animation clips, a skin plays at most 16: the first 16 are kept");
-        sk.clips.resize(16);
+    if (sk.clips.size() > size_t(kSkinMaxClips)) {
+        item(ReportItem::Changed, path, std::to_string(sk.clips.size()) + " animation clips, a skin plays at most " +
+                                            std::to_string(kSkinMaxClips) + ": the first " + std::to_string(kSkinMaxClips) + " are kept");
+        sk.clips.resize(size_t(kSkinMaxClips));
     }
     if (sk.clips.empty()) {
         // psxsplash draws no skinned mesh without a clip: the model's own stand in.
         const std::string guid = smr ? refOf((*smr->body)["m_Mesh"]).guid : su.modelGuid;
         ModelAsset* ma = guid.empty() ? nullptr : model(guid, path);
         if (ma && ma->error.empty())
-            for (size_t k = 0; k < ma->model.clips.size() && k < 16; ++k) sk.clips.push_back(ma->model.clips[k]);
+            for (size_t k = 0; k < ma->model.clips.size() && k < size_t(kSkinMaxClips); ++k) sk.clips.push_back(ma->model.clips[k]);
         if (sk.clips.empty())
             item(ReportItem::LeftOut, path, "no animation clip, and its model has none: psxsplash draws no skinned mesh without one, so it gets no skin");
         else

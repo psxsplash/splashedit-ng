@@ -458,7 +458,8 @@ Object readObject(const json& j) {
                         if (it.key() == kAgentStateNames[i]) k = i;
                     if (k < 0) fail(where + "unknown state '" + it.key() + "' in stateClips");
                     const int v = it.value().get<int>();
-                    if (v < -1 || v > 15) fail(where + "a state clip must be -1..15");
+                    if (v < -1 || v >= kSkinMaxClips)
+                        fail(where + "a state clip must be -1.." + std::to_string(kSkinMaxClips - 1));
                     ag.stateClips[size_t(k)] = v;
                 }
             }

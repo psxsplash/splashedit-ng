@@ -4046,6 +4046,97 @@ void testClipLoopImportAndEdit() {
     CHECK(files == 0);
 }
 
+// A skin with 20 clips (psxsplash keeps 32 since splashpack v29): the scene
+// saves and loads them all, the export writes v29 and all 20 clips with the
+// joint tail after the last one, an agent may name clip 19, and a skin with
+// 16 clips still exports as v27.
+void testSkinClips32() {
+    namespace fs = std::filesystem;
+    const fs::path src = fs::path(SPLASHEDIT_SOURCE_DIR) / "tests" / "skin";
+    const fs::path dir = g_outDir / "skinclips32";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    for (const char* n : {"arm.mesh", "play.lua"}) fs::copy_file(src / n, dir / n);
+    std::vector<std::string> clips;
+    for (int i = 0; i < 20; i++) {
+        char name[8];
+        std::snprintf(name, sizeof name, "c%02d", i);
+        const double half = i * 8.0 * 3.14159265358979 / 360.0;
+        std::ofstream(dir / (std::string(name) + ".anim"))
+            << "{\"format\": \"splashedit-ng/anim\", \"version\": 1, \"name\": \"" << name
+            << "\", \"length\": 1.0, \"loop\": true, \"channels\": [{\"joint\": \"elbow\", \"property\": \"rotation\","
+            << " \"interpolation\": \"linear\", \"times\": [0, 1.0], \"values\": [0, 0, " << std::sin(half) << ", "
+            << std::cos(half) << ", 0, 0, " << std::sin(half) << ", " << std::cos(half) << "]}]}";
+        clips.push_back(std::string(name) + ".anim");
+    }
+    splash::Scene base = splash::loadScene(src / "skin.scene");
+    CHECK(base.objects.size() == 1 && base.objects[0].skin);
+    if (base.objects.empty() || !base.objects[0].skin) return;
+    base.objects[0].skin->clips = clips;
+    splash::saveScene(base, dir / "s.scene");
+    splash::Scene scene;
+    try {
+        scene = splash::loadScene(dir / "s.scene");
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "skinclips32: %s\n", e.what());
+    }
+    CHECK(scene.objects.size() == 1 && scene.objects[0].skin && scene.objects[0].skin->clips == clips);
+    if (scene.objects.size() != 1 || !scene.objects[0].skin) return;
+
+    const splash::ExportResult r = splash::exportSplashpack(scene, dir, dir / "s.splashpack");
+    for (const std::string& e : r.errors) std::fprintf(stderr, "skinclips32 export: %s\n", e.c_str());
+    CHECK(r.ok() && r.stats.skins.size() == 1 && r.stats.skins[0].clips.size() == 20);
+    if (!r.ok() || r.stats.skins.size() != 1) return;
+    std::ifstream in(dir / "s.splashpack", std::ios::binary);
+    const std::vector<unsigned char> b((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    auto u16 = [&](size_t p) { return p + 2 <= b.size() ? size_t(b[p] | b[p + 1] << 8) : size_t(0); };
+    auto u32 = [&](size_t p) { return p + 4 <= b.size() ? u16(p) | u16(p + 2) << 16 : size_t(0); };
+    CHECK(u16(2) == 29);
+    CHECK(u16(112) == 1);
+    const size_t doff = u32(u32(116));
+    CHECK(doff + 4 <= b.size() && b[doff + 3] == 20);
+    if (doff + 4 > b.size()) return;
+    const size_t bones = b[doff + 2];
+    size_t p = (doff + 4 + r.stats.skins[0].triangles * 3 + 3) & ~size_t(3);
+    std::vector<std::string> names;
+    for (int c = 0; c < b[doff + 3] && p < b.size(); c++) {
+        const size_t len = b[p];
+        names.emplace_back(reinterpret_cast<const char*>(&b[p + 1]), len);
+        p = (p + 1 + len + 1 + 2 + 1) & ~size_t(1);
+        p += 2 + u16(p) * bones * 24;
+    }
+    CHECK(names.size() == 20 && names.front() == "c00" && names.back() == "c19");
+    // v26 tail: 2-aligned bind positions, then the joint names.
+    p = ((p + 1) & ~size_t(1)) + bones * 6;
+    CHECK(p + 9 <= b.size() && b[p] == 8 && std::string(reinterpret_cast<const char*>(&b[p + 1]), 8) == "shoulder");
+
+    // An agent may play clip 19 of a 20-clip skin.
+    splash::AgentComponent ag;
+    ag.stateClips[0] = 19;
+    splash::Object agentObj = named("Walker");
+    agentObj.agent = ag;
+    splash::Scene withAgent;
+    withAgent.objects.push_back(agentObj);
+    splash::saveScene(withAgent, dir / "agent.scene");
+    int readBack = -2;
+    try {
+        const splash::Scene back = splash::loadScene(dir / "agent.scene");
+        if (!back.objects.empty() && back.objects[0].agent) readBack = back.objects[0].agent->stateClips[0];
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "skinclips32 agent: %s\n", e.what());
+    }
+    CHECK(readBack == 19);
+    CHECK(splash::agentRecord(ag, 0, 20, 100.f).bytes[16] == 19);
+
+    // 16 clips stay v27, the pack as it was before v29.
+    scene.objects[0].skin->clips.resize(16);
+    const splash::ExportResult r16 = splash::exportSplashpack(scene, dir, dir / "s16.splashpack");
+    std::ifstream in16(dir / "s16.splashpack", std::ios::binary);
+    unsigned char h[4] = {};
+    in16.read(reinterpret_cast<char*>(h), 4);
+    CHECK(r16.ok() && (h[2] | h[3] << 8) == 27);
+}
+
 // Clips from other model files on a skin (#237): tests/skinimport/rig_host.gltf
 // (Wave) placed, then rig_nod.gltf (Nod/Big on the bare armature, plus a Tail
 // joint the host lacks) and rig_alien.gltf (other joint names) added to Body's
@@ -4149,14 +4240,14 @@ void testSkinClipSources() {
     re = editor::reimportModel(doc, host);
     CHECK(re.error.empty() && doc.object(body)->skin->clips == std::vector<std::string>({wave, nod, "anims/raise.anim"}));
 
-    // The 16 cap: a skin full of clips takes none, and says how many it left.
+    // The clip cap: a skin full of clips takes none, and says how many it left.
     doc.edit(body, [](splash::Object& o) {
-        while (o.skin->clips.size() < 16) o.skin->clips.push_back("anims/raise.anim");
+        while (o.skin->clips.size() < size_t(splash::kSkinMaxClips)) o.skin->clips.push_back("anims/raise.anim");
         o.skin->clips.erase(o.skin->clips.begin() + 1);  // the source's clip out
         o.skin->clips.push_back("anims/raise.anim");
     });
     a = editor::addClipSources(doc, body, {dir / "rig_nod.gltf"});
-    CHECK(a.error.empty() && a.left == 1 && a.clips.empty() && doc.object(body)->skin->clips.size() == 16);
+    CHECK(a.error.empty() && a.left == 1 && a.clips.empty() && doc.object(body)->skin->clips.size() == size_t(splash::kSkinMaxClips));
     CHECK(doc.object(body)->skin->clipSources == std::vector<std::string>{"models/rig_nod.gltf"});
     // The source's clips gone from the list: pruning drops the source, nothing else.
     splash::SkinComponent pruned = *doc.object(body)->skin;
@@ -8957,8 +9048,8 @@ void testImportWarnings() {
         "the skeleton has 70 joints, psxsplash draws at most 64: delete helper bones (IK targets, poles, twist bones) in the modelling tool");
     CHECK(j.problem == "the skeleton has 70 joints, psxsplash draws at most 64" && j.fix.find("at most 64 joints") != std::string::npos);
     editor::ImportWarning c = editor::explainImportWarning(
-        "20 animations, a skin plays at most 16: the first 16 go on the skin component, swap in others by hand");
-    CHECK(c.problem == "20 animations, a skin plays at most 16" && c.fix.find("at most 16 animations") != std::string::npos);
+        "40 animations, a skin plays at most 32: the first 32 go on the skin component, swap in others by hand");
+    CHECK(c.problem == "40 animations, a skin plays at most 32" && c.fix.find("at most 32 animations") != std::string::npos);
     editor::ImportWarning t = editor::explainImportWarning("texture models/x.png was not found, the material is left untextured");
     CHECK(t.problem == "texture models/x.png was not found, the material is left untextured" && !t.fix.empty());
     editor::ImportWarning u = editor::explainImportWarning("something new: and odd");
@@ -15747,6 +15838,7 @@ int main(int argc, char** argv) {
     testPlaceSkinnedModel();
     testDefaultClipLoop();
     testClipLoopImportAndEdit();
+    testSkinClips32();
     testSkinClipSources();
     testImportSettings();
     testSimplifyToTriangles();
