@@ -1424,7 +1424,7 @@ static void addClipModels(State& st, editor::Document& doc, const editor::Object
     for (const std::string& r : a.refused) scriptLine(nullptr, "skinclips: refused " + r);
     for (const std::string& w : a.warnings) scriptLine(nullptr, "skinclips: warning " + w);
     std::string msg = a.clips.size() == 1 ? std::string("Added 1 clip") : "Added " + std::to_string(a.clips.size()) + " clips";
-    if (a.left > 0) msg += "; " + std::to_string(a.left) + (a.left == 1 ? " clip" : " clips") + " did not fit, a skin plays at most 16";
+    if (a.left > 0) msg += "; " + std::to_string(a.left) + (a.left == 1 ? " clip" : " clips") + " did not fit, a skin plays at most " + std::to_string(splash::kSkinMaxClips);
     for (const std::string& r : a.refused) msg += ". Left out " + r;
     for (const std::string& w : a.warnings) msg += ". " + w;
     notify(st, msg, a.clips.empty() || !a.refused.empty());
@@ -1432,7 +1432,7 @@ static void addClipModels(State& st, editor::Document& doc, const editor::Object
 
 // Sets `files` on the field `slot` of the object at `target` (or the scene's
 // settings for the scene script and memory card icon) as one undo step; a
-// skin's clips are replaced, or with `append` added to (up to 16). `index` is
+// skin's clips are replaced, or with `append` added to (up to 32). `index` is
 // the memory card icon frame to replace, or -1 to append frames; for a
 // Texture, the material to set (-1 is the first), the list grown to reach it.
 static void applyAssetFiles(State& st, editor::Document& doc, AssetSlot slot, const editor::ObjectPath& target,
@@ -1457,8 +1457,9 @@ static void applyAssetFiles(State& st, editor::Document& doc, AssetSlot slot, co
         paths.push_back(a.path);
     }
     std::string note;
-    if (slot == AssetSlot::SkinClips && paths.size() > 16) {
-        note = "Kept the first 16 of " + std::to_string(paths.size()) + " clips; a skin plays at most 16.";
+    if (slot == AssetSlot::SkinClips && paths.size() > size_t(splash::kSkinMaxClips)) {
+        const std::string most = std::to_string(splash::kSkinMaxClips);
+        note = "Kept the first " + most + " of " + std::to_string(paths.size()) + " clips; a skin plays at most " + most + ".";
         paths.resize(16);
     }
     const std::string& first = paths.front();
@@ -1513,7 +1514,7 @@ static void applyAssetFiles(State& st, editor::Document& doc, AssetSlot slot, co
                 if (!o.skin) return;
                 if (!append) o.skin->clips = paths;
                 for (const std::string& p : append ? paths : std::vector<std::string>{})
-                    if (o.skin->clips.size() < 16 && std::find(o.skin->clips.begin(), o.skin->clips.end(), p) == o.skin->clips.end())
+                    if (o.skin->clips.size() < size_t(splash::kSkinMaxClips) && std::find(o.skin->clips.begin(), o.skin->clips.end(), p) == o.skin->clips.end())
                         o.skin->clips.push_back(p);
                 // Model files whose clips the new list left out stop being clip sources.
                 editor::pruneClipSources(doc.projectRoot(), o.mesh ? o.mesh->mesh : std::string(), *o.skin);
@@ -10456,7 +10457,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
         top = y;
         compSection("s_skin", editor::ComponentKind::Skin);
         std::string clips = std::to_string(sk.clips.size()) + (sk.clips.size() == 1 ? " clip" : " clips");
-        if (slotField(st, static_cast<int>(AssetSlot::SkinClips), path, "clips", row("lclips", "Clips", "Animation clips, at most 16. Click to pick the .anim files; the pick replaces the list."),
+        if (slotField(st, static_cast<int>(AssetSlot::SkinClips), path, "clips", row("lclips", "Clips", "Animation clips, at most 32. Click to pick the .anim files; the pick replaces the list."),
                        icon::play, kind::camera, clips.c_str(), nullptr))
             pickAsset(AssetSlot::SkinClips, path);
         // Animations from other model files (Mixamo: one per file), named
