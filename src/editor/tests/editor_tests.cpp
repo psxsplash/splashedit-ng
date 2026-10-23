@@ -1706,6 +1706,18 @@ void testHostInput() {
               !editor::shmHasV2(nullptr, 4096));
         std::vector<uint8_t> v3 = block(3, 200);
         CHECK(editor::shmHasV2(v3.data(), v3.size()));
+        // The version decides on its own: a version 1 header as big as a version 2 one is still version 1,
+        // and the writer leaves its bytes past hostPads alone.
+        std::vector<uint8_t> big1 = block(1, 132);
+        CHECK(!editor::shmHasV2(big1.data(), big1.size()));
+        editor::ShmInput in;
+        in.multitap[0] = 1;
+        in.device[0] = shm::kMouse;
+        in.mouseDX[0] = 9;
+        editor::writeShmInput(big1.data(), big1.size(), in);
+        bool kept = true;
+        for (size_t i = shm::kMultitap; i < shm::kV2Size; ++i) kept = kept && big1[i] == 0xab;
+        CHECK(kept && u32(big1, shm::kHostInput) == 1);
     }
 
     // Defaults: every player a pad, no tap. Keyboard and gamepad 1 on player 1, gamepad 2 on player 2.
