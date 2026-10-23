@@ -62,10 +62,19 @@ struct Material {
     std::string paletteGroup = {};
 };
 
+// The clips a skin may carry: SKINMESH_MAX_CLIPS in psxsplash skinmesh.hh.
+// psxsplash kept 16 before splashpack v31; a pack with a skin of more than
+// kSkinMaxClipsV28 clips is written as v31, with the v30 header. A psxsplash
+// that refuses packs newer than it knows refuses that one before v31; an
+// older one checks only a minimum version, so it loads such a pack and
+// misreads the skin.
+constexpr int kSkinMaxClips = 32;
+constexpr int kSkinMaxClipsV28 = 16;
+
 // Skinned mesh: a named clip set played by SkinnedAnim.Play. Requires a mesh
 // component whose .mesh carries a skeleton.
 struct SkinComponent {
-    std::vector<std::string> clips;  // project-relative .anim paths, at most 16
+    std::vector<std::string> clips;  // project-relative .anim paths, at most kSkinMaxClips
     // Model files (project-relative) whose animations the skin plays besides
     // its own model's: each one's clips are imported onto the skin's skeleton
     // by joint name, with the import settings of the skin's model, into

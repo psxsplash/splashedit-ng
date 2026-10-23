@@ -2309,8 +2309,8 @@ static ExportResult exportSplashpackBaked(const Scene& scene, const fs::path& ro
             res.errors.push_back(where + "a skinned mesh needs at least one clip, or it is never drawn");
             continue;
         }
-        if (sc.clips.size() > 16) {
-            res.errors.push_back(where + std::to_string(sc.clips.size()) + " clips, at most 16");
+        if (sc.clips.size() > size_t(kSkinMaxClips)) {
+            res.errors.push_back(where + std::to_string(sc.clips.size()) + " clips, at most " + std::to_string(kSkinMaxClips));
             continue;
         }
         if (skins.size() == 16) {
@@ -3102,12 +3102,17 @@ static ExportResult exportSplashpackBaked(const Scene& scene, const fs::path& ro
                                                                  : st.bumpAllocatorNeed;
 
     // ---- header (156 bytes, v27; 160 bytes, v28, with shadows; 164 bytes,
-    // v29, with baked backgrounds; 168 bytes, v30, with shine). A scene with
+    // v29, with baked backgrounds; 168 bytes, v30, with shine; v31, the v30
+    // header, only when a skin has more than 16 clips, which a pre-v31
+    // psxsplash would cut off and then misread the skin after). A scene with
     // none of them exports exactly as before shadows existed.
     bool hasLights = !runtimeLights.empty();
+    const bool manySkinClips = std::any_of(skins.begin(), skins.end(),
+                                           [](const SkinOut& so) { return so.clips.size() > size_t(kSkinMaxClipsV28); });
+    const bool v30Header = hasShine || manySkinClips;
     w.u8('S');
     w.u8('P');
-    w.u16(hasShine ? 30 : !backgrounds.empty() ? 29 : hasShadows ? 28 : 27);
+    w.u16(manySkinClips ? 31 : hasShine ? 30 : !backgrounds.empty() ? 29 : hasShadows ? 28 : 27);
     w.u16(uint16_t(luaFiles.size()));
     w.u16(uint16_t(exporters.size()));
     res.stats.gameObjects = int(exporters.size());
@@ -3199,21 +3204,21 @@ static ExportResult exportSplashpackBaked(const Scene& scene, const fs::path& ro
     w.u32(st.bumpAllocatorSize);
     // v28+: the shadow table at byte 156, left 0 in a v29 pack without shadows.
     size_t shadowTableOffsetPos = 0;
-    if (hasShadows || !backgrounds.empty() || hasShine) {
+    if (hasShadows || !backgrounds.empty() || v30Header) {
         shadowTableOffsetPos = w.pos();
-        w.u32(0);
+        w.u32(0);  // patched when the scene has shadows
     }
     // v29: the baked background table at byte 160.
     size_t backgroundTableOffsetPos = 0;
-    if (!backgrounds.empty() || hasShine) {
+    if (!backgrounds.empty() || v30Header) {
         backgroundTableOffsetPos = w.pos();
-        w.u32(0);
+        w.u32(0);  // patched when the scene has baked backgrounds
     }
-    // v30: the shine table at byte 164.
+    // v30+: the shine table at byte 164, left 0 in a v31 pack without shine.
     size_t shineTableOffsetPos = 0;
-    if (hasShine) {
+    if (v30Header) {
         shineTableOffsetPos = w.pos();
-        w.u32(0);
+        w.u32(0);  // patched when the scene has shine
     }
 
     // ---- Lua metadata

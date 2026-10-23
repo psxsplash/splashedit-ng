@@ -90,7 +90,7 @@ fs::path readPath(const fs::path& copy) {
 
 // Imports the clips of `source` (project-relative) for `skin` on `h`'s
 // skeleton and puts them in the skin's list where that source's clips were
-// (at the end when it had none), the list cut at 16 (`left` counts what fell
+// (at the end when it had none), the list cut at 32 (`left` counts what fell
 // off). Throws std::runtime_error, leaving `skin` as it was.
 splash::ImportedClips importSource(const fs::path& project, const Host& h, splash::SkinComponent& skin, const std::string& source,
                                    int& left) {
@@ -112,9 +112,9 @@ splash::ImportedClips importSource(const fs::path& project, const Host& h, splas
         }
     }
     if (!placed) clips.insert(clips.end(), got.clips.begin(), got.clips.end());
-    if (clips.size() > 16) {
-        left += int(clips.size() - 16);
-        clips.resize(16);
+    if (clips.size() > size_t(splash::kSkinMaxClips)) {
+        left += int(clips.size() - size_t(splash::kSkinMaxClips));
+        clips.resize(size_t(splash::kSkinMaxClips));
     }
     skin.clips = std::move(clips);
     // A new source is kept only when one of its clips fitted.
