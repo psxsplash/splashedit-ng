@@ -5,6 +5,7 @@
 #include "editor/pick.hh"
 #include "editor/timeline.hh"
 #include "scene.hh"
+#include "texture.hh"
 
 #include <algorithm>
 #include <cstdint>
@@ -112,6 +113,10 @@ class Ps1View {
 
     bool clean = false;  // false = PS1 look, true = clean view
 
+    // Textures drawn through their palette sidecar's cycles (editor/palette_edit.hh), for
+    // scripted checks: "<path> <bpp>bpp step <s0>,<s1>..." each, empty when none.
+    std::vector<std::string> cyclingTextures() const;
+
   private:
     struct Vertex {
         float px, py, pz;
@@ -127,6 +132,25 @@ class Ps1View {
 
     void rebuild();
     unsigned textureFor(const std::string& projectPath);  // cached; white/fallback on empty/error
+    // A texture whose sidecar has cycles shows the PS1 image (what export converts), re-uploaded
+    // when a range steps; 0 for any other texture, which textureFor draws from its source.
+    unsigned cyclingTextureFor(const std::string& projectPath, splash::BitDepth depth);
+    unsigned cyclingTextureLoad(const std::string& key, const std::string& projectPath, splash::BitDepth depth);
+    void tickCycles();
+    struct CyclingTex {
+        std::string sidecarText;  // the sidecar this was built from
+        std::string baseKey;      // what the conversion depends on: image, depth and palette source
+        splash::PsxTexture base;  // converted onto that source, before entries and cycles
+        std::vector<uint16_t> palette;
+        std::vector<splash::ClutCycle> cycles;
+        std::vector<uint8_t> indices;  // per texel, rows bottom-up as the GL texture
+        std::vector<int> steps;        // uploaded
+        unsigned id = 0;
+        int w = 0, h = 0;
+        bool used = false;  // by the last rebuild
+    };
+    std::map<std::string, CyclingTex> m_cycling;  // by "<path> <bpp>"
+    std::map<std::string, unsigned> m_cycleSeen;  // this rebuild's answers, by the same key
 
     const editor::Document* m_doc = nullptr;
     uint32_t m_drawDistance = 0;

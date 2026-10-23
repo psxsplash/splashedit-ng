@@ -52,8 +52,20 @@ TexturePreview makeTexturePreview(const splash::Image& img, const TexturePreview
     }
     try {
         // The export path: the same call the splashpack writer makes.
-        splash::PsxTexture t = splash::convertTexture(img, key.depth, key.cutout);
+        std::vector<uint16_t> fixed;
+        if (!key.paletteFile.empty()) fixed = splash::readPaletteFile(key.paletteFile);
+        splash::PsxTexture t = splash::convertTexture(img, key.depth, key.cutout, key.paletteFile.empty() ? nullptr : &fixed);
         splash::Image out = splash::decodeTexture(t);
+        if (t.hasPalette) {
+            p.basePalette = t.palette;
+            p.indices.resize(size_t(t.width) * t.height);
+            const int per = t.bitDepth == splash::BitDepth::Bpp8 ? 2 : 4, bits = 16 / per;
+            // imageData rows are top-down already (convertTexture flips the bottom-up Image).
+            for (int row = 0; row < t.height; row++)
+                for (int x = 0; x < t.width; x++)
+                    p.indices[size_t(row) * t.width + x] =
+                        uint8_t((t.word(x / per, row) >> ((x % per) * bits)) & ((1 << bits) - 1));
+        }
         splash::TextureError e = splash::measureTexture(img, t);
         p.deltaE = e.deltaE;
         p.deltaEBlur = e.deltaEBlur;
