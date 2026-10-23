@@ -90,6 +90,9 @@ STDLIB_TABLES = ["string", "table", "coroutine", "bit32", "debug"]
 EVENT_ARGS = {
     "onTriggerEnter": ("index", "index is the trigger box's number, from 0. Goes in the script set on a Trigger component."),
     "onTriggerExit": ("index", "index is the trigger box's number, from 0. Goes in the script set on a Trigger component."),
+    # SceneManager dispatches every player's buttons and passes the player (1..8) third.
+    "onButtonPress": ("self, button, player", "player is who pressed it, 1 to 8 (as in Input.IsHeld)."),
+    "onButtonRelease": ("self, button, player", "player is who let go, 1 to 8 (as in Input.IsHeld)."),
 }
 
 
