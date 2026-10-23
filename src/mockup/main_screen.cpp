@@ -152,6 +152,7 @@ static void releaseMouse(State::Play& p) {
     if (p.relativeMouse)
         if (SDL_Window* win = SDL_GL_GetCurrentWindow()) SDL_SetWindowRelativeMouseMode(win, false);
     if (p.mouseCaptured) scriptLine(nullptr, "game: mouse released");
+    if (p.relativeMouse) ImGui::GetIO().ConfigFlags &= ~ImGuiConfigFlags_NoMouse;
     p.mouseCaptured = p.mouseArmed = p.relativeMouse = false;
     p.mouseRestX = p.mouseRestY = 0;
 }
@@ -4884,6 +4885,8 @@ static void gamePanel(State& st, ImDrawList* dl, ImRect r) {
             if (SDL_Window* win = SDL_GL_GetCurrentWindow()) p.relativeMouse = SDL_SetWindowRelativeMouseMode(win, true);
         float dx, dy;
         if (p.relativeMouse) SDL_GetRelativeMouseState(&dx, &dy);  // start from here
+        // The mouse is the game's now: the editor's pointer must not hover or click its own controls.
+        if (p.relativeMouse) ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_NoMouse;
         scriptLine(nullptr, std::string("game: mouse captured") + (p.relativeMouse ? " relative" : ""));
     }
     if (v2) {
@@ -4893,7 +4896,12 @@ static void gamePanel(State& st, ImDrawList* dl, ImRect r) {
         fr.mouseCaptured = p.mouseCaptured;
         if (p.mouseCaptured) {
             float dx = io.MouseDelta.x, dy = io.MouseDelta.y;
-            if (p.relativeMouse) SDL_GetRelativeMouseState(&dx, &dy);
+            bool left = io.MouseDown[0], right = io.MouseDown[1];
+            if (p.relativeMouse) {
+                const SDL_MouseButtonFlags b = SDL_GetRelativeMouseState(&dx, &dy);
+                left = b & SDL_BUTTON_LMASK;
+                right = b & SDL_BUTTON_RMASK;
+            }
             if (!std::isfinite(dx) || !std::isfinite(dy)) dx = dy = 0;  // ImGui's delta with no pointer
             p.mouseRestX += dx;
             p.mouseRestY += dy;
@@ -4902,8 +4910,8 @@ static void gamePanel(State& st, ImDrawList* dl, ImRect r) {
             p.mouseRestX -= float(fr.mouseDX);
             p.mouseRestY -= float(fr.mouseDY);
             // The click that captured it is not the game's.
-            if (!io.MouseDown[0] && !io.MouseDown[1]) p.mouseArmed = true;
-            if (p.mouseArmed) fr.mouseButtons = (io.MouseDown[0] ? 1u : 0u) | (io.MouseDown[1] ? 2u : 0u);
+            if (!left && !right) p.mouseArmed = true;
+            if (p.mouseArmed) fr.mouseButtons = (left ? 1u : 0u) | (right ? 2u : 0u);
         }
         gv.setInput(editor::shmInput(want, cmap, fr));
     } else {
