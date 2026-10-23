@@ -134,6 +134,8 @@ Block newBlock(std::string_view op) {
         case BlockField::Button: b.field = "CROSS"; break;
         case BlockField::Bool: b.field = "true"; break;
         case BlockField::Number: b.field = "0"; break;
+        case BlockField::Device: b.field = "mouse"; break;
+        case BlockField::Stick: b.field = "left x"; break;
         default: break;
     }
     auto num = [](const char* v) { return Block{"number", v, {}, {}}; };
@@ -163,9 +165,10 @@ const BlockBox* Layout::find(const Path& p) const {
 namespace {
 
 struct Tok {
-    enum Kind { Text, Field, Arg } kind;
+    enum Kind { Text, Field, Arg, Player } kind;
     std::string text;
     int arg = -1;
+    bool glue = false;  // no gap before it: the "?" of "%p?"
 };
 
 std::vector<std::string_view> labelParts(std::string_view label) {
@@ -190,9 +193,15 @@ std::vector<Tok> tokens(std::string_view part) {
         if (e == std::string_view::npos) e = part.size();
         std::string_view w = part.substr(i, e - i);
         i = e;
-        if (w == "%f") out.push_back({Tok::Field, {}, -1});
+        // "%f?" and "%p?": the field or player with the punctuation after it, no gap between.
+        if (w.size() > 2 && (w.substr(0, 2) == "%f" || w.substr(0, 2) == "%p") &&
+            w.find_first_not_of("?.,!", 2) == std::string_view::npos) {
+            out.push_back({w[1] == 'f' ? Tok::Field : Tok::Player, {}, -1});
+            out.push_back({Tok::Text, std::string(w.substr(2)), -1, true});
+        } else if (w == "%f") out.push_back({Tok::Field, {}, -1});
+        else if (w == "%p") out.push_back({Tok::Player, {}, -1});
         else if (w.size() == 2 && w[0] == '%' && w[1] >= '1' && w[1] <= '9') out.push_back({Tok::Arg, {}, w[1] - '1'});
-        else if (!out.empty() && out.back().kind == Tok::Text) out.back().text += " " + std::string(w);
+        else if (!out.empty() && out.back().kind == Tok::Text && !out.back().glue) out.back().text += " " + std::string(w);
         else out.push_back({Tok::Text, std::string(w), -1});
     }
     return out;
@@ -209,6 +218,8 @@ const char* placeholder(BlockField f) {
         case BlockField::Key: return "name";
         case BlockField::StringKey: return "key";
         case BlockField::UiText: return "UI text";
+        case BlockField::Device: return "device";
+        case BlockField::Stick: return "axis";
         default: return "";
     }
 }
@@ -226,8 +237,10 @@ struct Layouter {
 
     std::string fieldText(const Block& b, const BlockSpec* s, bool* ph) const {
         *ph = b.field.empty() && s && *placeholder(s->field);
-        return *ph ? placeholder(s->field) : b.field;
+        if (*ph) return placeholder(s->field);
+        return s && s->field == BlockField::Button ? splash::blockButtonLabel(b.field) : b.field;
     }
+    std::string playerText(const Block& b, const BlockSpec* s) const { return blk::playerText(b, s); }
     float wellW(const std::string& t) const { return std::max(m.slotW, std::ceil(tw(t)) + 2 * m.wellPad); }
 
     Sz pieceSize(const Tok& t, const Block& b, const BlockSpec* s) const {
@@ -236,6 +249,7 @@ struct Layouter {
             bool ph = false;
             return {wellW(fieldText(b, s, &ph)), m.slotH};
         }
+        if (t.kind == Tok::Player) return {wellW(playerText(b, s)), m.slotH};
         if (t.arg >= 0 && size_t(t.arg) < b.args.size() && !b.args[size_t(t.arg)].op.empty()) return measure(b.args[size_t(t.arg)]);
         return {m.slotW, m.slotH};
     }
@@ -245,7 +259,7 @@ struct Layouter {
         float w = 0, h = 0;
         for (size_t i = 0; i < toks.size(); i++) {
             Sz p = pieceSize(toks[i], b, s);
-            w += p.w + (i ? m.gap : 0);
+            w += p.w + (i && !toks[i].glue ? m.gap : 0);
             h = std::max(h, p.h);
         }
         return {w + 2 * padX, std::max(minH, h + 2 * padY)};
@@ -303,13 +317,19 @@ struct Layouter {
                   BlockBox& box, std::vector<std::pair<int, Rect>>& args) const {
         float cx = x + padX;
         for (size_t i = 0; i < toks.size(); i++) {
-            if (i) cx += m.gap;
+            if (i && !toks[i].glue) cx += m.gap;
             Sz p = pieceSize(toks[i], b, s);
             Piece pc;
             pc.rect = {cx, y + std::round((h - p.h) * 0.5f), cx + p.w, y + std::round((h - p.h) * 0.5f) + p.h};
             if (toks[i].kind == Tok::Text) {
                 pc.kind = Piece::Text;
                 pc.text = toks[i].text;
+            } else if (toks[i].kind == Tok::Player) {
+                pc.kind = Piece::Field;
+                pc.player = true;
+                pc.text = playerText(b, s);
+                box.hasPlayer = true;
+                box.player = pc.rect;
             } else if (toks[i].kind == Tok::Field) {
                 pc.kind = Piece::Field;
                 pc.text = fieldText(b, s, &pc.placeholder);
@@ -454,6 +474,11 @@ Hit hitTest(const Layout& l, float x, float y) {
         if (!on) continue;
         Hit h;
         h.path = b.path;
+        if (b.hasPlayer && b.player.contains(x, y)) {
+            h.kind = Hit::Field;
+            h.player = true;
+            return h;
+        }
         if (b.hasField && b.field.contains(x, y)) {
             h.kind = Hit::Field;
             return h;
@@ -621,6 +646,30 @@ std::optional<BlockScript> dropStack(const BlockScript& s, const BlockStack& f, 
         case Target::None: return std::nullopt;
     }
     if (placed) *placed = at;
+    return r;
+}
+
+std::string playerText(const Block& b, const BlockSpec* s) {
+    if (s && s->kind == BlockKind::Hat) return b.player.empty() ? "anyone" : "player " + b.player;
+    return b.player.empty() ? "1" : b.player;
+}
+
+std::vector<std::string> playerChoices(const BlockSpec& s) {
+    std::vector<std::string> out;
+    if (s.kind == BlockKind::Hat) out.push_back("any");
+    for (int i = 1; i <= splash::kBlockPlayers; i++) out.push_back(std::to_string(i));
+    return out;
+}
+
+std::optional<BlockScript> setPlayer(const BlockScript& s, const Path& p, const std::string& value) {
+    const Block* b = blockAt(s, p);
+    const BlockSpec* spec = b ? findBlockSpec(b->op) : nullptr;
+    if (!spec || !splash::blockTakesPlayer(*spec)) return std::nullopt;
+    const std::vector<std::string> ok = playerChoices(*spec);
+    if (std::find(ok.begin(), ok.end(), value) == ok.end()) return std::nullopt;
+    BlockScript r = s;
+    // The default is stored as nothing: any player for a hat, player 1 for the rest.
+    blockAt(r, p)->player = value == (spec->kind == BlockKind::Hat ? "any" : "1") ? std::string() : value;
     return r;
 }
 

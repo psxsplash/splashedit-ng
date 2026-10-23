@@ -2661,6 +2661,13 @@ static void setPlayers(State& st, int players) {
     scriptLine(nullptr, "play: players " + std::to_string(p.tools.players) + (editor::usesRelay(p.tools) ? " relay" : ""));
 }
 
+// The Scene panel's Controllers: what Play plugs in. Saved with the tools.
+static void setPlayInput(State& st, const editor::PlayInput& in) {
+    State::Play& p = st.play;
+    p.tools.input = in;
+    if (!p.settingsFile.empty()) editor::savePlayTools(p.settingsFile, p.tools);
+}
+
 static void setRelay(State& st, bool on) {
     State::Play& p = st.play;
     p.tools.relay = on;
@@ -8500,6 +8507,77 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
         caption("2 consoles link directly, 3 or more through the relay.", color::textFaint);
         scriptLine("scene.play", "scene: play " + std::to_string(play.tools.players) + (play.tools.relay ? " relay on" : " relay off") +
                                      (editor::usesRelay(play.tools) ? " via relay" : ""));
+        y += space::xs;
+        if (!open) {
+            ImGui::PopClipRect();
+            y = stop + 34 + space::md;
+        } else {
+            dl->AddRect(ImVec2(x0, stop), ImVec2(x1, y + space::sm), rgb(0xffffff, 10), radius::card);
+            y += space::sm + space::md;
+        }
+    }
+
+    // Controllers: what Play plugs in for each player, and the multitaps.
+    // Saved for this user with the Players list, not in the scene; the
+    // exported game reads what is plugged in.
+    {
+        const float stop = y;
+        const bool open = section("s_controllers", ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), icon::gamepad, color::textDim,
+                                  "Controllers", true, true, false);
+        if (!open) ImGui::PushClipRect(ImVec2(0, 0), ImVec2(0, 0), false);
+        y += 34 + space::xs;
+        const editor::PlayInput pi = st.play.tools.input;
+        std::string line = "scene: controllers";
+        for (int port = 0; port < 2; ++port) {
+            const std::string id = "scene.multitap." + std::to_string(port + 1);
+            const std::string label = "Multitap " + std::to_string(port + 1);
+            const std::string tip = "Play plugs a multitap into port " + std::to_string(port + 1) + ", for players " +
+                                    (port ? "6 to 8" : "3 to 5") + " in its slots B to D.";
+            const ImRect tapRow = row(("ltap" + std::to_string(port)).c_str(), label.c_str(), tip.c_str());
+            const ImRect sw(ImVec2(tapRow.Min.x, tapRow.GetCenter().y - 8), ImVec2(tapRow.Min.x + 30, tapRow.GetCenter().y + 8));
+            nameRect(id, sw);
+            if (toggle(id.c_str(), sw, pi.multitap[size_t(port)]))
+            {
+                editor::PlayInput next = pi;
+                next.multitap[size_t(port)] = !next.multitap[size_t(port)];
+                setPlayInput(st, next);
+            }
+            const char* what = port ? "Port 2: players 6, 7 and 8" : "Port 1: players 3, 4 and 5";
+            const float ty = tapRow.GetCenter().y - measure(f.regular, type::caption, what).y * 0.5f;
+            text(dl, ImVec2(sw.Max.x + space::sm, ty), f.regular, type::caption,
+                 pi.multitap[size_t(port)] ? color::textDim : color::textFaint, what);
+            line += std::string(" tap") + char('1' + port) + (pi.multitap[size_t(port)] ? " on" : " off");
+        }
+        static const char* const kDeviceNames[] = {"Pad", "Analog pad", "Mouse", "None"};
+        for (int p = 1; p <= editor::kPlayInputPlayers; ++p) {
+            // A multitap slot is there only with its tap, and holds a pad or nothing.
+            const bool slot = p >= 3;
+            if (slot && !pi.multitap[p <= 5 ? 0 : 1]) continue;
+            const std::string id = "scene.playdevice." + std::to_string(p);
+            const std::string label = "Player " + std::to_string(p);
+            const std::string tip = slot ? "What Play plugs into this multitap slot: a pad, fed by a gamepad, or nothing."
+                                         : "What Play plugs into port " + std::to_string(p) +
+                                               ": a pad or an analog pad, fed by the keyboard and gamepads, a mouse, fed by "
+                                               "the host mouse over the Game view, or nothing.";
+            const ImRect devRow = row(("lplay" + std::to_string(p)).c_str(), label.c_str(), tip.c_str());
+            nameRect(id, devRow);
+            std::vector<const char*> items(kDeviceNames, kDeviceNames + 4);
+            if (slot) items = {"Pad", "None"};
+            const editor::PlayDevice d = pi.device[size_t(p - 1)];
+            int cur = int(d);
+            if (slot) cur = d == editor::PlayDevice::None ? 1 : 0;
+            const int pick = dropdownMenu(id.c_str(), devRow, icon::gamepad, items[size_t(cur)], items, cur);
+            if (pick >= 0 && pick != cur) {
+                editor::PlayInput next = pi;
+                next.device[size_t(p - 1)] = slot ? (pick ? editor::PlayDevice::None : editor::PlayDevice::Pad) : editor::PlayDevice(pick);
+                setPlayInput(st, next);
+            }
+            line += " p" + std::to_string(p) + " " + editor::playDeviceName(d);
+        }
+        caption("Only Play plugs these in, saved for you in the editor's settings; the exported game reads whatever is in "
+                "the console's ports.",
+                color::textFaint);
+        scriptLine("scene.controllers", line);
         y += space::xs;
         if (!open) {
             ImGui::PopClipRect();

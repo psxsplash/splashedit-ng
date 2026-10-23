@@ -56,7 +56,7 @@ bool booleanSlot(std::string_view op, int arg);
 // The block a palette drag makes: its inputs filled with literals where a
 // number or a text goes ("0", "1" for change, "10" for repeat, "" for log),
 // empty where a condition goes; an object field starts as "self", a button
-// as CROSS, a bool as true.
+// as CROSS, a bool as true, a device as "mouse", a stick axis as "left x".
 Block newBlock(std::string_view op);
 
 // --- Layout ---------------------------------------------------------------
@@ -96,6 +96,7 @@ struct Piece {
     int arg = -1;      // Slot: the input
     bool filled = false;       // Slot: a reporter sits in it (laid out as its own box)
     bool placeholder = false;  // Field: empty, `text` says what goes there
+    bool player = false;       // Field: the block's player, not its field
 };
 
 struct BlockBox {
@@ -110,6 +111,8 @@ struct BlockBox {
     std::vector<Piece> pieces;
     bool hasField = false;
     Rect field;               // the field's well (a literal's: the whole block)
+    bool hasPlayer = false;
+    Rect player;              // the player's well
     int depth = 0;            // how many blocks hold it
     // What touches it, for drawing square corners there: a block above it
     // (or the C block's row over a body), one under it, the arm left of a body.
@@ -140,6 +143,7 @@ struct Hit {
     enum Kind { None, Block, Slot, Field } kind = None;
     Path path;    // the block (Slot: the block with the slot)
     int slot = -1;
+    bool player = false;  // Field: the player's well
 };
 Hit hitTest(const Layout& l, float x, float y);
 
@@ -184,6 +188,14 @@ std::optional<BlockScript> dropStack(const BlockScript& s, const BlockStack& fra
 // reporter pops it out as a loose stack at x, y.
 std::optional<BlockScript> dropReporter(const BlockScript& s, const Block& reporter, const Path& p, int arg, float x, float y);
 std::optional<BlockScript> setField(const BlockScript& s, const Path& p, const std::string& value);
+// The player's well shows "1" to "8" ("1" when unset); a hat's "anyone" or
+// "player 3". playerChoices lists what setPlayer takes: "1" to "8", and
+// "any" first for a hat. setPlayer stores the default (a hat's "any", the
+// others' "1") as no player; nothing when the block takes no player or
+// `value` is not a choice.
+std::string playerText(const Block& b, const splash::BlockSpec* s);
+std::vector<std::string> playerChoices(const splash::BlockSpec& s);
+std::optional<BlockScript> setPlayer(const BlockScript& s, const Path& p, const std::string& value);
 
 // The nearest place `fragment`, its top left at fx, fy on the canvas, snaps
 // to within `radius` that canDrop() allows; None when there is none. `l` is
