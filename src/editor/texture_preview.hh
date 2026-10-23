@@ -13,6 +13,7 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "scene.hh"
@@ -27,8 +28,13 @@ struct TexturePreviewKey {
     // The palette group's shared CLUT (splash::paletteGroup) to convert onto
     // at 4 or 8 bpp; empty = the texture's own palette.
     std::vector<uint16_t> palette = {};
+    // A palette sidecar's palette file (resolved); empty = quantized. Its entries and cycles are not
+    // part of the key: the view puts them on basePalette itself (editor/palette_edit.hh). Unused
+    // with a shared palette, which a sidecar does not change.
+    std::filesystem::path paletteFile = {};
     bool operator==(const TexturePreviewKey& o) const {
-        return file == o.file && depth == o.depth && cutout == o.cutout && palette == o.palette;
+        return file == o.file && depth == o.depth && cutout == o.cutout && palette == o.palette &&
+               paletteFile == o.paletteFile;
     }
     bool operator!=(const TexturePreviewKey& o) const { return !(*this == o); }
 };
@@ -47,6 +53,10 @@ struct TexturePreview {
     double deltaE = 0;     // mean OKLab distance x100 per drawn texel (splash::measureTexture)
     double deltaEBlur = 0;
     double psnr = 0;
+    // At 4 and 8 bpp: the CLUT as converted (before a sidecar's entries) and each texel's index into
+    // it, top-down like `ps1`, so the palette can be edited and cycled without converting again.
+    std::vector<uint16_t> basePalette;
+    std::vector<uint8_t> indices;
     int vramBytes = 0;  // image + CLUT
     double convertMs = 0;  // load + convert + decode + measure, wall time
 };
