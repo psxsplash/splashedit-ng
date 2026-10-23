@@ -642,6 +642,8 @@ function Vec3.lerp(a, b, t) end
 ---@field RIGHT integer
 ---@field L3 integer
 ---@field R3 integer
+---@field MOUSE_LEFT integer
+---@field MOUSE_RIGHT integer
 Input = {}
 
 --- Returns true only on the frame the button was pressed (edge trigger).
@@ -701,6 +703,59 @@ function Input.IsHeldPlayer2(button) end
 ---@param stick any
 ---@return any
 function Input.GetAnalogPlayer2(stick) end
+
+--- True only on the frame the button was pressed. player is 1..8: 1 and 2 are ports 1 and 2, 3-5
+--- port 1's multitap slots B-D, 6-8 port 2's. An unknown player gives false.
+---
+--- `Input.IsPressed(player, button) -> boolean`
+---@param player any
+---@param button any
+---@return any # boolean
+function Input.IsPressed(player, button) end
+
+--- True only on the frame the button was released. player is 1..8, as in Input.IsPressed; an
+--- unknown player gives false.
+---
+--- `Input.IsReleased(player, button) -> boolean`
+---@param player any
+---@param button any
+---@return any # boolean
+function Input.IsReleased(player, button) end
+
+--- True while the button is held down. player is 1..8, as in Input.IsPressed; an unknown player
+--- gives false. On a mouse use Input.MOUSE_LEFT and Input.MOUSE_RIGHT.
+---
+--- `Input.IsHeld(player, button) -> boolean`
+---@param player any
+---@param button any
+---@return any # boolean
+function Input.IsHeld(player, button) end
+
+--- Stick 0 (left, the default) or 1 (right), about -1.0 to 1.0 per axis. Only an analog pad has
+--- sticks; a digital pad's D-pad stands in for the left stick and L1/R1 for the right stick's x; a
+--- mouse gives 0, 0.
+---
+--- `Input.GetAnalog(player, [stick]) -> x, y`
+---@param player any
+---@param stick? any
+---@return any # x, y
+function Input.GetAnalog(player, stick) end
+
+--- What is plugged in for the player: "none", "pad" (digital), "analog", "mouse" or "other" (a gun,
+--- a NegCon...). An unknown player gives "none".
+---
+--- `Input.GetDevice(player) -> string`
+---@param player any
+---@return any # string
+function Input.GetDevice(player) end
+
+--- The mouse's motion over the last frame in its own counts (integers, right and down positive),
+--- every report since the previous frame summed. 0, 0 when the player has no mouse.
+---
+--- `Input.GetMouse(player) -> dx, dy`
+---@param player any
+---@return any # dx, dy
+function Input.GetMouse(player) end
 
 --- Point a controller's built-in locomotion at any actor. player is 1 or 2. The pad then walks and
 --- turns that actor with the engine's normal movement, collision and camera handling, instead of
@@ -1790,19 +1845,22 @@ function FixedPoint.toNumber(self) end
 -- Event callbacks: define these in a script and the engine calls them.
 
 --- Called on the frame a controller button is pressed (edge trigger). button is a number matching
---- Input constants. Example: if button == Input.CROSS then ...
+--- Input constants. Example: if button == Input.CROSS then ... player is who pressed it, 1 to 8 (as
+--- in Input.IsHeld).
 ---
---- `function onButtonPress(self, button)`
+--- `function onButtonPress(self, button, player)`
 ---@param self any
 ---@param button any
-function onButtonPress(self, button) end
+---@param player any
+function onButtonPress(self, button, player) end
 
---- Called on the frame a button is released.
+--- Called on the frame a button is released. player is who let go, 1 to 8 (as in Input.IsHeld).
 ---
---- `function onButtonRelease(self, button)`
+--- `function onButtonRelease(self, button, player)`
 ---@param self any
 ---@param button any
-function onButtonRelease(self, button) end
+---@param player any
+function onButtonRelease(self, button, player) end
 
 --- Called when the player's collision capsule overlaps this object. Fires every frame while
 --- overlapping. Use a flag for one-time actions.

@@ -48,6 +48,7 @@
 #include "editor/model_import.hh"
 #include "editor/pick.hh"
 #include "editor/play.hh"
+#include "editor/host_input.hh"
 #include "editor/linkplay.hh"
 #include "editor/relay.hh"
 #include "editor/project.hh"
@@ -1672,6 +1673,197 @@ void testPlay() {
 // reads, Clienthost with its lowercase h), its directory and -portable
 // command, the capture redirect, the port helpers, the players setting and
 // the link reporter's lines.
+// What Play writes into redux's -shmdisplay header: who drives each player,
+// the words that makes (slot masks, device types, mouse motion to add), and
+// the writer, which leaves a version 1 header's bytes past hostPads alone.
+void testHostInput() {
+    using editor::PlayDevice;
+    namespace shm = editor::shm;
+    // Pad bits, active-low (the app's padbit).
+    struct padbit {
+        enum : uint16_t { start = 1 << 3, up = 1 << 4, circle = 1 << 13, cross = 1 << 14, square = 1 << 15 };
+    };
+    // A block whose header says `version` and `headerSize`, the rest 0xAB.
+    auto block = [](uint32_t version, uint32_t headerSize, size_t size = 4096) {
+        std::vector<uint8_t> b(size, 0xab);
+        std::memcpy(b.data() + 0, "PXSD", 4);
+        std::memcpy(b.data() + shm::kVersion, &version, 4);
+        std::memcpy(b.data() + shm::kHeaderSize, &headerSize, 4);
+        return b;
+    };
+    auto u32 = [](const std::vector<uint8_t>& b, size_t off) {
+        uint32_t v;
+        std::memcpy(&v, b.data() + off, 4);
+        return v;
+    };
+    auto setI32 = [](std::vector<uint8_t>& b, size_t off, int32_t v) { std::memcpy(b.data() + off, &v, 4); };
+
+    // Version gating: 2 and a header (and mapping) of 132 bytes or more.
+    {
+        std::vector<uint8_t> v1 = block(1, 60), v2 = block(2, 132), shortHdr = block(2, 60), shortMap = block(2, 132, 100);
+        CHECK(!editor::shmHasV2(v1.data(), v1.size()) && editor::shmHasV2(v2.data(), v2.size()));
+        CHECK(!editor::shmHasV2(shortHdr.data(), shortHdr.size()) && !editor::shmHasV2(shortMap.data(), shortMap.size()) &&
+              !editor::shmHasV2(nullptr, 4096));
+        std::vector<uint8_t> v3 = block(3, 200);
+        CHECK(editor::shmHasV2(v3.data(), v3.size()));
+        // The version decides on its own: a version 1 header as big as a version 2 one is still version 1,
+        // and the writer leaves its bytes past hostPads alone.
+        std::vector<uint8_t> big1 = block(1, 132);
+        CHECK(!editor::shmHasV2(big1.data(), big1.size()));
+        editor::ShmInput in;
+        in.multitap[0] = 1;
+        in.device[0] = shm::kMouse;
+        in.mouseDX[0] = 9;
+        editor::writeShmInput(big1.data(), big1.size(), in);
+        bool kept = true;
+        for (size_t i = shm::kMultitap; i < shm::kV2Size; ++i) kept = kept && big1[i] == 0xab;
+        CHECK(kept && u32(big1, shm::kHostInput) == 1);
+    }
+
+    // Defaults: every player a pad, no tap. Keyboard and gamepad 1 on player 1, gamepad 2 on player 2.
+    const editor::PlayInput def;
+    {
+        const editor::ControllerMap m = editor::mapControllers(def, 2, true);
+        CHECK(m.keyboard == 0 && m.gamepad[0] == 0 && m.gamepad[1] == 1 && m.mouse < 0);
+        CHECK(m.present[0] && m.present[1] && !m.present[2] && !m.present[7]);
+        CHECK(editor::describeControllers(def, m, true) ==
+              (std::vector<std::string>{"Player 1: keyboard + gamepad 1", "Player 2: gamepad 2"}));
+        // None connected: player 2 has nothing, player 1 the keyboard.
+        const editor::ControllerMap none = editor::mapControllers(def, 0, true);
+        CHECK(none.keyboard == 0 && none.gamepad[0] == -1 && none.gamepad[1] == -1);
+        CHECK(editor::describeControllers(def, none, true)[1] == "Player 2: no gamepad connected (pcsx-redux's own port setting)");
+    }
+    // Version 1: Play as before, whatever the settings ask.
+    {
+        editor::PlayInput in;
+        in.device[0] = PlayDevice::Mouse;
+        in.multitap = {true, true};
+        const editor::ControllerMap m = editor::mapControllers(in, 4, false);
+        CHECK(m.keyboard == 0 && m.gamepad[0] == 0 && m.gamepad[1] == -1 && m.mouse < 0 && !m.present[2]);
+        CHECK(editor::describeControllers(in, m, false) ==
+              (std::vector<std::string>{"Player 1: keyboard + gamepad 1", "Player 2: nothing (this pcsx-redux takes input for player 1 only)"}));
+        editor::HostFrame fr;
+        fr.keyboard = 0xffff & ~padbit::cross;
+        fr.gamepads = {uint16_t(0xffff & ~padbit::start), uint16_t(0xffff & ~padbit::circle)};
+        const editor::ShmInput s = editor::shmInput(in, m, fr);
+        CHECK(s.pads[0] == (0xffffu & ~padbit::cross & ~padbit::start) && s.pads[1] == 0xffff);
+        // The writer leaves everything past hostPads as redux put it, and sets hostInput.
+        std::vector<uint8_t> b = block(1, 60);
+        editor::writeShmInput(b.data(), b.size(), s);
+        bool untouched = true;
+        for (size_t i = shm::kMultitap; i < shm::kV2Size; ++i) untouched = untouched && b[i] == 0xab;
+        CHECK(untouched && u32(b, shm::kHostPads) == s.pads[0] && u32(b, shm::kHostPads + 4) == 0xffff && u32(b, shm::kHostInput) == 1);
+    }
+    // Player 1 a mouse, a tap on port 1: gamepads 1-3 go to players 2, 3 and 4, the keyboard to player 2;
+    // with 3 gamepads player 5's slot stays empty.
+    {
+        editor::PlayInput in;
+        in.device[0] = PlayDevice::Mouse;
+        in.multitap[0] = true;
+        const editor::ControllerMap m = editor::mapControllers(in, 3, true);
+        CHECK(m.mouse == 0 && m.gamepad[0] == -1 && m.keyboard == 1 && m.gamepad[1] == 0 && m.gamepad[2] == 1 && m.gamepad[3] == 2 &&
+              m.gamepad[4] == -1 && m.present[4] && !m.present[5]);
+        CHECK(editor::describeControllers(in, m, true) ==
+              (std::vector<std::string>{"Player 1: mouse (click the game to capture it)", "Player 2: keyboard + gamepad 1",
+                                        "Player 3: gamepad 2", "Player 4: gamepad 3", "Player 5: empty slot, no gamepad connected"}));
+        editor::HostFrame fr;
+        fr.gamepads = {0xffff, uint16_t(0xffff & ~padbit::square), uint16_t(0xffff & ~padbit::up)};
+        fr.mouseDX = 7;
+        fr.mouseDY = -3;
+        fr.mouseButtons = 1 | 4;  // bit 2 is not a mouse button
+        fr.mouseCaptured = true;
+        editor::ShmInput s = editor::shmInput(in, m, fr);
+        CHECK(s.device[0] == shm::kMouse && s.device[1] == shm::kDigital && s.multitap[0] == 1 && s.multitap[1] == 0);
+        CHECK(s.slots[0][1] == (0xffffu & ~padbit::square) && s.slots[0][2] == (0xffffu & ~padbit::up) && s.slots[0][3] == shm::kSlotEmpty &&
+              s.slots[1][1] == shm::kSlotEmpty && s.slots[0][0] == shm::kSlotEmpty);
+        CHECK(s.mouseDX[0] == 7 && s.mouseDY[0] == -3 && s.mouseButtons[0] == 1 && s.mouseDX[1] == 0 && s.pads[0] == 0xffff);
+        // Written into a version 2 header: at redux's offsets, the motion added to what redux has not taken.
+        std::vector<uint8_t> b = block(2, 132);
+        setI32(b, shm::kMouseDX, 5);
+        setI32(b, shm::kMouseDY, 0);
+        setI32(b, shm::kMouseDX + 4, 0);
+        setI32(b, shm::kMouseDY + 4, 0);
+        editor::writeShmInput(b.data(), b.size(), s);
+        editor::writeShmInput(b.data(), b.size(), s);
+        CHECK(int32_t(u32(b, shm::kMouseDX)) == 5 + 14 && int32_t(u32(b, shm::kMouseDY)) == -6 && u32(b, shm::kMouseDX + 4) == 0);
+        CHECK(u32(b, shm::kMouseButtons) == 1 && u32(b, shm::kMouseButtons + 4) == 0 && u32(b, shm::kDevice) == shm::kMouse &&
+              u32(b, shm::kDevice + 4) == shm::kDigital && u32(b, shm::kMultitap) == 1 && u32(b, shm::kMultitap + 4) == 0);
+        CHECK(u32(b, shm::kSlotPads + 4) == (0xffffu & ~padbit::square) && u32(b, shm::kSlotPads + 8) == (0xffffu & ~padbit::up) &&
+              u32(b, shm::kSlotPads + 12) == shm::kSlotEmpty && u32(b, shm::kSlotPads + 16 + 4) == shm::kSlotEmpty);
+        // Slot A's word is redux's to ignore: the writer leaves it.
+        CHECK(u32(b, shm::kSlotPads) == 0xabababab && u32(b, shm::kSlotPads + 16) == 0xabababab && u32(b, shm::kHostInput) == 1);
+        // Not captured: no motion, no buttons, the device still a mouse.
+        fr.mouseCaptured = false;
+        s = editor::shmInput(in, m, fr);
+        CHECK(s.mouseDX[0] == 0 && s.mouseDY[0] == 0 && s.mouseButtons[0] == 0 && s.device[0] == shm::kMouse);
+        editor::writeShmInput(b.data(), b.size(), s);
+        CHECK(int32_t(u32(b, shm::kMouseDX)) == 19 && u32(b, shm::kMouseButtons) == 0);
+    }
+    // hostDevice plugs a port's device in while something drives its player, every frame: player 2
+    // undriven is left to redux (0), and takes a pad the frame a second gamepad shows up.
+    {
+        editor::HostFrame fr;
+        fr.gamepads = {0xffff};
+        editor::ShmInput s = editor::shmInput(def, editor::mapControllers(def, 1, true), fr);
+        CHECK(s.device[0] == shm::kDigital && s.device[1] == 0 && s.pads[1] == 0xffff);
+        fr.gamepads = {0xffff, uint16_t(0xffff & ~padbit::cross)};
+        s = editor::shmInput(def, editor::mapControllers(def, 2, true), fr);
+        CHECK(s.device[1] == shm::kDigital && s.pads[1] == (0xffffu & ~padbit::cross));
+        // Player 1 a mouse, no gamepad: the keyboard drives player 2, so it is plugged in.
+        editor::PlayInput in;
+        in.device[0] = PlayDevice::Mouse;
+        fr.gamepads.clear();
+        s = editor::shmInput(in, editor::mapControllers(in, 0, true), fr);
+        CHECK(s.device[0] == shm::kMouse && s.device[1] == shm::kDigital);
+        // An analog pad with nothing driving it: redux's setting.
+        editor::PlayInput an;
+        an.device[1] = PlayDevice::Analog;
+        s = editor::shmInput(an, editor::mapControllers(an, 1, true), fr);
+        CHECK(s.device[1] == 0);
+        fr.gamepads = {0xffff, 0xffff};
+        s = editor::shmInput(an, editor::mapControllers(an, 2, true), fr);
+        CHECK(s.device[1] == shm::kAnalog);
+    }
+    // Both taps: players 3-8 after player 2, in player order; None players skipped; analog and
+    // None on the ports; the host mouse goes to player 2 when player 1 is not one.
+    {
+        editor::PlayInput in;
+        in.multitap = {true, true};
+        in.device[1] = PlayDevice::Mouse;
+        in.device[3] = PlayDevice::None;
+        in.device[0] = PlayDevice::Analog;
+        const editor::ControllerMap m = editor::mapControllers(in, 8, true);
+        CHECK(m.mouse == 1 && m.keyboard == 0 && m.gamepad[0] == 0 && m.gamepad[1] == -1 && m.gamepad[2] == 1 && m.gamepad[3] == -1 &&
+              m.gamepad[4] == 2 && m.gamepad[5] == 3 && m.gamepad[7] == 5 && !m.present[3]);
+        const std::vector<std::string> d = editor::describeControllers(in, m, true);
+        CHECK(d.size() == 7 && d[0] == "Player 1 (analog pad): keyboard + gamepad 1" && d[1] == "Player 2: mouse (click the game to capture it)" &&
+              d[3] == "Player 5: gamepad 3" && d[6] == "Player 8: gamepad 6");
+        editor::HostFrame fr;
+        fr.gamepads.assign(8, 0xffff);
+        const editor::ShmInput s = editor::shmInput(in, m, fr);
+        CHECK(s.device[0] == shm::kAnalog && s.device[1] == shm::kMouse && s.slots[0][2] == shm::kSlotEmpty && s.slots[0][1] == 0xffff &&
+              s.slots[1][3] == 0xffff && s.multitap[1] == 1);
+        // Both ports None: no device override, nothing driven.
+        editor::PlayInput off;
+        off.device[0] = off.device[1] = PlayDevice::None;
+        const editor::ControllerMap mo = editor::mapControllers(off, 2, true);
+        const editor::ShmInput so = editor::shmInput(off, mo, fr);
+        CHECK(mo.keyboard == -1 && mo.gamepad[0] == -1 && so.device[0] == 0 && so.device[1] == 0 && so.pads[0] == 0xffff);
+        CHECK(editor::describeControllers(off, mo, true) ==
+              (std::vector<std::string>{"Player 1: none (pcsx-redux's own port setting)", "Player 2: none (pcsx-redux's own port setting)"}));
+        // The mouse player's line follows the capture.
+        CHECK(editor::describeControllers(in, m, true, true)[1] == "Player 2: mouse (captured, Esc releases it)");
+        // Two mice: the host mouse is player 1's; player 2 is left to redux.
+        editor::PlayInput mice;
+        mice.device[0] = mice.device[1] = PlayDevice::Mouse;
+        const editor::ControllerMap mm = editor::mapControllers(mice, 1, true);
+        CHECK(mm.mouse == 0 && mm.keyboard == -1 && editor::describeControllers(mice, mm, true)[1] ==
+                                                         "Player 2: no mouse, the host mouse is player 1's (pcsx-redux's own port setting)");
+        const editor::ShmInput sm = editor::shmInput(mice, mm, fr);
+        CHECK(sm.device[0] == shm::kMouse && sm.device[1] == 0);
+    }
+}
+
 void testLinkPlay() {
     namespace fs = std::filesystem;
     std::error_code ec;
@@ -1748,6 +1940,30 @@ void testLinkPlay() {
         CHECK(back.players == n && back.relay == bool(n % 2));
     }
     t.relay = false;
+    // What Play plugs in: every device and both taps round-trip; a missing
+    // key, a short list or an unknown name reads as pad, no tap.
+    t.input.device = {editor::PlayDevice::Mouse, editor::PlayDevice::Analog, editor::PlayDevice::None, editor::PlayDevice::Pad,
+                      editor::PlayDevice::None, editor::PlayDevice::Pad, editor::PlayDevice::Pad, editor::PlayDevice::None};
+    t.input.multitap = {true, false};
+    {
+        const editor::PlayTools back = editor::savePlayTools(cfg, t) ? editor::loadPlayTools(cfg) : editor::PlayTools{};
+        CHECK(back.input == t.input && back.players == t.players);
+        std::ifstream in(cfg);
+        const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        CHECK(text.find("play_devices=mouse,analog,none,pad,none,pad,pad,none\n") != std::string::npos &&
+              text.find("multitap=1,0\n") != std::string::npos);
+        t.input.multitap = {false, true};
+        CHECK(editor::savePlayTools(cfg, t) && editor::loadPlayTools(cfg).input.multitap == (std::array<bool, 2>{false, true}));
+    }
+    { std::ofstream(cfg, std::ios::trunc) << "play_devices=mouse,gun\nmultitap=1\n"; }
+    {
+        const editor::PlayInput in = editor::loadPlayTools(cfg).input;
+        CHECK(in.device[0] == editor::PlayDevice::Mouse && in.device[1] == editor::PlayDevice::Pad && in.device[7] == editor::PlayDevice::Pad &&
+              in.multitap[0] && !in.multitap[1]);
+    }
+    { std::ofstream(cfg, std::ios::trunc) << "redux=/r\n"; }
+    CHECK(editor::loadPlayTools(cfg).input == editor::PlayInput{});
+    t.input = {};
     { std::ofstream(cfg, std::ios::trunc) << "redux=/r\nplayers=3\n"; }
     CHECK(editor::loadPlayTools(cfg).players == 3 && !editor::loadPlayTools(cfg).relay);
     { std::ofstream(cfg, std::ios::trunc) << "redux=/r\nplayers=40\n"; }
@@ -2743,7 +2959,12 @@ void testProjectTemplates() {
 // event, every error located, and the file format byte-stable.
 splash::Block blk(const char* op, const char* field = "", std::vector<splash::Block> args = {},
                   std::vector<std::vector<splash::Block>> bodies = {}) {
-    return {op, field, std::move(args), std::move(bodies)};
+    return {op, field, std::move(args), std::move(bodies), {}};
+}
+// The block with its player set ("3", or "" for the default).
+splash::Block bplayer(splash::Block b, const char* player) {
+    b.player = player;
+    return b;
 }
 splash::Block bnum(const char* v) { return blk("number", v); }
 splash::Block bvar(const char* v) { return blk("var", v); }
@@ -3098,7 +3319,7 @@ void testBlocks() {
     CHECK(parseError("[]") == "p.blocks: not a block script");
     CHECK(parseError("{\"format\":\"splashedit-ng/scene\",\"version\":1}") == "p.blocks: not a splashedit block script");
     CHECK(parseError("{\"format\":\"splashedit-blocks\"}") == "p.blocks: missing or invalid \"version\"");
-    CHECK(parseError("{\"format\":\"splashedit-blocks\",\"version\":2}") == "p.blocks: format version 2, this build reads up to 1");
+    CHECK(parseError("{\"format\":\"splashedit-blocks\",\"version\":3}") == "p.blocks: format version 3, this build reads up to 2");
     CHECK(parseError("{\"format\":\"splashedit-blocks\",\"version\":1,\"stack\":[]}") == "p.blocks: file: unknown key \"stack\"");
     CHECK(parseError("{\"format\":\"splashedit-blocks\",\"version\":1,\"variables\":[{\"name\":\"a\",\"value\":1}]}") ==
           "p.blocks: variables[0].value: not a string");
@@ -3123,7 +3344,7 @@ void testBlocks() {
     }
     CHECK(ops.size() == splash::blockCatalogue().size() && hats == 11 && hatsFirst && labelsOk);
     CHECK(splash::findBlockSpec("move_by") && splash::findBlockSpec("move_by")->args == 3 && !splash::findBlockSpec("fly"));
-    CHECK(splash::blockButtons().size() == 16 && splash::blockButtons().front() == "CROSS");
+    CHECK(splash::blockButtons().size() == 18 && splash::blockButtons().front() == "CROSS" && splash::blockButtons().back() == "MOUSE_RIGHT");
 
     // Every script generated above compiles for the PS1.
     int compiled = 0;
@@ -3502,14 +3723,233 @@ void testBlocksNewBlock() {
                                                                    eb::newBlock("repeat"), eb::newBlock("log")}}));
     CHECK(g.errors.empty() && g.lua.find("Debug.Log(\"\")") != std::string::npos);
     // The palette's categories, every block in one of them.
-    CHECK(splash::blockCategories().size() == 10 && splash::blockCategories().front() == "Events" &&
-          splash::blockCategories()[3] == "Sound and scenes" && splash::blockCategories()[8] == "Debug" &&
+    CHECK(splash::blockCategories().size() == 11 && splash::blockCategories().front() == "Events" &&
+          splash::blockCategories()[3] == "Sound and scenes" && splash::blockCategories()[8] == "Controllers" &&
+          splash::blockCategories()[9] == "Debug" &&
           splash::blockCategories().back() == "Text");
     bool cats = true;
     for (const splash::BlockSpec& sp : splash::blockCatalogue())
         cats = cats && std::find(splash::blockCategories().begin(), splash::blockCategories().end(), sp.category) != splash::blockCategories().end() &&
                ((sp.kind == splash::BlockKind::Hat) == (sp.category == "Events"));
     CHECK(cats && splash::findBlockSpec("hide")->category == "Objects" && splash::findBlockSpec("join")->category == "Operators");
+}
+
+// Controller blocks: a player per block (1 by default), a button hat's
+// player filter through the callback's third argument, mouse buttons in a
+// chain of their own that tests the device, the player in the file (which
+// is then version 2), and the editor's player well and its edits.
+void testBlocksPlayers() {
+    namespace eb = editor::blk;
+    using splash::Block;
+    std::vector<std::string> generated;
+    auto lua = [&](const splash::BlockScript& sc) {
+        splash::LuaGen g = splash::blocksToLua(sc);
+        for (const std::string& e : g.errors) std::fprintf(stderr, "  blocks: %s\n", e.c_str());
+        if (!g.errors.empty()) return std::string("<errors>");
+        generated.push_back(g.lua);
+        return g.lua;
+    };
+    auto error = [&](const splash::BlockScript& sc) {
+        splash::LuaGen g = splash::blocksToLua(sc);
+        return g.errors.size() == 1 ? g.errors[0] : "<" + std::to_string(g.errors.size()) + " errors>";
+    };
+    auto expr = [&](Block e) {
+        std::string out = lua(blockScript({{"x", "0"}}, {{blk("on_create"), blk("set_var", "x", {std::move(e)})}}));
+        const std::string head = "local x = 0\n\nfunction onCreate(self)\n    x = ";
+        if (out.rfind(head, 0) != 0 || out.size() < head.size() + 5) return out;
+        return out.substr(head.size(), out.size() - head.size() - 5);
+    };
+    auto oneExpr = [&](Block e) { return error(blockScript({{"x", "0"}}, {{blk("on_create"), blk("set_var", "x", {std::move(e)})}})); };
+
+    // Each controller block, at player 1 and at another.
+    // Player 1 holding a button: the Lua it made before players.
+    CHECK(expr(blk("button_held", "CROSS")) == "Input.IsHeldPlayer1(Input.CROSS)");
+    CHECK(expr(bplayer(blk("button_held", "TRIANGLE"), "3")) == "Input.IsHeld(3, Input.TRIANGLE)");
+    CHECK(expr(blk("button_pressed", "START")) == "Input.IsPressed(1, Input.START)");
+    // A mouse button shares R1's or L1's bit: the block is true only when the player has a mouse,
+    // also for player 1 holding it (no IsHeldPlayer1 there).
+    CHECK(expr(bplayer(blk("button_pressed", "MOUSE_RIGHT"), "8")) ==
+          "(Input.GetDevice(8) == \"mouse\" and Input.IsPressed(8, Input.MOUSE_RIGHT))");
+    CHECK(expr(bplayer(blk("button_released", "MOUSE_LEFT"), "2")) ==
+          "(Input.GetDevice(2) == \"mouse\" and Input.IsReleased(2, Input.MOUSE_LEFT))");
+    CHECK(expr(blk("button_held", "MOUSE_LEFT")) == "(Input.GetDevice(1) == \"mouse\" and Input.IsHeld(1, Input.MOUSE_LEFT))");
+    CHECK(expr(bplayer(blk("button_held", "MOUSE_RIGHT"), "5")) ==
+          "(Input.GetDevice(5) == \"mouse\" and Input.IsHeld(5, Input.MOUSE_RIGHT))");
+    CHECK(expr(blk("not", "", {blk("button_held", "MOUSE_LEFT")})) ==
+          "not (Input.GetDevice(1) == \"mouse\" and Input.IsHeld(1, Input.MOUSE_LEFT))");
+    // R1 and L1 themselves stay plain.
+    CHECK(expr(bplayer(blk("button_pressed", "R1"), "2")) == "Input.IsPressed(2, Input.R1)" &&
+          expr(blk("button_held", "L1")) == "Input.IsHeldPlayer1(Input.L1)");
+    CHECK(expr(blk("mouse_x")) == "(Input.GetMouse(1))");
+    CHECK(expr(bplayer(blk("mouse_y"), "4")) == "select(2, Input.GetMouse(4))");
+    CHECK(expr(blk("stick", "left x")) == "(Input.GetAnalog(1, 0))");
+    CHECK(expr(blk("stick", "left y")) == "select(2, Input.GetAnalog(1, 0))");
+    CHECK(expr(bplayer(blk("stick", "right x"), "2")) == "(Input.GetAnalog(2, 1))");
+    CHECK(expr(bplayer(blk("stick", "right y"), "5")) == "select(2, Input.GetAnalog(5, 1))");
+    CHECK(expr(blk("device_is", "mouse")) == "Input.GetDevice(1) == \"mouse\"");
+    CHECK(expr(bplayer(blk("device_is", "none"), "7")) == "Input.GetDevice(7) == \"none\"");
+    // A comparison: parenthesised under not.
+    CHECK(expr(blk("not", "", {blk("device_is", "analog")})) == "not (Input.GetDevice(1) == \"analog\")");
+    CHECK(expr(blk("add", "", {blk("mouse_x"), blk("stick", "left y")})) == "(Input.GetMouse(1)) + select(2, Input.GetAnalog(1, 0))");
+    // What it refuses.
+    CHECK(oneExpr(bplayer(blk("button_held", "CROSS"), "9")) ==
+          "stack 1, block 2 (set_var), input 1 (button_held): player \"9\" is not 1 to 8");
+    CHECK(oneExpr(bplayer(blk("mouse_x"), "0")) == "stack 1, block 2 (set_var), input 1 (mouse_x): player \"0\" is not 1 to 8");
+    CHECK(oneExpr(blk("device_is", "gun")) == "stack 1, block 2 (set_var), input 1 (device_is): unknown device \"gun\"");
+    CHECK(oneExpr(blk("stick", "")) == "stack 1, block 2 (set_var), input 1 (stick): no stick axis chosen");
+    CHECK(oneExpr(bplayer(blk("frame_count"), "2")) ==
+          "stack 1, block 2 (set_var), input 1 (frame_count): has a player, but the block takes none");
+    CHECK(error(blockScript({}, {{bplayer(blk("on_create"), "2"), blk("log", "", {blk("text", "a")})}})) ==
+          "stack 1, block 1 (on_create): has a player, but the block takes none");
+    CHECK(error(blockScript({}, {{bplayer(blk("on_button_press", "CROSS"), "any"), blk("log", "", {blk("text", "a")})}})) ==
+          "stack 1, block 1 (on_button_press): player \"any\" is not 1 to 8");
+
+    // Hats: without a player or a mouse button, the Lua it always made.
+    auto log = [](const char* t) { return blk("log", "", {blk("text", t)}); };
+    CHECK(lua(blockScript({}, {{blk("on_button_press", "CROSS"), log("x")}})) ==
+          "function onButtonPress(self, button)\n    if button == Input.CROSS then\n        Debug.Log(\"x\")\n    end\nend\n");
+    // A player filter names the third argument and tests it.
+    CHECK(lua(blockScript({}, {{bplayer(blk("on_button_press", "CROSS"), "2"), log("p2")}})) ==
+          "function onButtonPress(self, button, byPlayer)\n    if button == Input.CROSS then\n        if byPlayer == 2 then\n"
+          "            Debug.Log(\"p2\")\n        end\n    end\nend\n");
+    // Any player and player 2 in one arm, in stack order; a mouse button in its own chain,
+    // which tests the device (MOUSE_LEFT is R1's bit), after the pad's.
+    CHECK(lua(blockScript({}, {{blk("on_button_release", "MOUSE_LEFT"), log("click")},
+                               {blk("on_button_release", "CROSS"), log("any")},
+                               {bplayer(blk("on_button_release", "MOUSE_RIGHT"), "6"), log("right6")},
+                               {bplayer(blk("on_button_release", "CROSS"), "2"), log("p2")},
+                               {blk("on_button_release", "R1"), log("r1")}})) ==
+          "function onButtonRelease(self, button, byPlayer)\n"
+          "    if button == Input.CROSS then\n        Debug.Log(\"any\")\n\n        if byPlayer == 2 then\n"
+          "            Debug.Log(\"p2\")\n        end\n"
+          "    elseif button == Input.R1 then\n        Debug.Log(\"r1\")\n    end\n"
+          "    if button == Input.MOUSE_LEFT and Input.GetDevice(byPlayer) == \"mouse\" then\n        Debug.Log(\"click\")\n"
+          "    elseif button == Input.MOUSE_RIGHT and Input.GetDevice(byPlayer) == \"mouse\" then\n"
+          "        if byPlayer == 6 then\n            Debug.Log(\"right6\")\n        end\n    end\nend\n");
+    // Only a mouse button: its chain alone.
+    CHECK(lua(blockScript({}, {{blk("on_button_press", "MOUSE_LEFT"), log("m")}})) ==
+          "function onButtonPress(self, button, byPlayer)\n"
+          "    if button == Input.MOUSE_LEFT and Input.GetDevice(byPlayer) == \"mouse\" then\n        Debug.Log(\"m\")\n    end\nend\n");
+    // A filtered stack that waits: its task inside the test.
+    const std::string waits = lua(blockScript({}, {{bplayer(blk("on_button_press", "CIRCLE"), "3"), blk("wait", "", {bnum("1")}), log("w")}}));
+    CHECK(waits.find("function onButtonPress(self, button, byPlayer)\n    if button == Input.CIRCLE then\n        if byPlayer == 3 then\n"
+                     "            startTask(\"onButtonPress_CIRCLE\", function()\n") != std::string::npos &&
+          waits.find("            end)\n        end\n    end\nend\n") != std::string::npos &&
+          waits.find("resumeTask(\"onButtonPress_CIRCLE\", dt)") != std::string::npos);
+    CHECK(splash::blockNameError("byPlayer") == "\"byPlayer\" is reserved");
+
+    // The file: version 2 with a player, 1 without; parse(save) gives it back, byte-stable.
+    const splash::BlockScript withP = blockScript({}, {{bplayer(blk("on_button_press", "CROSS"), "4"),
+                                                        blk("if", "", {bplayer(blk("button_held", "MOUSE_LEFT"), "2")}, {{log("y")}})}});
+    const std::string saved = splash::saveBlocks(withP);
+    CHECK(saved.find("\"version\": 2,") != std::string::npos && saved.find("\"player\": \"4\"") != std::string::npos &&
+          saved.find("\"player\": \"2\"") != std::string::npos);
+    CHECK(splash::parseBlocks(saved, "p.blocks") == withP && splash::saveBlocks(splash::parseBlocks(saved, "p.blocks")) == saved);
+    const splash::BlockScript noP = blockScript({}, {{blk("on_button_press", "MOUSE_LEFT"), blk("if", "", {blk("device_is", "mouse")}, {{}})}});
+    const std::string saved1 = splash::saveBlocks(noP);
+    CHECK(saved1.find("\"version\": 1,") != std::string::npos && saved1.find("player") == std::string::npos &&
+          splash::parseBlocks(saved1, "p.blocks") == noP);
+    bool threw = false;
+    try {
+        splash::parseBlocks("{\"format\":\"splashedit-blocks\",\"version\":2,\"stacks\":[{\"blocks\":[{\"op\":\"mouse_x\",\"player\":3}]}]}",
+                            "p.blocks");
+    } catch (const std::exception& e) {
+        threw = std::string(e.what()) == "p.blocks: stacks[0].blocks[0].player: not a string";
+    }
+    CHECK(threw);
+
+    // Names, lists, defaults.
+    CHECK(splash::blockButtonLabel("MOUSE_LEFT") == "mouse left" && splash::blockButtonLabel("MOUSE_RIGHT") == "mouse right" &&
+          splash::blockButtonLabel("L1") == "L1");
+    CHECK(splash::blockDevices().size() == 4 && splash::blockDevices().front() == "pad" && splash::blockSticks().size() == 4 &&
+          splash::blockSticks().back() == "right y");
+    CHECK(splash::blockTakesPlayer(*splash::findBlockSpec("on_button_press")) && splash::blockTakesPlayer(*splash::findBlockSpec("mouse_y")) &&
+          !splash::blockTakesPlayer(*splash::findBlockSpec("on_create")) && !splash::blockTakesPlayer(*splash::findBlockSpec("hide")));
+    int controllers = 0;
+    for (const splash::BlockSpec& sp : splash::blockCatalogue()) controllers += sp.category == "Controllers";
+    CHECK(controllers == 6 && splash::findBlockSpec("button_held")->category == "Input" &&
+          splash::findBlockSpec("device_is")->field == splash::BlockField::Device && splash::findBlockSpec("stick")->field == splash::BlockField::Stick);
+    CHECK(eb::newBlock("device_is").field == "mouse" && eb::newBlock("stick").field == "left x" && eb::newBlock("mouse_x").field.empty() &&
+          eb::newBlock("button_pressed").field == "CROSS" && eb::newBlock("button_held").player.empty());
+
+    // The player's well: text, choices, and setPlayer keeping the default as nothing.
+    const splash::BlockSpec* hat = splash::findBlockSpec("on_button_press");
+    const splash::BlockSpec* held = splash::findBlockSpec("button_held");
+    CHECK(eb::playerText(blk("on_button_press", "CROSS"), hat) == "anyone" &&
+          eb::playerText(bplayer(blk("on_button_press", "CROSS"), "3"), hat) == "player 3" &&
+          eb::playerText(blk("button_held", "CROSS"), held) == "1" && eb::playerText(bplayer(blk("button_held", "CROSS"), "6"), held) == "6");
+    CHECK(eb::playerChoices(*hat).size() == 9 && eb::playerChoices(*hat).front() == "any" && eb::playerChoices(*held).size() == 8 &&
+          eb::playerChoices(*held).front() == "1" && eb::playerChoices(*held).back() == "8");
+    const splash::BlockScript one = blockScript({}, {{blk("on_button_press", "CROSS"), blk("if", "", {blk("button_held", "CROSS")}, {{}})}});
+    const eb::Path hatP = eb::parsePath("s0.b0"), heldP = eb::parsePath("s0.b1.a0"), ifP = eb::parsePath("s0.b1");
+    auto playerAt = [&](const std::optional<splash::BlockScript>& sc, const eb::Path& p) {
+        return sc ? eb::blockAt(*sc, p)->player : std::string("<none>");
+    };
+    CHECK(playerAt(eb::setPlayer(one, hatP, "4"), hatP) == "4" && playerAt(eb::setPlayer(*eb::setPlayer(one, hatP, "4"), hatP, "any"), hatP) == "");
+    CHECK(playerAt(eb::setPlayer(one, heldP, "8"), heldP) == "8" && playerAt(eb::setPlayer(*eb::setPlayer(one, heldP, "8"), heldP, "1"), heldP) == "");
+    CHECK(!eb::setPlayer(one, heldP, "9") && !eb::setPlayer(one, heldP, "any") && !eb::setPlayer(one, hatP, "0") && !eb::setPlayer(one, ifP, "2"));
+
+    // Layout: the well is the block's, the pointer on it hits it, and "%p?" puts the "?" right after it.
+    // blockScript puts every stack at 0, 0: the hat goes below, off the boolean.
+    splash::BlockScript loose = blockScript({}, {{bplayer(blk("button_held", "MOUSE_LEFT"), "2")}, {blk("on_button_press", "CROSS")}});
+    loose.stacks[1].y = 200;
+    const eb::Layout l = eb::layout(loose, blkWidth);
+    const eb::BlockBox* hb = l.find(eb::parsePath("s0.b0"));
+    const eb::BlockBox* tb = l.find(eb::parsePath("s1.b0"));
+    CHECK(hb && hb->hasPlayer && hb->hasField && blkInside(hb->player, hb->rect) && hb->field.x1 < hb->player.x0);
+    CHECK(tb && tb->hasPlayer && blkInside(tb->player, tb->rect) && tb->field.x1 < tb->player.x0);
+    bool glued = false, fieldText = false;
+    if (hb)
+        for (size_t i = 0; i + 1 < hb->pieces.size(); i++) {
+            if (hb->pieces[i].player) glued = hb->pieces[i].text == "2" && hb->pieces[i + 1].text == "?" &&
+                                               hb->pieces[i + 1].rect.x0 == hb->pieces[i].rect.x1;
+            if (hb->pieces[i].kind == eb::Piece::Field && !hb->pieces[i].player) fieldText = hb->pieces[i].text == "mouse left";
+        }
+    CHECK(glued && fieldText);
+    if (hb) {
+        const eb::Hit onPlayer = eb::hitTest(l, (hb->player.x0 + hb->player.x1) * 0.5f, (hb->player.y0 + hb->player.y1) * 0.5f);
+        const eb::Hit onField = eb::hitTest(l, (hb->field.x0 + hb->field.x1) * 0.5f, (hb->field.y0 + hb->field.y1) * 0.5f);
+        CHECK(onPlayer.kind == eb::Hit::Field);
+        CHECK(onPlayer.player && onPlayer.path == eb::parsePath("s0.b0"));
+        CHECK(onField.kind == eb::Hit::Field);
+        CHECK(!onField.player && onField.path == eb::parsePath("s0.b0"));
+    }
+
+    // Every block script in the tree (fixtures, templates) reads back as it was saved,
+    // and one without a player stays version 1.
+    int files = 0, same = 0, v1 = 0;
+    std::error_code ec;
+    namespace fs = std::filesystem;
+    for (const fs::path dir : {fs::path(SPLASHEDIT_SOURCE_DIR) / "tests" / "blocks", fs::path(SPLASHEDIT_SOURCE_DIR) / "templates"})
+        for (auto it = fs::recursive_directory_iterator(dir, ec); it != fs::recursive_directory_iterator(); it.increment(ec)) {
+            if (it->path().extension() != ".blocks" || it->path().filename() == "bad.blocks") continue;
+            std::ifstream in(it->path(), std::ios::binary);
+            const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+            files++;
+            try {
+                const splash::BlockScript sc = splash::parseBlocks(text, it->path().string());
+                const std::string again = splash::saveBlocks(sc);
+                same += splash::parseBlocks(again, "again.blocks") == sc && splash::saveBlocks(splash::parseBlocks(again, "again.blocks")) == again;
+                bool players = false;
+                for (const splash::BlockStack& st : sc.stacks)
+                    for (const Block& b : st.blocks) players = players || !b.player.empty();
+                v1 += players || again.find("\"version\": 1,") != std::string::npos;
+            } catch (const std::exception& e) {
+                std::fprintf(stderr, "  blocks: %s\n", e.what());
+            }
+        }
+    CHECK(files >= 8 && same == files && v1 == files);
+
+    int compiled = 0;
+    for (const std::string& src : generated) {
+        try {
+            splash::compileLua(src, "blocks.lua");
+            compiled++;
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "  blocks: does not compile: %s\n%s", e.what(), src.c_str());
+        }
+    }
+    CHECK(generated.size() >= 20 && compiled == int(generated.size()));
 }
 
 void testSeqRenameBlocks() {
@@ -15482,6 +15922,7 @@ int main(int argc, char** argv) {
     testPlay();
     testPlayOverlays();
     testLinkPlay();
+    testHostInput();
     testRelayFrames();
     testRelayProtobuf();
     testRelayRooms();
@@ -15508,6 +15949,7 @@ int main(int argc, char** argv) {
     testBlocksSnap();
     testBlocksHistory();
     testBlocksNewBlock();
+    testBlocksPlayers();
     testBlocksVariables();
     testSeqRenameBlocks();
     testPlaceModel();

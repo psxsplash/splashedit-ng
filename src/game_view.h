@@ -8,6 +8,8 @@
 #include <cstdint>
 #include <vector>
 
+#include "editor/host_input.hh"
+
 class GameView {
 public:
     GameView() = default;
@@ -29,6 +31,14 @@ public:
 
     // Pad buttons for port 0 and 1, in the controller's active-low layout.
     void setPads(uint16_t pad0, uint16_t pad1);
+    // Whether this redux's block has the version 2 input fields (multitaps,
+    // device types, mice); false until attached.
+    bool inputV2() const { return editor::shmHasV2(m_mem, m_size); }
+    // Every input word for the frame (editor::writeShmInput: the version 2
+    // ones only when inputV2()).
+    void setInput(const editor::ShmInput& in) {
+        if (m_mem) editor::writeShmInput(m_mem, m_size, in);
+    }
 
 private:
     uint8_t* m_mem = nullptr;

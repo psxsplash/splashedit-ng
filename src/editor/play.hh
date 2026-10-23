@@ -3,6 +3,7 @@
 #pragma once
 
 #include <cstddef>
+#include <array>
 #include <cstdint>
 #include <filesystem>
 #include <optional>
@@ -21,6 +22,20 @@ namespace editor {
 // or both (see overlayEngine). The disc never gets them. bootLogo off makes
 // them boot the build without psxsplash's boot logo (the -nologo one beside
 // it, see engineFor); the disc follows the project's own disc setting.
+// What Play plugs in for each player, and whether it plugs a multitap into
+// port 1 or 2. Only Play uses it: the exported game reads whatever is in
+// the console's ports. Players 1 and 2 are ports 1 and 2; 3 to 5 port 1's
+// multitap slots B to D, 6 to 8 port 2's, which hold a pad or nothing.
+enum class PlayDevice { Pad, Analog, Mouse, None };
+inline constexpr int kPlayInputPlayers = 8;
+struct PlayInput {
+    std::array<PlayDevice, kPlayInputPlayers> device{};  // all Pad
+    std::array<bool, 2> multitap{};
+    bool operator==(const PlayInput&) const = default;
+};
+// "pad", "analog", "mouse", "none".
+const char* playDeviceName(PlayDevice d);
+
 struct PlayTools {
     std::filesystem::path redux, psxsplash, bios, disc;
     std::string port;  // Run on hardware: a serial port, or tcp:HOST:PORT
@@ -31,6 +46,7 @@ struct PlayTools {
     // 3 or more always go through the editor's relay (editor/relay.hh).
     int players = 1;
     bool relay = false;
+    PlayInput input;
 };
 inline constexpr int kMaxPlayers = 10;
 // Whether a Play with these tools runs its consoles through the relay.
@@ -38,8 +54,10 @@ inline bool usesRelay(const PlayTools& t) { return t.players >= 3 || (t.players 
 
 // key=value lines: redux=, psxsplash=, bios=, disc=, port=, overlay_perf=,
 // overlay_rooms=, boot_logo= (1 or 0), players= (1 to kMaxPlayers, clamped),
-// relay= (1 or 0). A missing file or key reads as empty or off, but boot_logo
-// as on and players as 1 (also for a value that is not a number).
+// relay= (1 or 0), play_devices= (8 comma-separated playDeviceName()s),
+// multitap= (two 1s or 0s, "1,0"). A missing file or key reads as empty or
+// off, but boot_logo as on and players as 1 (also for a value that is not
+// a number); a play_devices entry that is missing or unknown reads as pad.
 PlayTools loadPlayTools(const std::filesystem::path& file);
 bool savePlayTools(const std::filesystem::path& file, const PlayTools& tools);
 

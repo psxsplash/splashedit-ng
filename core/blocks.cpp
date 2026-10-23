@@ -29,10 +29,10 @@ const std::vector<BlockSpec> kCatalogue = {
      "Runs the blocks under it when the player collides with this object."},
     {"on_interact", K::Hat, "when the player interacts", 0, 0, F::None, "Events",
      "Runs the blocks under it when the player interacts with this object."},
-    {"on_button_press", K::Hat, "when %f is pressed", 0, 0, F::Button, "Events",
-     "Runs the blocks under it when the chosen button is pressed."},
-    {"on_button_release", K::Hat, "when %f is released", 0, 0, F::Button, "Events",
-     "Runs the blocks under it when the chosen button is let go."},
+    {"on_button_press", K::Hat, "when %f is pressed by %p", 0, 0, F::Button, "Events",
+     "Runs the blocks under it when the chosen button is pressed, by any player or only the chosen one (1 to 8)."},
+    {"on_button_release", K::Hat, "when %f is released by %p", 0, 0, F::Button, "Events",
+     "Runs the blocks under it when the chosen button is let go, by any player or only the chosen one (1 to 8)."},
     {"on_enable", K::Hat, "when enabled", 0, 0, F::None, "Events",
      "Runs the blocks under it when this object is switched on."},
     {"on_disable", K::Hat, "when disabled", 0, 0, F::None, "Events",
@@ -139,8 +139,20 @@ const std::vector<BlockSpec> kCatalogue = {
      "True when either condition is true."},
     {"not", K::Boolean, "not %1", 1, 0, F::None, "Operators",
      "True when the condition is false."},
-    {"button_held", K::Boolean, "%f held?", 0, 0, F::Button, "Input",
-     "True while player 1 holds the chosen button down."},
+    {"button_held", K::Boolean, "%f held by player %p?", 0, 0, F::Button, "Input",
+     "True while the player (1 and 2 are ports 1 and 2, 3 to 8 multitap slots) holds the chosen button down."},
+    {"button_pressed", K::Boolean, "%f pressed by player %p?", 0, 0, F::Button, "Controllers",
+     "True only on the frame the player presses the chosen button."},
+    {"button_released", K::Boolean, "%f released by player %p?", 0, 0, F::Button, "Controllers",
+     "True only on the frame the player lets go of the chosen button."},
+    {"mouse_x", K::Reporter, "mouse x motion of player %p", 0, 0, F::None, "Controllers",
+     "How far the player's mouse moved right since the last frame, in the mouse's own counts (left is negative); 0 without a mouse."},
+    {"mouse_y", K::Reporter, "mouse y motion of player %p", 0, 0, F::None, "Controllers",
+     "How far the player's mouse moved down since the last frame, in the mouse's own counts (up is negative); 0 without a mouse."},
+    {"stick", K::Reporter, "stick %f of player %p", 0, 0, F::Stick, "Controllers",
+     "Where the player's analog stick points on that axis, about -1 to 1; a digital pad's D-pad stands in for the left stick."},
+    {"device_is", K::Boolean, "device of player %p is %f?", 0, 0, F::Device, "Controllers",
+     "True when the player has that kind of controller plugged in: a digital pad, an analog pad, a mouse, or none."},
     {"frame_count", K::Reporter, "frame count", 0, 0, F::None, "Debug",
      "How many frames the game has counted so far."},
     {"my_name", K::Reporter, "my name", 0, 0, F::None, "Objects",
@@ -162,11 +174,17 @@ const std::vector<BlockSpec> kCatalogue = {
 };
 
 const std::vector<std::string_view> kCategories = {"Events", "Control", "Objects", "Sound and scenes", "Paths",
-                                                   "Variables", "Operators", "Input", "Debug", "Text"};
+                                                   "Variables", "Operators", "Input", "Controllers", "Debug",
+                                                   "Text"};
 
 const std::vector<std::string_view> kButtons = {"CROSS", "CIRCLE", "SQUARE", "TRIANGLE", "L1", "R1",
                                                 "L2",    "R2",     "START",  "SELECT",   "UP", "DOWN",
-                                                "LEFT",  "RIGHT",  "L3",     "R3"};
+                                                "LEFT",  "RIGHT",  "L3",     "R3",       "MOUSE_LEFT", "MOUSE_RIGHT"};
+// The pad's buttons come first in kButtons; these share R1's and L1's bits.
+constexpr size_t kPadButtons = 16;
+
+const std::vector<std::string_view> kDevices = {"pad", "analog", "mouse", "none"};
+const std::vector<std::string_view> kSticks = {"left x", "left y", "right x", "right y"};
 
 struct Hat {
     std::string_view op, name, params;
@@ -191,7 +209,7 @@ const std::set<std::string, std::less<>> kReserved = {
     "and", "break", "do", "else", "elseif", "end", "false", "for", "function", "goto", "if", "in", "local", "nil",
     "not", "or", "repeat", "return", "then", "true", "until", "while",
     // event parameters
-    "self", "dt", "index", "button",
+    "self", "dt", "index", "button", "byPlayer",
     // psxsplash API tables
     "Actor", "Agent", "Animation", "Audio", "Camera", "Controls", "Convert", "Cutscene", "Debug", "Entity",
     "FixedPoint", "Input", "Interact", "Light", "MemCard", "Net", "Persist", "Player", "PSXMath", "Random", "Scene",
@@ -203,6 +221,9 @@ const std::set<std::string, std::less<>> kReserved = {
     "onDisable", "onSceneCreationStart", "onSceneCreationEnd", "onTriggerEnter", "onTriggerExit",
     // helpers the generated Lua defines for wait blocks
     "tasks", "wait", "startTask", "resumeTask"};
+
+// Version 2 added a block's "player".
+constexpr int64_t kFormatVersion = 2;
 
 [[noreturn]] void fail(const std::string& path, const std::string& what) { throw std::runtime_error(path + ": " + what); }
 
@@ -228,10 +249,11 @@ std::string stringAt(const json& j, const char* key, const std::string& path, co
 
 Block readBlock(const json& j, const std::string& path, const std::string& at) {
     if (!j.is_object()) fail(path, at + ": not an object");
-    onlyKeys(j, {"op", "field", "args", "bodies"}, path, at);
+    onlyKeys(j, {"op", "field", "player", "args", "bodies"}, path, at);
     Block b;
     if (j.contains("op")) b.op = stringAt(j, "op", path, at);
     if (j.contains("field")) b.field = stringAt(j, "field", path, at);
+    if (j.contains("player")) b.player = stringAt(j, "player", path, at);
     if (j.contains("args")) {
         const json& a = arrayAt(j, "args", path, at);
         for (size_t i = 0; i < a.size(); i++) b.args.push_back(readBlock(a[i], path, at + ".args[" + std::to_string(i) + "]"));
@@ -264,6 +286,7 @@ ojson blockJson(const Block& b) {
     ojson o = ojson::object();
     o["op"] = b.op;
     if (!b.field.empty()) o["field"] = b.field;
+    if (!b.player.empty()) o["player"] = b.player;
     if (!b.args.empty()) {
         ojson a = ojson::array();
         for (const Block& x : b.args) a.push_back(blockJson(x));
@@ -415,6 +438,7 @@ struct Gen {
             error(at, "a reporter block cannot be a statement");
             return nullptr;
         }
+        if (!b.player.empty() && !blockTakesPlayer(*s)) error(at, "has a player, but the block takes none");
         if (b.args.size() > size_t(s->args)) error(at, "too many inputs");
         if (b.bodies.size() > size_t(s->bodies)) error(at, "too many bodies");
         return s;
@@ -446,6 +470,14 @@ struct Gen {
             error(at, "unknown button \"" + b.field + "\"");
         else return "Input." + b.field;
         return "nil";
+    }
+
+    // The block's player as a Lua number: empty is player 1.
+    std::string player(const Block& b, const std::string& at) {
+        if (b.player.empty()) return "1";
+        if (b.player.size() == 1 && b.player[0] >= '1' && b.player[0] < '1' + kBlockPlayers) return b.player;
+        error(at, "player \"" + b.player + "\" is not 1 to " + std::to_string(kBlockPlayers));
+        return "1";
     }
 
     // A Persist key as a Lua string. The engine keeps 31 bytes of a key and
@@ -508,7 +540,37 @@ struct Gen {
             Expr a = input(b, 0, at), c = input(b, 1, at);
             return {"Random.Range(" + a.s + ", " + c.s + ")", Atom};
         }
-        if (op == "button_held") return {"Input.IsHeldPlayer1(" + button(b, at) + ")", Atom};
+        if (op == "button_held" || op == "button_pressed" || op == "button_released") {
+            // A mouse button has R1's or L1's bit: true only when the player has a mouse.
+            const bool mouse = b.field == "MOUSE_LEFT" || b.field == "MOUSE_RIGHT";
+            // Player 1 holding a pad button keeps the Lua it always made.
+            if (op == "button_held" && b.player.empty() && !mouse) return {"Input.IsHeldPlayer1(" + button(b, at) + ")", Atom};
+            const char* fn = op == "button_held" ? "IsHeld" : op == "button_pressed" ? "IsPressed" : "IsReleased";
+            const std::string p = player(b, at);
+            const std::string call = std::string("Input.") + fn + "(" + p + ", " + button(b, at) + ")";
+            if (mouse) return {"(Input.GetDevice(" + p + ") == \"mouse\" and " + call + ")", Atom};
+            return {call, Atom};
+        }
+        // GetMouse and GetAnalog give x, y: the first in parentheses, the second through select.
+        if (op == "mouse_x") return {"(Input.GetMouse(" + player(b, at) + "))", Atom};
+        if (op == "mouse_y") return {"select(2, Input.GetMouse(" + player(b, at) + "))", Atom};
+        if (op == "stick") {
+            auto it = std::find(kSticks.begin(), kSticks.end(), b.field);
+            if (it == kSticks.end()) {
+                error(at, b.field.empty() ? "no stick axis chosen" : "unknown stick axis \"" + b.field + "\"");
+                return nil();
+            }
+            const size_t k = size_t(it - kSticks.begin());
+            const std::string call = "Input.GetAnalog(" + player(b, at) + ", " + (k >= 2 ? "1" : "0") + ")";
+            return {k % 2 ? "select(2, " + call + ")" : "(" + call + ")", Atom};
+        }
+        if (op == "device_is") {
+            if (std::find(kDevices.begin(), kDevices.end(), b.field) == kDevices.end()) {
+                error(at, b.field.empty() ? "no device chosen" : "unknown device \"" + b.field + "\"");
+                return nil();
+            }
+            return {"Input.GetDevice(" + player(b, at) + ") == " + luaString(b.field), Cmp};
+        }
         if (op == "frame_count") return {"Timer.GetFrameCount()", Atom};
         // An unset key reads nil on the engine; 0 keeps = < > and maths working.
         if (op == "remembered") return {"(Persist.Get(" + key(b, at) + ") or 0)", Atom};
@@ -667,6 +729,7 @@ struct Part {
     size_t stack;
     std::string code, stopAt;
     bool task = false;  // the stack waits, so it runs as a task
+    int player = 0;     // a button hat's player filter, 0 for any
 };
 
 // Bodies of stacks sharing a hat, one after the other with a blank line
@@ -713,6 +776,18 @@ std::string_view hatCallback(std::string_view op) {
 
 const std::vector<std::string_view>& blockButtons() { return kButtons; }
 
+std::string blockButtonLabel(std::string_view button) {
+    if (button == "MOUSE_LEFT") return "mouse left";
+    if (button == "MOUSE_RIGHT") return "mouse right";
+    return std::string(button);
+}
+
+const std::vector<std::string_view>& blockDevices() { return kDevices; }
+
+const std::vector<std::string_view>& blockSticks() { return kSticks; }
+
+bool blockTakesPlayer(const BlockSpec& spec) { return spec.label.find("%p") != std::string_view::npos; }
+
 const std::vector<std::string_view>& blockCategories() { return kCategories; }
 
 BlockScript parseBlocks(const std::string& text, const std::string& path) {
@@ -726,7 +801,7 @@ BlockScript parseBlocks(const std::string& text, const std::string& path) {
     if (!j.contains("format") || j["format"] != "splashedit-blocks") fail(path, "not a splashedit block script");
     if (!j.contains("version") || !j["version"].is_number_integer()) fail(path, "missing or invalid \"version\"");
     int64_t v = j["version"].get<int64_t>();
-    if (v < 1 || v > 1) fail(path, "format version " + std::to_string(v) + ", this build reads up to 1");
+    if (v < 1 || v > kFormatVersion) fail(path, "format version " + std::to_string(v) + ", this build reads up to " + std::to_string(kFormatVersion));
     const std::string top = "file";
     onlyKeys(j, {"format", "version", "variables", "stacks"}, path, top);
     BlockScript s;
@@ -762,7 +837,18 @@ BlockScript parseBlocks(const std::string& text, const std::string& path) {
 std::string saveBlocks(const BlockScript& s) {
     ojson j = ojson::object();
     j["format"] = "splashedit-blocks";
-    j["version"] = 1;
+    // 1 unless a block has a player, so an editor from before players still opens the rest.
+    auto players = [](const std::vector<Block>& list, auto& self) -> bool {
+        for (const Block& b : list) {
+            if (!b.player.empty() || self(b.args, self)) return true;
+            for (const auto& body : b.bodies)
+                if (self(body, self)) return true;
+        }
+        return false;
+    };
+    bool any = false;
+    for (const BlockStack& st : s.stacks) any = any || players(st.blocks, players);
+    j["version"] = any ? 2 : 1;
     ojson vs = ojson::array();
     for (const BlockVariable& v : s.variables) {
         ojson o = ojson::object();
@@ -838,6 +924,7 @@ LuaGen blocksToLua(const BlockScript& script) {
             if (blocks.empty() || blocks[0].op != hat.op) continue;
             std::string prefix = "stack " + std::to_string(si + 1) + ", ";
             size_t arm = 0;
+            Part p{si + 1, {}, {}, false, 0};
             if (buttons) {
                 std::string at = Gen::where(prefix, "block ", 1, blocks[0]);
                 auto it = std::find(kButtons.begin(), kButtons.end(), blocks[0].field);
@@ -846,11 +933,13 @@ LuaGen blocksToLua(const BlockScript& script) {
                     continue;
                 }
                 arm = size_t(it - kButtons.begin());
+                if (!blocks[0].player.empty()) p.player = std::stoi(g.player(blocks[0], at));
+            } else if (!blocks[0].player.empty()) {
+                g.error(Gen::where(prefix, "block ", 1, blocks[0]), "has a player, but the block takes none");
             }
-            Part p{si + 1, {}, {}, false};
             g.stopAt.clear();
             p.task = waits(blocks, 1, waits);
-            int depth = (buttons ? 2 : 1) + (p.task ? 1 : 0);
+            int depth = (buttons ? 2 : 1) + (p.player ? 1 : 0) + (p.task ? 1 : 0);
             g.statements(std::vector<Block>(blocks.begin() + 1, blocks.end()), depth, prefix, 2, p.code);
             p.stopAt = g.stopAt;
             arms[arm].push_back(std::move(p));
@@ -860,36 +949,52 @@ LuaGen blocksToLua(const BlockScript& script) {
             if (hat.op == "on_update") functions.push_back({std::string(hat.name), std::string(hat.params), {}, true});
             continue;
         }
-        // The arm's stacks in order, each one that waits wrapped in its task;
-        // a stop in a task ends only that task.
+        // The arm's stacks in order, each one that waits wrapped in its task,
+        // then each with a player in a test of the callback's player; a stop
+        // in a task ends only that task.
         auto armBody = [&](size_t a, int depth) {
             size_t count = 0, n = 0;
             for (const Part& p : arms[a]) count += p.task;
             for (Part& p : arms[a]) {
-                if (!p.task) continue;
-                std::string name(hat.name);
-                if (buttons) name += "_" + std::string(kButtons[a]);
-                if (count > 1) name += "_" + std::to_string(++n);
-                tasks.push_back(name);
-                p.code = pad(depth) + "startTask(\"" + name + "\", function()\n" + p.code + pad(depth) + "end)\n";
-                p.stopAt.clear();
+                const int d = depth + (p.player ? 1 : 0);
+                if (p.task) {
+                    std::string name(hat.name);
+                    if (buttons) name += "_" + std::string(kButtons[a]);
+                    if (count > 1) name += "_" + std::to_string(++n);
+                    tasks.push_back(name);
+                    p.code = pad(d) + "startTask(\"" + name + "\", function()\n" + p.code + pad(d) + "end)\n";
+                    p.stopAt.clear();
+                }
+                if (p.player)
+                    p.code = pad(depth) + "if byPlayer == " + std::to_string(p.player) + " then\n" + p.code + pad(depth) + "end\n";
             }
             return mergeParts(arms[a], g);
         };
         std::string f;
+        // The player comes third; named only when a stack asks for it, so a
+        // script without one keeps the Lua it always had.
+        bool byPlayer = false;
         if (buttons) {
-            bool first = true;
-            for (size_t b = 0; b < arms.size(); b++) {
-                if (arms[b].empty()) continue;
-                f += pad(1) + (first ? "if" : "elseif") + " button == Input." + std::string(kButtons[b]) + " then\n";
-                f += armBody(b, 2);
-                first = false;
+            for (size_t b = 0; b < arms.size(); b++)
+                for (const Part& p : arms[b]) byPlayer = byPlayer || p.player || b >= kPadButtons;
+            // A mouse button has R1's or L1's bit, so its arms test the device too,
+            // in a chain of their own after the pad's.
+            for (size_t from : {size_t(0), kPadButtons}) {
+                bool first = true;
+                const size_t to = from ? arms.size() : kPadButtons;
+                for (size_t b = from; b < to; b++) {
+                    if (arms[b].empty()) continue;
+                    f += pad(1) + (first ? "if" : "elseif") + " button == Input." + std::string(kButtons[b]);
+                    f += std::string(b >= kPadButtons ? " and Input.GetDevice(byPlayer) == \"mouse\"" : "") + " then\n";
+                    f += armBody(b, 2);
+                    first = false;
+                }
+                if (!first) f += pad(1) + "end\n";
             }
-            f += pad(1) + "end\n";
         } else {
             f += armBody(0, 1);
         }
-        functions.push_back({std::string(hat.name), std::string(hat.params), f, false});
+        functions.push_back({std::string(hat.name), std::string(hat.params) + (byPlayer ? ", byPlayer" : ""), f, false});
     }
 
     std::string helpers;
