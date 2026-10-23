@@ -74,6 +74,13 @@ std::filesystem::path engineFor(const PlayTools& effective, std::string* note = 
 // project's DiscSettings::bootLogo, falling back to `disc` the same way.
 std::filesystem::path discEngineFor(const std::filesystem::path& disc, bool bootLogo, std::string* note = nullptr);
 
+// A warning for booting `engine` on the scene_*.splashpack files in `dir`,
+// empty when it reads them all. An engine names the newest splashpack it
+// reads in its "Scene is newer than this engine (splashpack vN newest)"
+// message; a build without that text predates the check, so it is flagged
+// on a v28 pack (blob shadows), the newest format it can be too old for.
+std::string engineVersionNote(const std::filesystem::path& engine, const std::filesystem::path& dir);
+
 // One line per thing Play still needs; empty when it can run.
 std::vector<std::string> missingTools(const PlayTools& tools);
 

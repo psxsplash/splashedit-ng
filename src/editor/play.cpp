@@ -221,6 +221,34 @@ static std::string engineWhat(const PlayTools& t) {
     return s;
 }
 
+std::string engineVersionNote(const fs::path& engine, const fs::path& dir) {
+    std::error_code ec;
+    int pack = 0;
+    for (const fs::directory_entry& e : fs::directory_iterator(dir, ec)) {
+        const std::string name = utf8(e.path().filename());
+        if (name.rfind("scene_", 0) != 0 || e.path().extension() != ".splashpack") continue;
+        std::ifstream f(e.path(), std::ios::binary);
+        unsigned char h[4] = {};
+        if (f.read(reinterpret_cast<char*>(h), 4) && h[0] == 'S' && h[1] == 'P') pack = std::max(pack, h[2] | h[3] << 8);
+    }
+    if (pack == 0) return {};
+    std::ifstream f(engine, std::ios::binary);
+    const std::string exe((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    static const std::string kTag = "(splashpack v";
+    const size_t at = exe.find("Scene is newer than this engine " + kTag);
+    const std::string name = utf8(engine.filename());
+    const std::string packText = "splashpack v" + std::to_string(pack);
+    if (at == std::string::npos) {
+        if (pack < 28) return {};
+        return name + " predates the scene version check and may be older than this scene (" + packText +
+               "). If the game shows nothing, update psxsplash.";
+    }
+    const int newest = std::atoi(exe.c_str() + at + std::strlen("Scene is newer than this engine ") + kTag.size());
+    if (newest >= pack) return {};
+    return name + " reads scenes up to splashpack v" + std::to_string(newest) + " and this one is " + packText +
+           ": it will stop at boot. Update psxsplash.";
+}
+
 std::vector<std::string> missingTools(const PlayTools& t) {
     std::vector<std::string> out;
     std::error_code ec;

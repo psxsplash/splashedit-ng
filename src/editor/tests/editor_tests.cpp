@@ -2435,6 +2435,35 @@ void testPlayOverlays() {
 // Build > Boot Logo in Test Runs and the Disc section's Boot logo: with the
 // logo off, Play, Run on hardware and Export boot the -nologo build beside
 // the chosen one, or the build with the logo when there is none (saying so).
+void testEngineVersionNote() {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    const fs::path dir = g_outDir / "engine-version";
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir);
+    auto pack = [&](int v) {
+        const char h[4] = {'S', 'P', char(v & 0xFF), char(v >> 8)};
+        std::ofstream(dir / "scene_0.splashpack", std::ios::binary).write(h, 4);
+    };
+    auto engine = [&](const char* name, const std::string& text) {
+        std::ofstream(dir / name, std::ios::binary) << std::string("\0\x01junk", 6) << text << std::string(1, '\0');
+        return dir / name;
+    };
+    const fs::path e28 = engine("e28.ps-exe", "Scene is newer than this engine (splashpack v28 newest): update psxsplash");
+    const fs::path old = engine("old.ps-exe", "Splashpack version too old (need v20+): re-export from SplashEdit");
+    pack(28);
+    CHECK(editor::engineVersionNote(e28, dir).empty());
+    const std::string pre = editor::engineVersionNote(old, dir);
+    CHECK(pre.find("old.ps-exe predates") != std::string::npos && pre.find("splashpack v28") != std::string::npos);
+    pack(27);  // a scene without shadows: no note for a build without the check
+    CHECK(editor::engineVersionNote(old, dir).empty());
+    pack(29);
+    const std::string newer = editor::engineVersionNote(e28, dir);
+    CHECK(newer.find("up to splashpack v28") != std::string::npos && newer.find("splashpack v29") != std::string::npos);
+    fs::remove(dir / "scene_0.splashpack", ec);
+    CHECK(editor::engineVersionNote(old, dir).empty());  // nothing exported, nothing to say
+}
+
 void testPlayBootLogo() {
     namespace fs = std::filesystem;
     std::error_code ec;
@@ -14851,6 +14880,7 @@ int main(int argc, char** argv) {
     testRelayWorldObjects();
     testRelaySocket();
     testPlayBootLogo();
+    testEngineVersionNote();
     testBuildScenes();
     testBuildReport();
     testVramLayout();

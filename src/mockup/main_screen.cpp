@@ -430,6 +430,10 @@ static void updatePlay(State& st, const editor::Document& doc) {
         std::string logoNote;
         const std::filesystem::path engine = editor::engineFor(eff, &logoNote);
         if (r.ok() && !logoNote.empty()) r.warnings.push_back(logoNote);
+        if (r.ok()) {
+            const std::string versionNote = editor::engineVersionNote(engine, hardwareDir());
+            if (!versionNote.empty()) r.warnings.push_back(versionNote);
+        }
         reportBuild(st, "Run on hardware", p.hwLaunch, r);
         if (!r.ok()) p.message = editor::buildFailure("Run on hardware", r);
         else {
@@ -530,6 +534,10 @@ static void updatePlay(State& st, const editor::Document& doc) {
     std::string logoNote;
     const std::filesystem::path engine = editor::engineFor(eff, &logoNote);
     if (r.ok() && !logoNote.empty()) r.warnings.push_back(logoNote);
+    if (r.ok()) {
+        const std::string versionNote = editor::engineVersionNote(engine, playDir());
+        if (!versionNote.empty()) r.warnings.push_back(versionNote);
+    }
     reportBuild(st, "Play", p.playLaunch, r);
     if (!r.ok()) {
         p.message = editor::buildFailure("Play", r);
