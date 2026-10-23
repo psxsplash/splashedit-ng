@@ -540,11 +540,16 @@ struct Gen {
             Expr a = input(b, 0, at), c = input(b, 1, at);
             return {"Random.Range(" + a.s + ", " + c.s + ")", Atom};
         }
-        // Player 1 holding a button keeps the Lua it always made.
-        if (op == "button_held" && b.player.empty()) return {"Input.IsHeldPlayer1(" + button(b, at) + ")", Atom};
         if (op == "button_held" || op == "button_pressed" || op == "button_released") {
+            // A mouse button has R1's or L1's bit: true only when the player has a mouse.
+            const bool mouse = b.field == "MOUSE_LEFT" || b.field == "MOUSE_RIGHT";
+            // Player 1 holding a pad button keeps the Lua it always made.
+            if (op == "button_held" && b.player.empty() && !mouse) return {"Input.IsHeldPlayer1(" + button(b, at) + ")", Atom};
             const char* fn = op == "button_held" ? "IsHeld" : op == "button_pressed" ? "IsPressed" : "IsReleased";
-            return {std::string("Input.") + fn + "(" + player(b, at) + ", " + button(b, at) + ")", Atom};
+            const std::string p = player(b, at);
+            const std::string call = std::string("Input.") + fn + "(" + p + ", " + button(b, at) + ")";
+            if (mouse) return {"(Input.GetDevice(" + p + ") == \"mouse\" and " + call + ")", Atom};
+            return {call, Atom};
         }
         // GetMouse and GetAnalog give x, y: the first in parentheses, the second through select.
         if (op == "mouse_x") return {"(Input.GetMouse(" + player(b, at) + "))", Atom};

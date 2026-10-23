@@ -3766,8 +3766,20 @@ void testBlocksPlayers() {
     CHECK(expr(blk("button_held", "CROSS")) == "Input.IsHeldPlayer1(Input.CROSS)");
     CHECK(expr(bplayer(blk("button_held", "TRIANGLE"), "3")) == "Input.IsHeld(3, Input.TRIANGLE)");
     CHECK(expr(blk("button_pressed", "START")) == "Input.IsPressed(1, Input.START)");
-    CHECK(expr(bplayer(blk("button_pressed", "MOUSE_RIGHT"), "8")) == "Input.IsPressed(8, Input.MOUSE_RIGHT)");
-    CHECK(expr(bplayer(blk("button_released", "MOUSE_LEFT"), "2")) == "Input.IsReleased(2, Input.MOUSE_LEFT)");
+    // A mouse button shares R1's or L1's bit: the block is true only when the player has a mouse,
+    // also for player 1 holding it (no IsHeldPlayer1 there).
+    CHECK(expr(bplayer(blk("button_pressed", "MOUSE_RIGHT"), "8")) ==
+          "(Input.GetDevice(8) == \"mouse\" and Input.IsPressed(8, Input.MOUSE_RIGHT))");
+    CHECK(expr(bplayer(blk("button_released", "MOUSE_LEFT"), "2")) ==
+          "(Input.GetDevice(2) == \"mouse\" and Input.IsReleased(2, Input.MOUSE_LEFT))");
+    CHECK(expr(blk("button_held", "MOUSE_LEFT")) == "(Input.GetDevice(1) == \"mouse\" and Input.IsHeld(1, Input.MOUSE_LEFT))");
+    CHECK(expr(bplayer(blk("button_held", "MOUSE_RIGHT"), "5")) ==
+          "(Input.GetDevice(5) == \"mouse\" and Input.IsHeld(5, Input.MOUSE_RIGHT))");
+    CHECK(expr(blk("not", "", {blk("button_held", "MOUSE_LEFT")})) ==
+          "not (Input.GetDevice(1) == \"mouse\" and Input.IsHeld(1, Input.MOUSE_LEFT))");
+    // R1 and L1 themselves stay plain.
+    CHECK(expr(bplayer(blk("button_pressed", "R1"), "2")) == "Input.IsPressed(2, Input.R1)" &&
+          expr(blk("button_held", "L1")) == "Input.IsHeldPlayer1(Input.L1)");
     CHECK(expr(blk("mouse_x")) == "(Input.GetMouse(1))");
     CHECK(expr(bplayer(blk("mouse_y"), "4")) == "select(2, Input.GetMouse(4))");
     CHECK(expr(blk("stick", "left x")) == "(Input.GetAnalog(1, 0))");
