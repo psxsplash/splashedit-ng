@@ -129,6 +129,16 @@ struct State {
         };
         std::array<Console, editor::kMaxPlayers> cons;
         bool gameFocus = false;   // the Game view has the keyboard (a click in either view moves it)
+        // The host mouse as a player's mouse (tools.input): captured by a
+        // click in the game, released by Escape or losing focus; in SDL's
+        // relative mode except in scripted runs, whose pointer moves come
+        // through ImGui. Buttons count once the capturing click is let go.
+        // Motion left over from whole counts carries to the next frame.
+        bool scripted = false;
+        bool mouseCaptured = false, mouseArmed = false, relativeMouse = false;
+        float mouseRestX = 0, mouseRestY = 0;
+        bool v1Noted = false;          // said once per Play that this redux has no version 2 input
+        bool showControllers = false;  // the Game view's Controllers list is open
         // Play with linked consoles (tools.players): the session's console
         // count and whether they go through the relay, fixed when Play
         // starts; the console waiting to start (0: none) and since when (each

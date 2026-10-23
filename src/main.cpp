@@ -743,6 +743,7 @@ int main(int argc, char** argv) {
     state.viewMode = args.viewMode;
     state.gizmos = args.overlays;
     state.play.bundleDir = baseDir();
+    state.play.scripted = args.screenshot != nullptr;
     {
         // Capture frame: redux runs this beside the game (editor::reduxCommand).
         std::error_code ec;

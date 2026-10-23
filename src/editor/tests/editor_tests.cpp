@@ -48,6 +48,7 @@
 #include "editor/model_import.hh"
 #include "editor/pick.hh"
 #include "editor/play.hh"
+#include "editor/host_input.hh"
 #include "editor/linkplay.hh"
 #include "editor/relay.hh"
 #include "editor/project.hh"
@@ -1672,6 +1673,185 @@ void testPlay() {
 // reads, Clienthost with its lowercase h), its directory and -portable
 // command, the capture redirect, the port helpers, the players setting and
 // the link reporter's lines.
+// What Play writes into redux's -shmdisplay header: who drives each player,
+// the words that makes (slot masks, device types, mouse motion to add), and
+// the writer, which leaves a version 1 header's bytes past hostPads alone.
+void testHostInput() {
+    using editor::PlayDevice;
+    namespace shm = editor::shm;
+    // Pad bits, active-low (the app's padbit).
+    struct padbit {
+        enum : uint16_t { start = 1 << 3, up = 1 << 4, circle = 1 << 13, cross = 1 << 14, square = 1 << 15 };
+    };
+    // A block whose header says `version` and `headerSize`, the rest 0xAB.
+    auto block = [](uint32_t version, uint32_t headerSize, size_t size = 4096) {
+        std::vector<uint8_t> b(size, 0xab);
+        std::memcpy(b.data() + 0, "PXSD", 4);
+        std::memcpy(b.data() + shm::kVersion, &version, 4);
+        std::memcpy(b.data() + shm::kHeaderSize, &headerSize, 4);
+        return b;
+    };
+    auto u32 = [](const std::vector<uint8_t>& b, size_t off) {
+        uint32_t v;
+        std::memcpy(&v, b.data() + off, 4);
+        return v;
+    };
+    auto setI32 = [](std::vector<uint8_t>& b, size_t off, int32_t v) { std::memcpy(b.data() + off, &v, 4); };
+
+    // Version gating: 2 and a header (and mapping) of 132 bytes or more.
+    {
+        std::vector<uint8_t> v1 = block(1, 60), v2 = block(2, 132), shortHdr = block(2, 60), shortMap = block(2, 132, 100);
+        CHECK(!editor::shmHasV2(v1.data(), v1.size()) && editor::shmHasV2(v2.data(), v2.size()));
+        CHECK(!editor::shmHasV2(shortHdr.data(), shortHdr.size()) && !editor::shmHasV2(shortMap.data(), shortMap.size()) &&
+              !editor::shmHasV2(nullptr, 4096));
+        std::vector<uint8_t> v3 = block(3, 200);
+        CHECK(editor::shmHasV2(v3.data(), v3.size()));
+    }
+
+    // Defaults: every player a pad, no tap. Keyboard and gamepad 1 on player 1, gamepad 2 on player 2.
+    const editor::PlayInput def;
+    {
+        const editor::ControllerMap m = editor::mapControllers(def, 2, true);
+        CHECK(m.keyboard == 0 && m.gamepad[0] == 0 && m.gamepad[1] == 1 && m.mouse < 0);
+        CHECK(m.present[0] && m.present[1] && !m.present[2] && !m.present[7]);
+        CHECK(editor::describeControllers(def, m, true) ==
+              (std::vector<std::string>{"Player 1: keyboard + gamepad 1", "Player 2: gamepad 2"}));
+        // None connected: player 2 has nothing, player 1 the keyboard.
+        const editor::ControllerMap none = editor::mapControllers(def, 0, true);
+        CHECK(none.keyboard == 0 && none.gamepad[0] == -1 && none.gamepad[1] == -1);
+        CHECK(editor::describeControllers(def, none, true)[1] == "Player 2: no gamepad connected (pcsx-redux's own port setting)");
+    }
+    // Version 1: Play as before, whatever the settings ask.
+    {
+        editor::PlayInput in;
+        in.device[0] = PlayDevice::Mouse;
+        in.multitap = {true, true};
+        const editor::ControllerMap m = editor::mapControllers(in, 4, false);
+        CHECK(m.keyboard == 0 && m.gamepad[0] == 0 && m.gamepad[1] == -1 && m.mouse < 0 && !m.present[2]);
+        CHECK(editor::describeControllers(in, m, false) ==
+              (std::vector<std::string>{"Player 1: keyboard + gamepad 1", "Player 2: nothing (this pcsx-redux takes input for player 1 only)"}));
+        editor::HostFrame fr;
+        fr.keyboard = 0xffff & ~padbit::cross;
+        fr.gamepads = {uint16_t(0xffff & ~padbit::start), uint16_t(0xffff & ~padbit::circle)};
+        const editor::ShmInput s = editor::shmInput(in, m, fr);
+        CHECK(s.pads[0] == (0xffffu & ~padbit::cross & ~padbit::start) && s.pads[1] == 0xffff);
+        // The writer leaves everything past hostPads as redux put it, and sets hostInput.
+        std::vector<uint8_t> b = block(1, 60);
+        editor::writeShmInput(b.data(), b.size(), s);
+        bool untouched = true;
+        for (size_t i = shm::kMultitap; i < shm::kV2Size; ++i) untouched = untouched && b[i] == 0xab;
+        CHECK(untouched && u32(b, shm::kHostPads) == s.pads[0] && u32(b, shm::kHostPads + 4) == 0xffff && u32(b, shm::kHostInput) == 1);
+    }
+    // Player 1 a mouse, a tap on port 1: gamepads 1-3 go to players 2, 3 and 4, the keyboard to player 2;
+    // with 3 gamepads player 5's slot stays empty.
+    {
+        editor::PlayInput in;
+        in.device[0] = PlayDevice::Mouse;
+        in.multitap[0] = true;
+        const editor::ControllerMap m = editor::mapControllers(in, 3, true);
+        CHECK(m.mouse == 0 && m.gamepad[0] == -1 && m.keyboard == 1 && m.gamepad[1] == 0 && m.gamepad[2] == 1 && m.gamepad[3] == 2 &&
+              m.gamepad[4] == -1 && m.present[4] && !m.present[5]);
+        CHECK(editor::describeControllers(in, m, true) ==
+              (std::vector<std::string>{"Player 1: mouse (click the game to capture it)", "Player 2: keyboard + gamepad 1",
+                                        "Player 3: gamepad 2", "Player 4: gamepad 3", "Player 5: empty slot, no gamepad connected"}));
+        editor::HostFrame fr;
+        fr.gamepads = {0xffff, uint16_t(0xffff & ~padbit::square), uint16_t(0xffff & ~padbit::up)};
+        fr.mouseDX = 7;
+        fr.mouseDY = -3;
+        fr.mouseButtons = 1 | 4;  // bit 2 is not a mouse button
+        fr.mouseCaptured = true;
+        editor::ShmInput s = editor::shmInput(in, m, fr);
+        CHECK(s.device[0] == shm::kMouse && s.device[1] == shm::kDigital && s.multitap[0] == 1 && s.multitap[1] == 0);
+        CHECK(s.slots[0][1] == (0xffffu & ~padbit::square) && s.slots[0][2] == (0xffffu & ~padbit::up) && s.slots[0][3] == shm::kSlotEmpty &&
+              s.slots[1][1] == shm::kSlotEmpty && s.slots[0][0] == shm::kSlotEmpty);
+        CHECK(s.mouseDX[0] == 7 && s.mouseDY[0] == -3 && s.mouseButtons[0] == 1 && s.mouseDX[1] == 0 && s.pads[0] == 0xffff);
+        // Written into a version 2 header: at redux's offsets, the motion added to what redux has not taken.
+        std::vector<uint8_t> b = block(2, 132);
+        setI32(b, shm::kMouseDX, 5);
+        setI32(b, shm::kMouseDY, 0);
+        setI32(b, shm::kMouseDX + 4, 0);
+        setI32(b, shm::kMouseDY + 4, 0);
+        editor::writeShmInput(b.data(), b.size(), s);
+        editor::writeShmInput(b.data(), b.size(), s);
+        CHECK(int32_t(u32(b, shm::kMouseDX)) == 5 + 14 && int32_t(u32(b, shm::kMouseDY)) == -6 && u32(b, shm::kMouseDX + 4) == 0);
+        CHECK(u32(b, shm::kMouseButtons) == 1 && u32(b, shm::kMouseButtons + 4) == 0 && u32(b, shm::kDevice) == shm::kMouse &&
+              u32(b, shm::kDevice + 4) == shm::kDigital && u32(b, shm::kMultitap) == 1 && u32(b, shm::kMultitap + 4) == 0);
+        CHECK(u32(b, shm::kSlotPads + 4) == (0xffffu & ~padbit::square) && u32(b, shm::kSlotPads + 8) == (0xffffu & ~padbit::up) &&
+              u32(b, shm::kSlotPads + 12) == shm::kSlotEmpty && u32(b, shm::kSlotPads + 16 + 4) == shm::kSlotEmpty);
+        // Slot A's word is redux's to ignore: the writer leaves it.
+        CHECK(u32(b, shm::kSlotPads) == 0xabababab && u32(b, shm::kSlotPads + 16) == 0xabababab && u32(b, shm::kHostInput) == 1);
+        // Not captured: no motion, no buttons, the device still a mouse.
+        fr.mouseCaptured = false;
+        s = editor::shmInput(in, m, fr);
+        CHECK(s.mouseDX[0] == 0 && s.mouseDY[0] == 0 && s.mouseButtons[0] == 0 && s.device[0] == shm::kMouse);
+        editor::writeShmInput(b.data(), b.size(), s);
+        CHECK(int32_t(u32(b, shm::kMouseDX)) == 19 && u32(b, shm::kMouseButtons) == 0);
+    }
+    // hostDevice plugs a port's device in while something drives its player, every frame: player 2
+    // undriven is left to redux (0), and takes a pad the frame a second gamepad shows up.
+    {
+        editor::HostFrame fr;
+        fr.gamepads = {0xffff};
+        editor::ShmInput s = editor::shmInput(def, editor::mapControllers(def, 1, true), fr);
+        CHECK(s.device[0] == shm::kDigital && s.device[1] == 0 && s.pads[1] == 0xffff);
+        fr.gamepads = {0xffff, uint16_t(0xffff & ~padbit::cross)};
+        s = editor::shmInput(def, editor::mapControllers(def, 2, true), fr);
+        CHECK(s.device[1] == shm::kDigital && s.pads[1] == (0xffffu & ~padbit::cross));
+        // Player 1 a mouse, no gamepad: the keyboard drives player 2, so it is plugged in.
+        editor::PlayInput in;
+        in.device[0] = PlayDevice::Mouse;
+        fr.gamepads.clear();
+        s = editor::shmInput(in, editor::mapControllers(in, 0, true), fr);
+        CHECK(s.device[0] == shm::kMouse && s.device[1] == shm::kDigital);
+        // An analog pad with nothing driving it: redux's setting.
+        editor::PlayInput an;
+        an.device[1] = PlayDevice::Analog;
+        s = editor::shmInput(an, editor::mapControllers(an, 1, true), fr);
+        CHECK(s.device[1] == 0);
+        fr.gamepads = {0xffff, 0xffff};
+        s = editor::shmInput(an, editor::mapControllers(an, 2, true), fr);
+        CHECK(s.device[1] == shm::kAnalog);
+    }
+    // Both taps: players 3-8 after player 2, in player order; None players skipped; analog and
+    // None on the ports; the host mouse goes to player 2 when player 1 is not one.
+    {
+        editor::PlayInput in;
+        in.multitap = {true, true};
+        in.device[1] = PlayDevice::Mouse;
+        in.device[3] = PlayDevice::None;
+        in.device[0] = PlayDevice::Analog;
+        const editor::ControllerMap m = editor::mapControllers(in, 8, true);
+        CHECK(m.mouse == 1 && m.keyboard == 0 && m.gamepad[0] == 0 && m.gamepad[1] == -1 && m.gamepad[2] == 1 && m.gamepad[3] == -1 &&
+              m.gamepad[4] == 2 && m.gamepad[5] == 3 && m.gamepad[7] == 5 && !m.present[3]);
+        const std::vector<std::string> d = editor::describeControllers(in, m, true);
+        CHECK(d.size() == 7 && d[0] == "Player 1 (analog pad): keyboard + gamepad 1" && d[1] == "Player 2: mouse (click the game to capture it)" &&
+              d[3] == "Player 5: gamepad 3" && d[6] == "Player 8: gamepad 6");
+        editor::HostFrame fr;
+        fr.gamepads.assign(8, 0xffff);
+        const editor::ShmInput s = editor::shmInput(in, m, fr);
+        CHECK(s.device[0] == shm::kAnalog && s.device[1] == shm::kMouse && s.slots[0][2] == shm::kSlotEmpty && s.slots[0][1] == 0xffff &&
+              s.slots[1][3] == 0xffff && s.multitap[1] == 1);
+        // Both ports None: no device override, nothing driven.
+        editor::PlayInput off;
+        off.device[0] = off.device[1] = PlayDevice::None;
+        const editor::ControllerMap mo = editor::mapControllers(off, 2, true);
+        const editor::ShmInput so = editor::shmInput(off, mo, fr);
+        CHECK(mo.keyboard == -1 && mo.gamepad[0] == -1 && so.device[0] == 0 && so.device[1] == 0 && so.pads[0] == 0xffff);
+        CHECK(editor::describeControllers(off, mo, true) ==
+              (std::vector<std::string>{"Player 1: none (pcsx-redux's own port setting)", "Player 2: none (pcsx-redux's own port setting)"}));
+        // The mouse player's line follows the capture.
+        CHECK(editor::describeControllers(in, m, true, true)[1] == "Player 2: mouse (captured, Esc releases it)");
+        // Two mice: the host mouse is player 1's; player 2 is left to redux.
+        editor::PlayInput mice;
+        mice.device[0] = mice.device[1] = PlayDevice::Mouse;
+        const editor::ControllerMap mm = editor::mapControllers(mice, 1, true);
+        CHECK(mm.mouse == 0 && mm.keyboard == -1 && editor::describeControllers(mice, mm, true)[1] ==
+                                                         "Player 2: no mouse, the host mouse is player 1's (pcsx-redux's own port setting)");
+        const editor::ShmInput sm = editor::shmInput(mice, mm, fr);
+        CHECK(sm.device[0] == shm::kMouse && sm.device[1] == 0);
+    }
+}
+
 void testLinkPlay() {
     namespace fs = std::filesystem;
     std::error_code ec;
@@ -15718,6 +15898,7 @@ int main(int argc, char** argv) {
     testPlay();
     testPlayOverlays();
     testLinkPlay();
+    testHostInput();
     testRelayFrames();
     testRelayProtobuf();
     testRelayRooms();

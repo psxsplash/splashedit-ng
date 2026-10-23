@@ -147,7 +147,17 @@ static void scriptLine(const char* tag, const std::string& line);
 static std::string utf8(const std::filesystem::path& p);
 
 // Stop: every console of the session, and the relay they went through.
+// Gives the host mouse back: out of SDL's relative mode, not a player's.
+static void releaseMouse(State::Play& p) {
+    if (p.relativeMouse)
+        if (SDL_Window* win = SDL_GL_GetCurrentWindow()) SDL_SetWindowRelativeMouseMode(win, false);
+    if (p.mouseCaptured) scriptLine(nullptr, "game: mouse released");
+    p.mouseCaptured = p.mouseArmed = p.relativeMouse = false;
+    p.mouseRestX = p.mouseRestY = 0;
+}
+
 static void stopPlay(State::Play& p) {
+    releaseMouse(p);
     for (State::Play::Console& c : p.cons) c.emu.stop();
     p.starting = 0;
     if (p.relay) p.relay->stop();
@@ -345,6 +355,7 @@ static void togglePlay(State& st, const editor::Document& doc) {
     p.players = std::clamp(p.tools.players, 1, editor::kMaxPlayers);
     p.relayed = editor::usesRelay(p.tools);
     p.focus = 0;
+    p.v1Noted = false;
     for (State::Play::Console& c : p.cons) c.link.reset();
     p.linkError.clear();
     p.networkId = !doc.scene().settings.networkId.empty();
@@ -515,6 +526,7 @@ static void updatePlay(State& st, const editor::Document& doc) {
             p.cons[0].game.detach();
             p.gameFocus = false;
         }
+        releaseMouse(p);
     }
     for (int k = 1; k < editor::kMaxPlayers; ++k) {
         State::Play::Console& c = p.cons[size_t(k)];
@@ -4577,17 +4589,11 @@ static void viewportInput(State& st, ImRect r, editor::Document& doc, viewport::
 
 // The controller on port 1, from the keyboard and the first connected gamepad,
 // the keyboard only while the Game view has focus.
+static uint16_t keyboardPad(bool keyboard);
 static uint16_t hostPad(bool keyboard) {
     struct Map {
         ImGuiKey key;
         uint16_t bit;
-    };
-    static const Map map[] = {
-        {ImGuiKey_UpArrow, padbit::up},      {ImGuiKey_DownArrow, padbit::down}, {ImGuiKey_LeftArrow, padbit::left},
-        {ImGuiKey_RightArrow, padbit::right}, {ImGuiKey_Enter, padbit::start},    {ImGuiKey_Backspace, padbit::select},
-        {ImGuiKey_Z, padbit::cross},          {ImGuiKey_X, padbit::circle},       {ImGuiKey_A, padbit::square},
-        {ImGuiKey_S, padbit::triangle},       {ImGuiKey_Q, padbit::l1},           {ImGuiKey_W, padbit::r1},
-        {ImGuiKey_1, padbit::l2},             {ImGuiKey_2, padbit::r2},
     };
     static const Map gamepad[] = {
         {ImGuiKey_GamepadDpadUp, padbit::up},       {ImGuiKey_GamepadDpadDown, padbit::down},
@@ -4603,10 +4609,80 @@ static uint16_t hostPad(bool keyboard) {
     uint16_t pad = 0xffff;
     for (const Map& m : gamepad)
         if (ImGui::IsKeyDown(m.key)) pad &= (uint16_t)~m.bit;
+    return pad & keyboardPad(keyboard);
+}
+
+// The keyboard's pad alone (hostPad's keys), while the Game view has focus.
+static uint16_t keyboardPad(bool keyboard) {
+    struct Map {
+        ImGuiKey key;
+        uint16_t bit;
+    };
+    static const Map map[] = {
+        {ImGuiKey_UpArrow, padbit::up},      {ImGuiKey_DownArrow, padbit::down}, {ImGuiKey_LeftArrow, padbit::left},
+        {ImGuiKey_RightArrow, padbit::right}, {ImGuiKey_Enter, padbit::start},    {ImGuiKey_Backspace, padbit::select},
+        {ImGuiKey_Z, padbit::cross},          {ImGuiKey_X, padbit::circle},       {ImGuiKey_A, padbit::square},
+        {ImGuiKey_S, padbit::triangle},       {ImGuiKey_Q, padbit::l1},           {ImGuiKey_W, padbit::r1},
+        {ImGuiKey_1, padbit::l2},             {ImGuiKey_2, padbit::r2},
+    };
+    uint16_t pad = 0xffff;
     if (!keyboard || ImGui::GetIO().WantTextInput) return pad;
     for (const Map& m : map)
         if (ImGui::IsKeyDown(m.key)) pad &= (uint16_t)~m.bit;
     return pad;
+}
+
+// Every connected gamepad, opened through SDL and in SDL's order (ImGui's
+// backend reads only one), as pad masks. Ones gone since the last call are
+// closed.
+static std::vector<uint16_t> hostGamepads() {
+    static std::vector<std::pair<SDL_JoystickID, SDL_Gamepad*>> open;
+    int n = 0;
+    SDL_JoystickID* ids = SDL_GetGamepads(&n);
+    std::vector<std::pair<SDL_JoystickID, SDL_Gamepad*>> now;
+    for (int i = 0; i < n; ++i) {
+        auto it = std::find_if(open.begin(), open.end(), [&](const auto& o) { return o.first == ids[i]; });
+        if (it != open.end()) {
+            now.push_back(*it);
+            it->second = nullptr;
+        } else if (SDL_Gamepad* g = SDL_OpenGamepad(ids[i])) {
+            now.push_back({ids[i], g});
+        }
+    }
+    for (const auto& o : open)
+        if (o.second) SDL_CloseGamepad(o.second);
+    open = std::move(now);
+    SDL_free(ids);
+    struct Map {
+        SDL_GamepadButton button;
+        uint16_t bit;
+    };
+    static const Map map[] = {
+        {SDL_GAMEPAD_BUTTON_DPAD_UP, padbit::up},       {SDL_GAMEPAD_BUTTON_DPAD_DOWN, padbit::down},
+        {SDL_GAMEPAD_BUTTON_DPAD_LEFT, padbit::left},   {SDL_GAMEPAD_BUTTON_DPAD_RIGHT, padbit::right},
+        {SDL_GAMEPAD_BUTTON_START, padbit::start},      {SDL_GAMEPAD_BUTTON_BACK, padbit::select},
+        {SDL_GAMEPAD_BUTTON_SOUTH, padbit::cross},      {SDL_GAMEPAD_BUTTON_EAST, padbit::circle},
+        {SDL_GAMEPAD_BUTTON_WEST, padbit::square},      {SDL_GAMEPAD_BUTTON_NORTH, padbit::triangle},
+        {SDL_GAMEPAD_BUTTON_LEFT_SHOULDER, padbit::l1}, {SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, padbit::r1},
+        {SDL_GAMEPAD_BUTTON_LEFT_STICK, 1 << 1},        {SDL_GAMEPAD_BUTTON_RIGHT_STICK, 1 << 2},  // L3, R3
+    };
+    // The left stick past ImGui's dead zone stands in for the D-pad, as hostPad does.
+    const int dead = 8000;
+    std::vector<uint16_t> masks;
+    for (const auto& o : open) {
+        uint16_t pad = 0xffff;
+        for (const Map& m : map)
+            if (SDL_GetGamepadButton(o.second, m.button)) pad &= (uint16_t)~m.bit;
+        const int lx = SDL_GetGamepadAxis(o.second, SDL_GAMEPAD_AXIS_LEFTX), ly = SDL_GetGamepadAxis(o.second, SDL_GAMEPAD_AXIS_LEFTY);
+        if (lx < -dead) pad &= (uint16_t)~padbit::left;
+        if (lx > dead) pad &= (uint16_t)~padbit::right;
+        if (ly < -dead) pad &= (uint16_t)~padbit::up;
+        if (ly > dead) pad &= (uint16_t)~padbit::down;
+        if (SDL_GetGamepadAxis(o.second, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > dead) pad &= (uint16_t)~padbit::l2;
+        if (SDL_GetGamepadAxis(o.second, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > dead) pad &= (uint16_t)~padbit::r2;
+        masks.push_back(pad);
+    }
+    return masks;
 }
 
 static std::string cutTo(ImFont* font, float size, const std::string& s, float room);
@@ -4761,19 +4837,121 @@ static void gamePanel(State& st, ImDrawList* dl, ImRect r) {
     float gw = std::min(w, h * 4 / 3), gh = gw * 3 / 4;
     ImVec2 c = r.GetCenter();
     ImRect g(c - ImVec2(gw / 2, gh / 2), c + ImVec2(gw / 2, gh / 2));
+    nameRect("game.view", g);
     if (unsigned tex = p.cons[0].game.texture())
         ui::addTextureImage(dl, (ImTextureID)(intptr_t)tex, g.Min, g.Max);
     else
         textCentered(dl, r, f.regular, type::body, color::textDim, "Waiting for pcsx-redux...");
     // The keyboard is the controller only while the Game view has focus; a gamepad always is.
-    p.cons[0].game.setPads(hostPad(p.gameFocus), 0xffff);
+    // A redux with the version 2 input fields gets every player (tools.input); one without, player 1's pad as before.
+    GameView& gv = p.cons[0].game;
+    const bool v2 = gv.inputV2();
+    const editor::PlayInput& want = p.tools.input;
+    std::vector<uint16_t> pads;
+    if (v2) pads = hostGamepads();
+    const editor::ControllerMap cmap =
+        editor::mapControllers(want, v2 ? int(pads.size()) : (ImGui::GetIO().BackendFlags & ImGuiBackendFlags_HasGamepad ? 1 : 0), v2);
+    if (gv.attached() && !v2 && !p.v1Noted) {
+        p.v1Noted = true;
+        if (want != editor::PlayInput{}) {
+            const std::string why = "This pcsx-redux has no mouse or multitap input: Play gives player 1 the keyboard and a gamepad, "
+                                    "as a pad, and ignores the Controllers settings";
+            notify(st, why, false);
+            scriptLine(nullptr, "play: " + why);
+        }
+    }
+    const ImGuiIO& io = ImGui::GetIO();
+    // The tag and the Controllers chip beside it; a click there, or one that closes the list, is not the game's.
     const char* label = "Game";
-    ImVec2 ls = measure(f.medium, type::label, label);
-    ImRect tag(r.Min + ImVec2(space::md, space::md), r.Min + ImVec2(space::md + ls.x + 20, space::md + 24));
+    const ImVec2 ls = measure(f.medium, type::label, label);
+    const ImRect tag(r.Min + ImVec2(space::md, space::md), r.Min + ImVec2(space::md + ls.x + 20, space::md + 24));
+    const char* cl = "Controllers";
+    const ImVec2 cs = measure(f.medium, type::caption, cl);
+    const ImRect ctlChip(ImVec2(tag.Max.x + space::xs, tag.Min.y), ImVec2(tag.Max.x + space::xs + cs.x + 34, tag.Max.y));
+    const bool clickFree = !ctlChip.Contains(ImGui::GetMousePos()) && !p.showControllers;
+    if (p.showControllers && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !ctlChip.Contains(ImGui::GetMousePos()))
+        p.showControllers = false;
+    if (!v2 || cmap.mouse < 0 || !p.gameFocus || !gv.attached()) {
+        if (p.mouseCaptured) releaseMouse(p);
+    } else if (p.mouseCaptured && ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+        releaseMouse(p);
+    } else if (!p.mouseCaptured && clickFree && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && g.Contains(ImGui::GetMousePos()) &&
+               ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem) && !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId)) {
+        p.mouseCaptured = true;
+        p.mouseArmed = false;
+        // Scripted runs move the pointer through ImGui, which relative mode would hide.
+        if (!p.scripted)
+            if (SDL_Window* win = SDL_GL_GetCurrentWindow()) p.relativeMouse = SDL_SetWindowRelativeMouseMode(win, true);
+        float dx, dy;
+        if (p.relativeMouse) SDL_GetRelativeMouseState(&dx, &dy);  // start from here
+        scriptLine(nullptr, std::string("game: mouse captured") + (p.relativeMouse ? " relative" : ""));
+    }
+    if (v2) {
+        editor::HostFrame fr;
+        fr.keyboard = keyboardPad(p.gameFocus);
+        fr.gamepads = pads;
+        fr.mouseCaptured = p.mouseCaptured;
+        if (p.mouseCaptured) {
+            float dx = io.MouseDelta.x, dy = io.MouseDelta.y;
+            if (p.relativeMouse) SDL_GetRelativeMouseState(&dx, &dy);
+            if (!std::isfinite(dx) || !std::isfinite(dy)) dx = dy = 0;  // ImGui's delta with no pointer
+            p.mouseRestX += dx;
+            p.mouseRestY += dy;
+            fr.mouseDX = int32_t(p.mouseRestX);
+            fr.mouseDY = int32_t(p.mouseRestY);
+            p.mouseRestX -= float(fr.mouseDX);
+            p.mouseRestY -= float(fr.mouseDY);
+            // The click that captured it is not the game's.
+            if (!io.MouseDown[0] && !io.MouseDown[1]) p.mouseArmed = true;
+            if (p.mouseArmed) fr.mouseButtons = (io.MouseDown[0] ? 1u : 0u) | (io.MouseDown[1] ? 2u : 0u);
+        }
+        gv.setInput(editor::shmInput(want, cmap, fr));
+    } else {
+        gv.setPads(hostPad(p.gameFocus), 0xffff);
+    }
     dl->AddRectFilled(tag.Min, tag.Max, rgb(0x0e1014, 190), radius::pill);
     textCentered(dl, tag, f.medium, type::label, p.gameFocus ? color::text : color::textDim, label);
-    const char* info = p.gameFocus ? "Arrows  ·  Z X A S  ·  Q W 1 2  ·  Enter Start  ·  Backspace Select"
-                                   : "Click to control the game with the keyboard";
+    // Which host device drives which player, behind a ctlChip beside the tag.
+    {
+        const std::vector<std::string> lines = editor::describeControllers(want, cmap, v2, p.mouseCaptured);
+        const ui::Hit h = interact("game.controllers", ctlChip);
+        nameRect("game.controllers", ctlChip);
+        if (h.clicked) p.showControllers = !p.showControllers;
+        dl->AddRectFilled(ctlChip.Min, ctlChip.Max, h.hovered ? rgb(0x262a33, 220) : rgb(0x0e1014, 190), radius::pill);
+        text(dl, ImVec2(ctlChip.Min.x + 10, ctlChip.GetCenter().y - measure(f.medium, type::caption, icon::gamepad).y * 0.5f), f.medium,
+             type::caption, p.showControllers ? color::accent : color::textDim, icon::gamepad);
+        text(dl, ImVec2(ctlChip.Min.x + 26, ctlChip.GetCenter().y - cs.y * 0.5f), f.medium, type::caption,
+             p.showControllers ? color::text : color::textDim, cl);
+        if (h.hovered && !p.showControllers) tooltip("Which keyboard, gamepad or mouse drives each player. Set the devices in the Scene panel's Controllers.");
+        std::string all;
+        for (const std::string& l : lines) all += (all.empty() ? "" : " | ") + l;
+        scriptLine("game.controllers", "game: controllers " + std::string(v2 ? "v2" : "v1") + " | " + all);
+        if (p.showControllers) {
+            float wmax = 0, hsum = 0;
+            for (const std::string& l : lines) {
+                const ImVec2 sz = measure(f.regular, type::caption, l.c_str());
+                wmax = std::max(wmax, sz.x);
+                hsum += sz.y + 4;
+            }
+            const ImRect panel(ImVec2(tag.Min.x, tag.Max.y + space::xs), ImVec2(tag.Min.x + wmax + 24, tag.Max.y + space::xs + hsum + 14));
+            dl->AddRectFilled(panel.Min, panel.Max, rgb(0x0e1014, 225), radius::window);
+            nameRect("game.controllers.list", panel);
+            float ly = panel.Min.y + 7;
+            for (const std::string& l : lines) {
+                text(dl, ImVec2(panel.Min.x + 12, ly), f.regular, type::caption, color::textDim, l.c_str());
+                ly += measure(f.regular, type::caption, l.c_str()).y + 4;
+            }
+        }
+    }
+    std::string mouseHint;
+    if (v2 && cmap.mouse >= 0) {
+        const std::string who = "player " + std::to_string(cmap.mouse + 1);
+        mouseHint = p.mouseCaptured ? "Mouse captured as " + who + "  \xc2\xb7  Esc releases it"
+                                    : "Click the game to capture the mouse as " + who;
+    }
+    const char* info = !mouseHint.empty() && (p.gameFocus || p.mouseCaptured) ? mouseHint.c_str()
+                       : p.gameFocus ? "Arrows  ·  Z X A S  ·  Q W 1 2  ·  Enter Start  ·  Backspace Select"
+                                     : "Click to control the game with the keyboard";
     ImVec2 is = measure(f.regular, type::caption, info);
     ImRect chip(ImVec2(r.Min.x + space::md, r.Max.y - space::md - 24), ImVec2(r.Min.x + space::md + is.x + 20, r.Max.y - space::md));
     dl->AddRectFilled(chip.Min, chip.Max, rgb(0x0e1014, 190), radius::pill);
