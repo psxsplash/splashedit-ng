@@ -83,6 +83,7 @@ struct PaletteCycleSpec {
 struct PaletteSidecar {
     bool fromFile = false;
     std::filesystem::path file;               // resolved against the sidecar's folder
+    std::string fileText;                     // "file" as written, for paletteSidecarJson
     std::map<int, uint16_t> entries;          // index -> VRAM word
     std::vector<PaletteCycleSpec> cycles;
 };
@@ -103,6 +104,23 @@ PsxTexture convertTextureWithSidecar(const Image& img, BitDepth depth, bool cuto
 // The ranges of a sidecar against a palette of paletteSize words, as the engine will read them.
 // Throws std::runtime_error on a range the engine would reject.
 std::vector<ClutCycle> resolveCycles(const std::vector<PaletteCycleSpec>& specs, size_t paletteSize);
+
+// convertTextureWithSidecar in two halves, for an editor that re-applies entries and cycles without
+// converting again: the conversion onto the sidecar's palette source (quantized, or its file), then
+// its entries and cycles put in. Both throw std::runtime_error naming `sidecar`.
+PsxTexture convertTextureForSidecar(const Image& img, BitDepth depth, bool cutout, const PaletteSidecar& side,
+                                    const std::filesystem::path& sidecar);
+void applyPaletteSidecar(PsxTexture& t, const PaletteSidecar& side, const std::filesystem::path& sidecar);
+// The sidecar as JSON that parsePaletteSidecar reads back to the same words: "file" is fileText,
+// an entry is "#rrggbb" (paletteWordHex), or {"color", "stp": true} for a non-black word with STP.
+std::string paletteSidecarJson(const PaletteSidecar& side);
+// The "#rrggbb" that stands for a word's 5-bit channels (each widened as decodeTexture does).
+std::string paletteWordHex(uint16_t word);
+
+// The step a range is at `seconds` after the scene loads, as PaletteCycler advances it, and the
+// palette at that moment (each range rotated as psxsplash palcycle::buildSpan does).
+int clutCycleStepAt(const ClutCycle& c, double seconds);
+std::vector<uint16_t> cycledPalette(const std::vector<uint16_t>& base, const std::vector<ClutCycle>& cycles, double seconds);
 
 // True when any texel is below the cutout alpha threshold (half alpha): the
 // texture has holes, which convertTexture keeps only with cutout on.

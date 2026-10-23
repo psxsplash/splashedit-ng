@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -707,7 +708,8 @@ PaletteSidecar parsePaletteSidecar(const std::string& text, const std::filesyste
         if (!j.contains("file") || !j["file"].is_string() || j["file"].get<std::string>().empty())
             paletteError(sidecar, "source \"file\" needs a \"file\"");
         sc.fromFile = true;
-        sc.file = sidecar.parent_path() / std::filesystem::path(j["file"].get<std::string>());
+        sc.fileText = j["file"].get<std::string>();
+        sc.file = sidecar.parent_path() / std::filesystem::path(std::u8string(sc.fileText.begin(), sc.fileText.end()));
     } else if (source != "quantize") {
         paletteError(sidecar, "source must be \"quantize\" or \"file\", not \"" + source + "\"");
     }
@@ -845,25 +847,24 @@ void writePaletteBin(const std::filesystem::path& f, const std::vector<uint16_t>
     if (!o) throw std::runtime_error("cannot write " + f.string());
 }
 
-PsxTexture convertTextureWithSidecar(const Image& img, BitDepth depth, bool cutout, const std::filesystem::path& imagePath) {
-    const std::filesystem::path sc = paletteSidecarPath(imagePath);
-    std::error_code ec;
-    if (!std::filesystem::exists(sc, ec)) return convertTexture(img, depth, cutout);
-    PaletteSidecar side = parsePaletteSidecar(readText(sc), sc);
+PsxTexture convertTextureForSidecar(const Image& img, BitDepth depth, bool cutout, const PaletteSidecar& side,
+                                    const std::filesystem::path& sc) {
     if (depth == BitDepth::Bpp16) paletteError(sc, "the texture is 16 bpp, which has no palette");
     std::vector<uint16_t> fixed;
     if (side.fromFile) fixed = readPaletteFile(side.file);
-    PsxTexture t;
     try {
-        t = convertTexture(img, depth, cutout, side.fromFile ? &fixed : nullptr);
+        return convertTexture(img, depth, cutout, side.fromFile ? &fixed : nullptr);
     } catch (const std::exception& ex) {
         paletteError(sc, ex.what());
     }
+}
+
+void applyPaletteSidecar(PsxTexture& t, const PaletteSidecar& side, const std::filesystem::path& sc) {
     for (const auto& [idx, word] : side.entries) {
         if (size_t(idx) >= t.palette.size())
             paletteError(sc, "entry " + std::to_string(idx) + " is past the palette, which has " +
                                  std::to_string(t.palette.size()) + " entries");
-        if (cutout && idx == 0) paletteError(sc, "entry 0 is the transparent word of a cutout texture");
+        if (t.cutout && idx == 0) paletteError(sc, "entry 0 is the transparent word of a cutout texture");
         t.palette[size_t(idx)] = word;
     }
     try {
@@ -871,7 +872,65 @@ PsxTexture convertTextureWithSidecar(const Image& img, BitDepth depth, bool cuto
     } catch (const std::exception& ex) {
         paletteError(sc, ex.what());
     }
+}
+
+PsxTexture convertTextureWithSidecar(const Image& img, BitDepth depth, bool cutout, const std::filesystem::path& imagePath) {
+    const std::filesystem::path sc = paletteSidecarPath(imagePath);
+    std::error_code ec;
+    if (!std::filesystem::exists(sc, ec)) return convertTexture(img, depth, cutout);
+    PaletteSidecar side = parsePaletteSidecar(readText(sc), sc);
+    PsxTexture t = convertTextureForSidecar(img, depth, cutout, side, sc);
+    applyPaletteSidecar(t, side, sc);
     return t;
+}
+
+std::string paletteWordHex(uint16_t w) {
+    auto widen = [](unsigned v) { return (v * 255 + 15) / 31; };
+    char buf[8];
+    std::snprintf(buf, sizeof buf, "#%02x%02x%02x", widen(w & 31), widen((w >> 5) & 31), widen((w >> 10) & 31));
+    return buf;
+}
+
+std::string paletteSidecarJson(const PaletteSidecar& side) {
+    nlohmann::ordered_json j;
+    j["version"] = 1;
+    j["source"] = side.fromFile ? "file" : "quantize";
+    if (side.fromFile) j["file"] = side.fileText;
+    if (!side.entries.empty()) {
+        nlohmann::ordered_json e = nlohmann::ordered_json::object();
+        for (const auto& [idx, word] : side.entries) {
+            // Black is 0x8000 whatever "stp" says (rgbWord), so only a coloured word spells it out.
+            const bool stp = (word & 0x8000) && (word & 0x7fff);
+            if (stp) e[std::to_string(idx)] = {{"color", paletteWordHex(word)}, {"stp", true}};
+            else e[std::to_string(idx)] = paletteWordHex(word);
+        }
+        j["entries"] = e;
+    }
+    if (!side.cycles.empty()) {
+        nlohmann::ordered_json c = nlohmann::ordered_json::array();
+        for (const PaletteCycleSpec& s : side.cycles)
+            c.push_back({{"first", s.first}, {"count", s.count}, {"stepSeconds", s.stepSeconds}, {"direction", s.direction}});
+        j["cycles"] = c;
+    }
+    return j.dump(2) + "\n";
+}
+
+int clutCycleStepAt(const ClutCycle& c, double seconds) {
+    if (c.count < 2 || c.period == 0 || !(seconds > 0)) return 0;
+    const double steps = std::floor(seconds * kClutCyclePeriodHz / c.period);
+    return int(std::fmod(steps, double(c.count)));
+}
+
+std::vector<uint16_t> cycledPalette(const std::vector<uint16_t>& base, const std::vector<ClutCycle>& cycles, double seconds) {
+    std::vector<uint16_t> out = base;
+    for (const ClutCycle& c : cycles) {
+        if (c.count < 2 || size_t(c.first) + c.count > base.size()) continue;
+        const int step = clutCycleStepAt(c, seconds);
+        // palcycle::rotationFor: direction -1 turns the other way.
+        const int k = c.direction < 0 && step ? c.count - step : step;
+        for (int i = 0; i < c.count; i++) out[size_t(c.first) + i] = base[size_t(c.first) + (i + k) % c.count];
+    }
+    return out;
 }
 
 }  // namespace splash
