@@ -138,10 +138,13 @@ if canvas and dev:
     check('its player well is drawn', 'blocks.player.s1.b0' in c)
 
 # The Scene panel's Controllers section.
-TAP1 = ['--scroll-to', '@scene.multitap.1', '--wait', '3', '--click', '@scene.multitap.1', '--wait', '5']
+# The live export's result sizes the scene inspector's sections: a control found before it lands can
+# move before the click does (CI's faster runner), so every settings run waits for it first.
+SETTLE = ['--wait-export', '--wait', '5']
+TAP1 = SETTLE + ['--scroll-to', '@scene.multitap.1', '--wait', '3', '--click', '@scene.multitap.1', '--wait', '5']
 p = project_copy()
 cfg = os.path.join(os.path.dirname(p), 'play.cfg')
-lines, c = run(p, ['--scroll-to', '@scene.multitap.1', '--wait', '3'])
+lines, c = run(p, SETTLE + ['--scroll-to', '@scene.multitap.1', '--wait', '3'])
 scene = [l for l in lines if l.startswith('scene: controllers')]
 check('untouched: no tap, players 1 and 2 pads', scene[-1:] == ['scene: controllers tap1 off tap2 off p1 pad p2 pad'], scene)
 check('no slot rows without a tap', 'scene.playdevice.2' in c and 'scene.playdevice.3' not in c and 'scene.multitap.2' in c,
@@ -152,6 +155,7 @@ lines, c = run(p, TAP1 + ['--scroll-to', '@scene.playdevice.1', '--wait', '3', '
                           '--click', '@scene.playdevice.4/None', '--wait', '5', '--scroll-to', '@scene.playdevice.5', '--wait', '3'],
                shotPath('settings'))
 scene = [l for l in lines if l.startswith('scene: controllers')]
+check('the multitap switch turns the tap on', 'scene: controllers tap1 on tap2 off p1 pad p2 pad p3 pad p4 pad p5 pad' in scene, scene)
 check('a tap on port 1, player 1 a mouse, player 4 none',
       scene[-1:] == ['scene: controllers tap1 on tap2 off p1 mouse p2 pad p3 pad p4 none p5 pad'], scene)
 check('the tap brings players 3 to 5', all('scene.playdevice.%d' % n in c for n in (3, 4, 5)) and 'scene.playdevice.6' not in c,
@@ -159,14 +163,14 @@ check('the tap brings players 3 to 5', all('scene.playdevice.%d' % n in c for n 
 text = open(cfg).read()
 check('saved to the play settings', 'play_devices=mouse,pad,pad,none,pad,pad,pad,pad\n' in text and 'multitap=1,0\n' in text, text)
 # Read back by a new run; a slot's list offers a pad or nothing.
-lines, c = run(p, ['--scroll-to', '@scene.playdevice.3', '--wait', '3', '--click', '@scene.playdevice.3', '--wait', '5'],
+lines, c = run(p, SETTLE + ['--scroll-to', '@scene.playdevice.3', '--wait', '3', '--click', '@scene.playdevice.3', '--wait', '5'],
                shotPath('slotlist'))
 scene = [l for l in lines if l.startswith('scene: controllers')]
 check('a new run reads them back', scene[-1:] == ['scene: controllers tap1 on tap2 off p1 mouse p2 pad p3 pad p4 none p5 pad'], scene)
 check('a slot offers a pad or nothing', 'scene.playdevice.3/Pad' in c and 'scene.playdevice.3/None' in c and
       'scene.playdevice.3/Mouse' not in c and 'scene.playdevice.3/Analog pad' not in c,
       sorted(k for k in c if k.startswith('scene.playdevice.3/')))
-lines, c = run(p, ['--scroll-to', '@scene.playdevice.1', '--wait', '3', '--click', '@scene.playdevice.1', '--wait', '5'])
+lines, c = run(p, SETTLE + ['--scroll-to', '@scene.playdevice.1', '--wait', '3', '--click', '@scene.playdevice.1', '--wait', '5'])
 check('a port offers pad, analog pad, mouse and none', all('scene.playdevice.1/' + n in c for n in ('Pad', 'Analog pad', 'Mouse', 'None')),
       sorted(k for k in c if k.startswith('scene.playdevice.1/')))
 
