@@ -166,7 +166,7 @@ SDL_HitTestResult hitTest(SDL_Window* win, const SDL_Point* p, void*) {
 // Scripted input for screenshot mode, so interactions can be checked headless.
 // Actions run one after another from frame 5, in command-line order.
 struct Action {
-    enum Kind { Click, DoubleClick, Drag, Key, Wheel, Text, Wait, KeyDown, KeyUp, MouseDown, MouseUp, Move, Drop, Shot, WaitImport, WaitExport, WaitPlay, ScrollTo, CopyFile, DeleteFile, Maximize, Restore, HitTest, CloseWindow, FocusWindow } kind;
+    enum Kind { Click, DoubleClick, Drag, Key, Wheel, Text, Wait, KeyDown, KeyUp, MouseDown, MouseUp, Move, Drop, Shot, WaitImport, WaitExport, WaitPlay, WaitStop, ScrollTo, CopyFile, DeleteFile, Maximize, Restore, HitTest, CloseWindow, FocusWindow } kind;
     explicit Action(Kind k) : kind(k) {}
     float x0 = 0, y0 = 0, x1 = 0, y1 = 0;
     int button = 0;
@@ -292,6 +292,7 @@ int actionFrames(const Action& a) {
         case Action::WaitImport: return 2;
         case Action::WaitExport: return 2;
         case Action::WaitPlay: return 2;
+        case Action::WaitStop: return 2;
         default: return 4;
     }
 }
@@ -467,6 +468,7 @@ void playAction(ImGuiIO& io, const Action& a, int f) {
         case Action::WaitImport:
         case Action::WaitExport:
         case Action::WaitPlay:
+        case Action::WaitStop:
             break;
     }
 }
@@ -625,6 +627,9 @@ Args parse(int argc, char** argv) {
         } else if (!std::strcmp(argv[i], "--wait-play")) {
             // Holds the script here while a Play, Run on hardware or Export build, or a licence preview, is running, up to 90 s.
             a.actions.push_back(Action(Action::WaitPlay));
+        } else if (!std::strcmp(argv[i], "--wait-stop")) {
+            // Holds the script here while a Play runs and its game is not stopped at a Lua breakpoint, up to 90 s.
+            a.actions.push_back(Action(Action::WaitStop));
         } else if (!std::strcmp(argv[i], "--wait-import")) {
             // Holds the script here while a model import is running (in the background), up to 90 s.
             a.actions.push_back(Action(Action::WaitImport));
@@ -1136,6 +1141,10 @@ int main(int argc, char** argv) {
         return state.play.build.valid() || state.play.hwBuild.valid() || state.play.disc.valid() ||
                state.play.player.valid() || state.play.licencePreview.emu.running();
     };
+    // A Play is building or running and its game is not stopped at a breakpoint.
+    const auto notStopped = [&] {
+        return (state.play.build.valid() || state.play.cons[0].emu.running()) && !state.play.debug.stopped();
+    };
     // An open meter fixes list (#194) also holds it until its fixes are
     // measured for this revision and the before/after thumbnails converted.
     const auto fixesBehind = [&] {
@@ -1283,6 +1292,7 @@ int main(int argc, char** argv) {
                 if (a.kind == Action::WaitImport && state.importBusy()) held = true, heldKind = a.kind, heldSince = std::chrono::steady_clock::now();
                 if (a.kind == Action::WaitExport && exportBehind()) held = true, heldKind = a.kind, heldSince = std::chrono::steady_clock::now();
                 if (a.kind == Action::WaitPlay && playBuilding()) held = true, heldKind = a.kind, heldSince = std::chrono::steady_clock::now();
+                if (a.kind == Action::WaitStop && notStopped()) held = true, heldKind = a.kind, heldSince = std::chrono::steady_clock::now();
                 if (a.kind == Action::ScrollTo) {
                     held = true, heldKind = a.kind, heldSince = std::chrono::steady_clock::now();
                     scrollTarget = a.target, scrollStep = 0, scrollSeen = ImRect(), scrollDone = false;
@@ -1326,10 +1336,12 @@ int main(int argc, char** argv) {
                 scrollStep++;
             }
             const bool holding = heldKind == Action::WaitExport ? exportBehind() : heldKind == Action::WaitPlay ? playBuilding()
+                                 : heldKind == Action::WaitStop ? notStopped()
                                  : heldKind == Action::ScrollTo ? !scrollDone : state.importBusy();
             if (held && (!holding || std::chrono::steady_clock::now() - heldSince > std::chrono::seconds(90))) {
                 if (holding) std::fprintf(stderr, heldKind == Action::WaitExport ? "--wait-export: export still behind after 90 s\n"
                                                   : heldKind == Action::WaitPlay ? "--wait-play: build still running after 90 s\n"
+                                                  : heldKind == Action::WaitStop ? "--wait-stop: the game did not stop within 90 s\n"
                                                   : heldKind == Action::ScrollTo ? "--scroll-to: still scrolling after 90 s\n"
                                                                                  : "--wait-import: still importing after 90 s\n");
                 held = false;
