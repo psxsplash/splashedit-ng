@@ -572,6 +572,25 @@ must write a v28 pack with one blob record at 153 darkness and size 0.75 m. Need
 
     python3 shadowcheck.py <splashedit> [screenshot.png]
 
+`particlescheck.py` checks particle emitters in the editor on a project made from `tests/particles/`
+(a sheet `spark`; `Fountain`, looping and autoplayed, 24 a second for 1.5 s in a pool of 40;
+`Sparks`, one-shot and animated, pool 48; a crate; an empty `Spare`). With Fountain selected the
+inspector's Particle emitter section and its `obj.pt*` controls must be drawn and print the saved
+values (`particles: Fountain sheet spark anim - cell 1 rate 24 ... pool 1156`); the Scene view
+preview, which runs core/particles.hh (the console's integer steps), must print `particle preview:
+Fountain tick 120 live 36 drawn D` (36 = the last 90 ticks' spawns, what psxsplash holds then) and its
+quads (`vp.ptbox.Fountain`) must show the warm start tint. The status bar's `statusbar: particles`
+line and its RAM line must equal `splashpack-cli export --stats` of the saved scene (2 emitters, 88
+particles, pool 2536 bytes, 3520 bytes of quads). The negative arm makes Fountain inactive: under 1%
+of those warm pixels, no bounds, and the meter counts Sparks alone. Then it types Rate and Max
+particles, picks the `twinkle` animation, turns Looping off (Duration appears) and Autoplay off, undoes
+a typed rate, and adds an emitter to `Spare` from the Add component picker, picking its sheet. Needs a
+display (CI runs it under `xvfb-run`). `tests/particles/` is also the source of psxsplash's
+`tests/boot/fixture-particles`; `testParticles` in editor_tests checks the scene file, the golden run
+psxsplash's host test checks, the v31 bytes and the meters against the table.
+
+    python3 particlescheck.py <splashedit>
+
 `statusbudgetcheck.py` checks the status bar's Triangles meter and what the meters show when the
 live export fails. It builds a temp project with one flat grid mesh: 1700 triangles must print
 `statusbar: tris 1700/2000 warn` (the most triangles in view against the psxsplash docs' 2000 per
