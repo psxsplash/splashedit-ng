@@ -26,6 +26,7 @@
 #include "navregion.hh"
 #include "path.hh"
 #include "strings.hh"
+#include "particles.hh"
 #include "shadow.hh"
 #include "skin.hh"
 #include "texture.hh"
@@ -2736,9 +2737,78 @@ static ExportResult exportSplashpackBaked(const Scene& scene, const fs::path& ro
     const bool hasShadows = !shadows.empty();
     st.shadows = int(shadows.size());
 
+    // Particle emitters (v31), active objects in flatten order. Each draws
+    // from a sprite sheet, so they need the sprite table's indices; an
+    // emitter on a mesh object follows its game object.
+    std::vector<particles::Record> emitters;
+    {
+        auto gnum = [](float v) {
+            char b[32];
+            std::snprintf(b, sizeof b, "%g", double(v));
+            return std::string(b);
+        };
+        std::set<std::string> names;
+        for (const FlatObject& fo : flat) {
+            if (!fo.activeInHierarchy || !fo.object->active || !fo.object->particles) continue;
+            const ParticleEmitterComponent& pe = *fo.object->particles;
+            const std::string where = fo.object->name + ": Particle Emitter";
+            const auto& ss = scene.spriteSheets;
+            const auto sit = std::find_if(ss.begin(), ss.end(), [&](const SpriteSheet& s) { return s.name == pe.sheet; });
+            if (pe.sheet.empty()) {
+                res.errors.push_back(where + " has no sprite sheet: pick the sheet its particles are cut from");
+                continue;
+            }
+            if (sit == ss.end()) {
+                res.errors.push_back(where + ": no sprite sheet named '" + pe.sheet + "'");
+                continue;
+            }
+            const size_t si = size_t(sit - ss.begin());
+            uint8_t anim = particles::kNoAnim;
+            if (!pe.anim.empty()) {
+                size_t global = 0;
+                for (size_t i = 0; i < si; i++) global += ss[i].anims.size();
+                const auto ait = std::find_if(sit->anims.begin(), sit->anims.end(), [&](const SpriteAnim& a) { return a.name == pe.anim; });
+                if (ait == sit->anims.end()) {
+                    res.errors.push_back(where + ": sprite sheet '" + pe.sheet + "' has no animation named '" + pe.anim + "'");
+                    continue;
+                }
+                anim = uint8_t(global + size_t(ait - sit->anims.begin()));
+            } else if (spriteTextures[si] && sit->cellW > 0 && sit->cellH > 0) {
+                const int cells = (spriteTextures[si]->width / sit->cellW) * (spriteTextures[si]->height / sit->cellH);
+                if (pe.cell >= cells)
+                    res.errors.push_back(where + ": cell " + std::to_string(pe.cell) + " is outside sprite sheet '" + pe.sheet +
+                                         "' (" + std::to_string(cells) + " cells)");
+            }
+            if (pe.maxParticles > particles::kMaxPerEmitter)
+                res.errors.push_back(where + ": " + std::to_string(pe.maxParticles) + " particles, psxsplash holds at most " +
+                                     std::to_string(particles::kMaxPerEmitter) + " per emitter");
+            if (!names.insert(fo.object->name).second)
+                res.warnings.push_back("two particle emitters are on objects named '" + fo.object->name +
+                                       "': Particles.Find and the Blocks reach only the first");
+            const auto ex = std::find_if(exporters.begin(), exporters.end(), [&](const ExpObject& e) { return e.obj == fo.object; });
+            const uint16_t go = ex == exporters.end() ? particles::kNoObject : uint16_t(ex - exporters.begin());
+            emitters.push_back(particles::particleRecord(fo.object->name, pe, fo.localToWorld, gte, uint8_t(si), anim, go));
+            const particles::Record& r = emitters.back();
+            if (double(pe.rate) * pe.lifetime > double(r.maxParticles) + 0.5 && pe.loop)
+                res.warnings.push_back(where + ": " + gnum(pe.rate) + " a second for " + gnum(pe.lifetime) +
+                                       " s needs " + std::to_string(int(std::ceil(double(pe.rate) * pe.lifetime))) +
+                                       " particles but the pool holds " + std::to_string(r.maxParticles) +
+                                       ": the rest are not spawned (raise Max particles)");
+        }
+        if (emitters.size() > size_t(particles::kMaxEmitters))
+            res.errors.push_back(std::to_string(emitters.size()) + " particle emitters, psxsplash holds at most " +
+                                 std::to_string(particles::kMaxEmitters) + ": remove some");
+    }
+    if (!res.ok()) return res;
+    const bool hasParticles = !emitters.empty();
+    st.particleEmitters = int(emitters.size());
+    for (const particles::Record& r : emitters) st.particleMax += r.maxParticles;
+    st.particlePoolBytes = particles::poolBytes(uint32_t(emitters.size()), uint32_t(st.particleMax));
+    st.particleBumpBytes = uint32_t(st.particleMax) * particles::kBumpBytes;
+
     BinWriter w;
     st.bumpAllocatorNeed = bumpAllocatorNeed(scene, exporters, streamed, st.streamDrawTris, canvases) +
-                           uint32_t(shadows.size()) * shadow::kBumpBytes;
+                           uint32_t(shadows.size()) * shadow::kBumpBytes + st.particleBumpBytes;
     st.trianglesInView = st.streamDrawTris;
     for (size_t i = 0; i < exporters.size(); i++)
         if (!streamed[i]) st.trianglesInView += exporters[i].tris.size();
@@ -2746,11 +2816,12 @@ static ExportResult exportSplashpackBaked(const Scene& scene, const fs::path& ro
                                                                  : st.bumpAllocatorNeed;
 
     // ---- header (156 bytes, v27; 160 bytes, v28, only when the scene has
-    // shadows, so a scene without them exports exactly as before)
+    // shadows; 172 bytes, v31, only when it has particle emitters, so a scene
+    // without either exports exactly as before)
     bool hasLights = !runtimeLights.empty();
     w.u8('S');
     w.u8('P');
-    w.u16(hasShadows ? 28 : 27);
+    w.u16(hasParticles ? particles::kSplashpackVersion : hasShadows ? 28 : 27);
     w.u16(uint16_t(luaFiles.size()));
     w.u16(uint16_t(exporters.size()));
     res.stats.gameObjects = int(exporters.size());
@@ -2841,8 +2912,15 @@ static ExportResult exportSplashpackBaked(const Scene& scene, const fs::path& ro
     w.u32(st.orderingTableSize);
     w.u32(st.bumpAllocatorSize);
     size_t shadowTableOffsetPos = 0;
-    if (hasShadows) {
+    if (hasShadows || hasParticles) {
         shadowTableOffsetPos = w.pos();
+        w.u32(0);
+    }
+    size_t particleTableOffsetPos = 0;
+    if (hasParticles) {
+        w.u32(0);  // v29's word (psxsplash: reservedV29), 0
+        w.u32(0);  // v30's word, 0
+        particleTableOffsetPos = w.pos();
         w.u32(0);
     }
 
@@ -3287,6 +3365,46 @@ static ExportResult exportSplashpackBaked(const Scene& scene, const fs::path& ro
             w.u8(so.darkness);
             w.u16(so.size);
             w.u16(fade);
+        }
+    }
+
+    // ---- particle emitters (v31): {u16 count, u16 0}, then 76-byte records
+    // (psxsplash particlemath.hh ParticleEmitterRecord), then their names
+    if (hasParticles) {
+        w.align4();
+        w.patchU32(particleTableOffsetPos, uint32_t(w.pos()));
+        w.u16(uint16_t(emitters.size()));
+        w.u16(0);
+        std::vector<size_t> namePos;
+        for (const particles::Record& r : emitters) {
+            namePos.push_back(w.pos());
+            w.u32(0);
+            for (int32_t v : r.pos) w.i32(v);
+            for (int32_t v : r.vel) w.i32(v);
+            for (int32_t v : r.spread) w.i32(v);
+            w.i32(r.gravity);
+            w.u32(r.rate);
+            w.u16(r.lifetime);
+            w.u16(r.maxParticles);
+            w.u16(r.burst);
+            w.u16(r.duration);
+            w.u16(r.gameObject);
+            w.u16(r.size);
+            w.u8(r.sheet);
+            w.u8(r.anim);
+            w.u8(r.cell);
+            w.u8(r.flags);
+            for (uint8_t c : r.startColor) w.u8(c);
+            for (uint8_t c : r.endColor) w.u8(c);
+            w.u16(0);
+            w.u32(r.seed);
+        }
+        for (size_t i = 0; i < emitters.size(); i++) {
+            const std::string name = truncateUtf16(emitters[i].name, 24);
+            if (name.empty()) continue;
+            w.patchU32(namePos[i], uint32_t(w.pos()));
+            w.bytes(name.data(), name.size());
+            w.u8(0);
         }
     }
 

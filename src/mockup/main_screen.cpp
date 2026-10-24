@@ -22,6 +22,7 @@
 #include "disc.hh"
 #include "rooms.hh"
 #include "splashpack.hh"
+#include "particles.hh"
 #include "path.hh"
 #include "shadow.hh"
 #include "import.hh"
@@ -76,6 +77,7 @@ constexpr ImU32 walkoff = rgb(0xff6a00);
 constexpr ImU32 agent = rgb(0xff5fa0);
 constexpr ImU32 terrain = rgb(0x8fbf5a);
 constexpr ImU32 path = rgb(0xc8f06a);
+constexpr ImU32 particles = rgb(0xffa45c);
 constexpr ImU32 hearing = rgb(0x6ad8ff);
 constexpr ImU32 prefab = rgb(0x6ab0ff);  // a prefab instance, and .prefab files in the Project panel
 }  // namespace kind
@@ -1026,6 +1028,7 @@ static ObjectLook lookOf(editor::ComponentKind k) {
         case K::Terrain: return {icon::layers, kind::terrain};
         case K::Path: return {icon::move, kind::path};
         case K::FollowPath: return {icon::magnet, kind::path};
+        case K::Particles: return {icon::zap, kind::particles};
     }
     return {icon::box, color::textDim};
 }
@@ -1035,6 +1038,7 @@ static ObjectLook lookOf(const splash::Object& o, bool expanded) {
     if (o.agent) return lookOf(K::Agent);
     if (o.terrain) return lookOf(K::Terrain);
     if (o.path && !o.mesh) return lookOf(K::Path);
+    if (o.particles && !o.mesh) return lookOf(K::Particles);
     if (o.mesh) return lookOf(K::Mesh);
     if (o.script && !o.collider) return {icon::script, kind::script};
     if (o.player) return lookOf(K::Player);
@@ -5213,6 +5217,183 @@ static void agentMarkers(ImDrawList* dl, viewport::Ps1View& view, ImVec2 mn, ImV
 // with height. Drawn over the scene rather than depth tested, and without the
 // console's fog fade. Scripted tests get one "shadow preview:" line per blob
 // and its screen box as vp.shadow.<name>.
+// Particle emitters, live: core/particles.hh's simulation (the console's
+// integer steps, from the emitter's seed) at 60 ticks a second since the
+// emitter last changed, drawn as camera-facing quads of the sheet's cells,
+// tinted, farthest first, over the 3D view (nothing hides them). Every
+// emitter plays from the start whether or not it autoplays on the console; a
+// one-shot one starts again half a second after its last particle dies.
+// Scripted runs print, once per emitter after 120 ticks,
+//   particle preview: <name> tick 120 live N drawn D
+// and name the emitter's origin vp.particles.<name> and the drawn quads'
+// bounds vp.ptbox.<name>.
+struct ParticlePreview {
+    std::string key;  // what the record and look were made from; a change restarts it
+    double start = 0;
+    int ticks = 0;
+    double idleSince = -1;
+    splash::particles::State state;
+    bool reported = false;
+};
+
+namespace {
+// One GL texture per sprite sheet texture, converted as the console shows it.
+struct SheetTex {
+    editor::TexturePreviewer* previewer = nullptr;  // never destroyed: its worker thread is left to the process exit
+    std::shared_ptr<const editor::TexturePreview> uploaded;
+    unsigned tex = 0;
+    int width = 0, height = 0;
+};
+const SheetTex* sheetTexture(const editor::Document& doc, const splash::SpriteSheet& sheet) {
+    static std::map<std::string, SheetTex> cache;
+    if (sheet.texture.empty()) return nullptr;
+    const editor::TexturePreviewKey key{doc.projectRoot() / fromUtf8(sheet.texture), sheet.bitDepth, true};
+    SheetTex& t = cache[sheet.texture + "/" + std::to_string(int(sheet.bitDepth))];
+    if (!t.previewer) t.previewer = new editor::TexturePreviewer;
+    t.previewer->request(key);
+    std::shared_ptr<const editor::TexturePreview> pv = t.previewer->latest();
+    if (!pv || pv->key != key || !pv->error.empty()) return t.tex ? &t : nullptr;
+    if (pv != t.uploaded) {
+        t.uploaded = pv;
+        if (!t.tex) glGenTextures(1, &t.tex);
+        glBindTexture(GL_TEXTURE_2D, t.tex);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, pv->width, pv->height, 0, GL_RGBA, GL_UNSIGNED_BYTE, pv->ps1.data());
+        glBindTexture(GL_TEXTURE_2D, 0);
+        t.width = pv->width;
+        t.height = pv->height;
+    }
+    return &t;
+}
+}  // namespace
+
+static void particleOverlay(ImDrawList* dl, viewport::Ps1View& view, ImVec2 mn, ImVec2 sz, const editor::Document& doc,
+                            const std::vector<splash::FlatObject>& shown) {
+    namespace P = splash::particles;
+    static std::map<std::string, ParticlePreview> previews;
+    const double now = ImGui::GetTime();
+    const float gte = doc.scene().settings.gteScaling > 0 ? doc.scene().settings.gteScaling : 100.f;
+    viewport::Vec3 right, up, fwd;
+    view.basis(&right, &up, &fwd);
+    const viewport::Vec3 eye = view.eye();
+    struct Quad {
+        float depth;
+        ImVec2 p[4];
+        ImVec2 uv0, uv1;
+        ImU32 col;
+        unsigned tex;
+    };
+    std::vector<Quad> quads;
+    std::set<std::string> seen;
+    for (const splash::FlatObject& fo : shown) {
+        if (!fo.activeInHierarchy || !fo.object->active || !fo.object->particles) continue;
+        const splash::ParticleEmitterComponent& pe = *fo.object->particles;
+        const std::string& name = fo.object->name;
+        const auto& sheets = doc.scene().spriteSheets;
+        const auto sit = std::find_if(sheets.begin(), sheets.end(), [&](const splash::SpriteSheet& s) { return s.name == pe.sheet; });
+        ImVec2 origin;
+        if (view.project(toGl(fo.localToWorld.position()), mn, sz, &origin))
+            nameRect("vp.particles." + name, ImRect(origin - ImVec2(6, 6), origin + ImVec2(6, 6)));
+        if (sit == sheets.end() || sit->cellW < 1 || sit->cellH < 1) continue;
+        const splash::SpriteAnim* anim = nullptr;
+        for (const splash::SpriteAnim& a : sit->anims)
+            if (a.name == pe.anim) anim = &a;
+        // The record as exported (world position, no followed object), played.
+        P::Record r = P::particleRecord(name, pe, fo.localToWorld, gte, 0, P::kNoAnim, P::kNoObject);
+        r.flags |= P::kFlagAutoplay;
+        std::string key = splash::writeObjectsText({*fo.object});
+        for (int32_t v : r.pos) key += "/" + std::to_string(v);
+        key += "/" + std::to_string(gte);
+        seen.insert(name);
+        ParticlePreview& pv = previews[name];
+        if (pv.key != key) {
+            pv = ParticlePreview{};
+            pv.key = key;
+            pv.start = now;
+            pv.state = P::simulate(r, 0);
+        }
+        const int want = int((now - pv.start) * P::kTicksPerSecond);
+        // At most two seconds of catching up a frame (a long stall jumps).
+        for (int steps = 0; pv.ticks < want && steps < 120; steps++, pv.ticks++) P::tick(r, pv.state);
+        if (pv.ticks < want) pv.start = now - double(pv.ticks) / P::kTicksPerSecond;
+        if (!pv.state.playing && pv.state.count == 0) {
+            if (pv.idleSince < 0) pv.idleSince = now;
+            else if (now - pv.idleSince > 0.5) {
+                P::play(r, pv.state);
+                pv.idleSince = -1;
+            }
+        }
+        const SheetTex* st = sheetTexture(doc, *sit);
+        const int cols = st && st->width >= sit->cellW ? st->width / sit->cellW : 1;
+        const float wM = float(r.size) * gte / 4096.f, hM = wM * float(sit->cellH) / float(sit->cellW);
+        const viewport::Vec3 rx{right.x * wM * 0.5f, right.y * wM * 0.5f, right.z * wM * 0.5f};
+        const viewport::Vec3 uy{up.x * hM * 0.5f, up.y * hM * 0.5f, up.z * hM * 0.5f};
+        ImRect box(ImVec2(FLT_MAX, FLT_MAX), ImVec2(-FLT_MAX, -FLT_MAX));
+        int drawn = 0;
+        uint32_t slot = pv.state.head;
+        for (uint16_t k = 0; k < pv.state.count; k++, slot = slot + 1 >= r.maxParticles ? 0 : slot + 1) {
+            const P::Particle& p = pv.state.particles[slot];
+            const float s = gte / 16777216.f;
+            const splash::Vec3 wpos{float(p.pos[0]) * s, -float(p.pos[1]) * s, float(p.pos[2]) * s};
+            const viewport::Vec3 c = toGl(wpos);
+            const viewport::Vec3 corners[4] = {{c.x - rx.x + uy.x, c.y - rx.y + uy.y, c.z - rx.z + uy.z},
+                                               {c.x + rx.x + uy.x, c.y + rx.y + uy.y, c.z + rx.z + uy.z},
+                                               {c.x + rx.x - uy.x, c.y + rx.y - uy.y, c.z + rx.z - uy.z},
+                                               {c.x - rx.x - uy.x, c.y - rx.y - uy.y, c.z - rx.z - uy.z}};
+            Quad q;
+            bool ok = true;
+            for (int i = 0; i < 4 && ok; i++) ok = view.project(corners[i], mn, sz, &q.p[i]);
+            if (!ok) continue;
+            q.depth = (c.x - eye.x) * fwd.x + (c.y - eye.y) * fwd.y + (c.z - eye.z) * fwd.z;
+            const int cell = anim ? P::animCell(uint8_t(anim->firstFrame), uint8_t(anim->frameCount), uint8_t(anim->frameDuration),
+                                                anim->loop, p.age)
+                                  : pe.cell;
+            if (st && st->width > 0 && st->height > 0) {
+                const float u = float((cell % cols) * sit->cellW), v = float((cell / cols) * sit->cellH);
+                q.uv0 = ImVec2(u / st->width, v / st->height);
+                q.uv1 = ImVec2((u + sit->cellW) / st->width, (v + sit->cellH) / st->height);
+                q.tex = st->tex;
+            } else {
+                q.tex = 0;
+            }
+            auto ch = [&](uint8_t a, uint8_t b) { return std::min(255, 2 * int(P::colorAt(a, b, p.age, r.lifetime))); };
+            q.col = IM_COL32(ch(r.startColor[0], r.endColor[0]), ch(r.startColor[1], r.endColor[1]), ch(r.startColor[2], r.endColor[2]), 255);
+            for (const ImVec2& pt : q.p) box.Add(pt);
+            quads.push_back(q);
+            drawn++;
+        }
+        if (drawn) nameRect("vp.ptbox." + name, box);
+        if (!pv.reported && pv.ticks >= 120) {
+            pv.reported = true;
+            scriptLine(nullptr, "particle preview: " + name + " tick 120 live " + std::to_string(pv.state.count) + " drawn " +
+                                    std::to_string(drawn));
+        }
+    }
+    for (auto it = previews.begin(); it != previews.end();) it = seen.count(it->first) ? std::next(it) : previews.erase(it);
+    std::stable_sort(quads.begin(), quads.end(), [](const Quad& a, const Quad& b) { return a.depth > b.depth; });
+    // Runs of one texture go under one filter switch (one draw call).
+    for (size_t i = 0; i < quads.size();) {
+        size_t j = i;
+        while (j < quads.size() && quads[j].tex == quads[i].tex) j++;
+        if (quads[i].tex) {
+            ui::addTextureImages(dl, [&] {
+                for (size_t k = i; k < j; k++) {
+                    const Quad& q = quads[k];
+                    dl->AddImageQuad((ImTextureID)(intptr_t)q.tex, q.p[0], q.p[1], q.p[2], q.p[3], q.uv0, ImVec2(q.uv1.x, q.uv0.y),
+                                     q.uv1, ImVec2(q.uv0.x, q.uv1.y), q.col);
+                }
+            });
+        } else {
+            for (size_t k = i; k < j; k++) dl->AddQuadFilled(quads[k].p[0], quads[k].p[1], quads[k].p[2], quads[k].p[3], quads[k].col);
+        }
+        i = j;
+    }
+}
+
 static void shadowOverlay(ImDrawList* dl, viewport::Ps1View& view, ImVec2 mn, ImVec2 sz, const editor::Document& doc,
                           const std::vector<splash::FlatObject>& shown, const std::optional<splash::ExportResult>& res) {
     static const std::vector<std::vector<splash::Vec3>> noOutlines;
@@ -5696,6 +5877,9 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
         dl->ChannelsSetCurrent(kScene);
         shadowOverlay(dl, view, mn, sz, doc, shown, st.live.result());
     }
+    // Particle emitters, playing.
+    dl->ChannelsSetCurrent(kScene);
+    particleOverlay(dl, view, mn, sz, doc, shown);
 
     // Selection outline and the tool's gizmo follow the selected object.
     if (sel) {
@@ -8884,7 +9068,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
     // A component removed from its section menu goes once drawing is done,
     // since the sections below still read it this frame.
     std::optional<editor::ComponentKind> toRemove;
-    bool removedFlags[static_cast<int>(editor::ComponentKind::FollowPath) + 1] = {};
+    bool removedFlags[static_cast<int>(editor::ComponentKind::Particles) + 1] = {};
     auto removeFlag = [&](editor::ComponentKind k) { return &removedFlags[static_cast<int>(k)]; };
     float pos[3] = {t.position.x, t.position.y, t.position.z};
     FieldEdit fe = vec3Field("pos", row("lpos", "Position", "Where the object sits, in metres, relative to its parent."),
@@ -11035,6 +11219,164 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
         report("follow", std::string());
     }
 
+    if (o->particles) {
+        const splash::ParticleEmitterComponent pe = *o->particles;
+        const std::string name = o->name;
+        top = y;
+        compSection("s_particles", editor::ComponentKind::Particles);
+        auto caption = [&](const std::string& id, const std::string& t, ImU32 col) {
+            const float tx = x0 + space::sm, w = x1 - space::sm - tx;
+            const ImVec2 at(tx, y + space::xs);
+            const ImVec2 ts = f.regular->CalcTextSizeA(type::caption, FLT_MAX, w, t.c_str());
+            dl->AddText(f.regular, type::caption, at, col, t.c_str(), nullptr, w);
+            nameRect(id, ImRect(at, at + ts));
+            y += ts.y + space::xs + space::sm;
+        };
+        const std::vector<splash::SpriteSheet>& sheets = doc.scene().spriteSheets;
+        const auto sit = std::find_if(sheets.begin(), sheets.end(), [&](const splash::SpriteSheet& s) { return s.name == pe.sheet; });
+        {
+            std::vector<const char*> items;
+            int at = -1;
+            for (size_t i = 0; i < sheets.size(); i++) {
+                if (sheets[i].name == pe.sheet) at = int(i);
+                items.push_back(sheets[i].name.c_str());
+            }
+            const std::string shown = pe.sheet.empty() ? std::string("None") : at < 0 ? pe.sheet + "  (no such sheet)" : pe.sheet;
+            const ImRect rr = row("lptsheet", "Sprite sheet", "The scene sprite sheet the particles are cut from (Scene > Sprite sheets).");
+            nameRect("obj.ptsheet", rr);
+            const int pick = dropdownMenu("ptsheet", rr, icon::image, shown.c_str(), items, at);
+            if (pick >= 0 && pick != at) {
+                const std::string sn = sheets[size_t(pick)].name;
+                doc.edit(path, [sn](splash::Object& ob) {
+                    ob.particles->sheet = sn;
+                    ob.particles->anim.clear();
+                });
+            }
+        }
+        if (sit != sheets.end()) {
+            std::vector<std::string> labels{"Still cell"};
+            int at = pe.anim.empty() ? 0 : -1;
+            for (const splash::SpriteAnim& a : sit->anims) {
+                if (a.name == pe.anim) at = int(labels.size());
+                labels.push_back(a.name);
+            }
+            std::vector<const char*> items;
+            for (const std::string& l : labels) items.push_back(l.c_str());
+            const std::string shown = pe.anim.empty() ? std::string("Still cell") : at < 0 ? pe.anim + "  (no such animation)" : pe.anim;
+            const ImRect rr = row("lptanim", "Animation",
+                                  "Played over each particle's life from its birth; a still cell shows the Cell below.");
+            nameRect("obj.ptanim", rr);
+            const int pick = dropdownMenu("ptanim", rr, icon::play, shown.c_str(), items, at);
+            if (pick >= 0 && pick != at) {
+                const std::string an = pick == 0 ? std::string() : labels[size_t(pick)];
+                doc.edit(path, [an](splash::Object& ob) { ob.particles->anim = an; });
+            }
+        }
+        if (pe.anim.empty())
+            number("ptcell", "Cell", "The sheet cell each particle shows, row by row from 0.", float(pe.cell), "", "ptcell", 0, 255,
+                   [](splash::Object& ob, float v) { ob.particles->cell = int(std::lround(v)); }, 0);
+        number("ptrate", "Rate", "Particles spawned a second while it plays (0: only the burst).", pe.rate, "/s", "ptrate", 0, 600,
+               [](splash::Object& ob, float v) { ob.particles->rate = v; });
+        number("ptburst", "Burst", "Particles spawned at once when it starts (Particles.Play).", float(pe.burst), "", "ptburst", 0,
+               float(splash::particles::kMaxPerEmitter), [](splash::Object& ob, float v) { ob.particles->burst = int(std::lround(v)); }, 0);
+        number("ptlife", "Lifetime", "Seconds each particle lives.", pe.lifetime, "s", "ptlife", 1.0f / 60, 60,
+               [](splash::Object& ob, float v) { ob.particles->lifetime = v; });
+        auto vecRow = [&](const char* id, const char* label, const char* tip, splash::Vec3 vv, void (*set)(splash::Object&, splash::Vec3)) {
+            const std::string lid = std::string("l") + id;
+            const ImRect fr = row(lid.c_str(), label, tip);
+            nameVec3(std::string("obj.") + id, fr);
+            float v[3] = {vv.x, vv.y, vv.z};
+            commit(vec3Field(id, fr, fmtShort(vv.x).c_str(), fmtShort(vv.y).c_str(), fmtShort(vv.z).c_str(), "m/s", v), id,
+                   [&](splash::Object& ob) { set(ob, {v[0], v[1], v[2]}); });
+        };
+        vecRow("ptvel", "Velocity", "Start velocity in metres per second, in the object's space: rotate the object to aim it.",
+               pe.velocity, [](splash::Object& ob, splash::Vec3 v) { ob.particles->velocity = v; });
+        vecRow("ptspread", "Spread", "A random amount up to this, either way, added to each start velocity, per world axis.",
+               pe.spread, [](splash::Object& ob, splash::Vec3 v) {
+                   ob.particles->spread = {std::fabs(v.x), std::fabs(v.y), std::fabs(v.z)};
+               });
+        number("ptgrav", "Gravity", "Metres per second per second pulling the particles down (negative floats them up).", pe.gravity,
+               "m/s2", "ptgrav", -100, 100, [](splash::Object& ob, float v) { ob.particles->gravity = v; });
+        auto colourRow = [&](const char* id, const char* label, const char* tip, const std::array<float, 3>& c, bool start) {
+            const std::string lid = std::string("l") + id, wid = std::string("obj.") + id, pop = std::string("##") + id + "pick";
+            const ImRect colRow = row(lid.c_str(), label, tip);
+            nameRect(wid, colRow);
+            const ColorFieldHit hit = colorField(id, colRow, c, wid.c_str());
+            if (hit.clicked) ImGui::OpenPopup(pop.c_str());
+            if (hit.pasted) {
+                const std::array<float, 3> pc = *hit.pasted;
+                doc.edit(path, [pc, start](splash::Object& ob) { (start ? ob.particles->startColor : ob.particles->endColor) = pc; });
+            }
+            ImGui::SetNextWindowPos(ImVec2(colRow.Max.x, colRow.Max.y + space::xs), ImGuiCond_Always, ImVec2(1, 0));
+            pushPopupStyle();
+            if (ImGui::BeginPopup(pop.c_str())) {
+                float cc[3] = {c[0], c[1], c[2]};
+                ImGui::SetNextItemWidth(220);
+                if (ImGui::ColorPicker3((pop + "wheel").c_str(), cc,
+                                        ImGuiColorEditFlags_NoSidePreview | ImGuiColorEditFlags_DisplayHex | ImGuiColorEditFlags_NoAlpha))
+                    doc.edit(path, [cc, start](splash::Object& ob) {
+                        (start ? ob.particles->startColor : ob.particles->endColor) = {cc[0], cc[1], cc[2]};
+                    }, id);
+                if (ImGui::IsItemDeactivated()) doc.endMerge();
+                ImGui::EndPopup();
+            }
+            ImGui::PopStyleVar(4);
+            ImGui::PopStyleColor(2);
+        };
+        colourRow("ptstart", "Start colour", "The tint at birth. 50% grey (#7F7F7F) draws the sheet's own colours; brighter doubles them.",
+                  pe.startColor, true);
+        colourRow("ptend", "End colour", "The tint at the end of its life; it changes evenly from the start colour.", pe.endColor, false);
+        number("ptsize", "Size", "The billboard's width in metres; its height follows the cell's shape.", pe.size, "m", "ptsize", 0.01f,
+               20, [](splash::Object& ob, float v) { ob.particles->size = v; });
+        number("ptmax", "Max particles", "The pool the console sets aside when the scene loads; spawns past it are dropped.",
+               float(pe.maxParticles), "", "ptmax", 1, float(splash::particles::kMaxPerEmitter),
+               [](splash::Object& ob, float v) { ob.particles->maxParticles = int(std::lround(v)); }, 0);
+        toggleRow("ptloop", "Looping", "Emits until Particles.Stop. Off, it emits for Duration each time it plays.", pe.loop,
+                  [](splash::Object& ob) { ob.particles->loop = !ob.particles->loop; });
+        if (!pe.loop)
+            number("ptdur", "Duration", "Seconds a one-shot emitter spawns for after Particles.Play.", pe.duration, "s", "ptdur", 0, 600,
+                   [](splash::Object& ob, float v) { ob.particles->duration = v; });
+        toggleRow("ptauto", "Autoplay", "Plays when the scene loads. Off, it waits for Particles.Play (or a Blocks start).", pe.autoplay,
+                  [](splash::Object& ob) { ob.particles->autoplay = !ob.particles->autoplay; });
+        const int maxP = std::clamp(pe.maxParticles, 1, splash::particles::kMaxPerEmitter);
+        const uint32_t pool = splash::particles::poolBytes(1, uint32_t(maxP));
+        caption("obj.ptcost",
+                "Costs " + std::to_string(pool) + " bytes of RAM (its pool) and up to " + std::to_string(maxP) + " quads, " +
+                    std::to_string(uint32_t(maxP) * splash::particles::kBumpBytes) + " bytes of render buffer, a frame.",
+                color::textFaint);
+        caption("obj.ptlua", "Lua: Particles.Play(\"" + name + "\"), Particles.Stop(\"" + name + "\"), Particles.Burst(\"" + name + "\", n)",
+                color::textFaint);
+        if (pe.sheet.empty())
+            caption("obj.ptnosheet",
+                    sheets.empty() ? std::string("The scene has no sprite sheets: add one under Scene > Sprite sheets, then pick it here.")
+                                   : std::string("Pick the sprite sheet its particles are cut from."),
+                    color::warn);
+        else if (sit == sheets.end())
+            caption("obj.ptnosheet", "No sprite sheet named '" + pe.sheet + "' in this scene: the export fails.", color::warn);
+        const double needed = double(pe.rate) * pe.lifetime + (pe.loop ? 0.0 : double(pe.burst));
+        if (pe.loop && needed > maxP + 0.5)
+            caption("obj.ptfull",
+                    fmtShort(pe.rate) + " a second for " + fmtShort(pe.lifetime) + " s needs " + std::to_string(int(std::ceil(needed))) +
+                        " particles; the pool holds " + std::to_string(maxP) + ", the rest are not spawned.",
+                    color::warn);
+        char hs[16], he[16];
+        std::snprintf(hs, sizeof hs, "#%02x%02x%02x", splash::particles::tintByte(pe.startColor[0]),
+                      splash::particles::tintByte(pe.startColor[1]), splash::particles::tintByte(pe.startColor[2]));
+        std::snprintf(he, sizeof he, "#%02x%02x%02x", splash::particles::tintByte(pe.endColor[0]),
+                      splash::particles::tintByte(pe.endColor[1]), splash::particles::tintByte(pe.endColor[2]));
+        report("particles", "particles: " + name + " sheet " + (pe.sheet.empty() ? std::string("-") : pe.sheet) + " anim " +
+                                (pe.anim.empty() ? std::string("-") : pe.anim) + " cell " + std::to_string(pe.cell) + " rate " +
+                                fmtShort(pe.rate) + " burst " + std::to_string(pe.burst) + " life " + fmtShort(pe.lifetime) + " vel " +
+                                fmtShort(pe.velocity.x) + "," + fmtShort(pe.velocity.y) + "," + fmtShort(pe.velocity.z) + " spread " +
+                                fmtShort(pe.spread.x) + "," + fmtShort(pe.spread.y) + "," + fmtShort(pe.spread.z) + " gravity " +
+                                fmtShort(pe.gravity) + " start " + hs + " end " + he + " size " + fmtShort(pe.size) + " max " +
+                                std::to_string(pe.maxParticles) + " loop " + (pe.loop ? "on" : "off") + " autoplay " +
+                                (pe.autoplay ? "on" : "off") + " pool " + std::to_string(pool));
+        sectionEnd(top);
+    } else {
+        report("particles", std::string());
+    }
+
     for (const editor::ComponentInfo& c : editor::components())
         if (removedFlags[static_cast<int>(c.kind)]) toRemove = c.kind;
 
@@ -11151,6 +11493,8 @@ static BlocksView::Context blockContext(const editor::Document& doc) {
     for (const splash::Cutscene& cs : doc.scene().cutscenes) add(c.cutscenes, cs.name);
     for (const splash::FlatObject& fo : splash::flatten(doc.scene()))
         if (fo.activeInHierarchy && fo.object->light && fo.object->light->runtime) add(c.lights, fo.object->name);
+    for (const splash::FlatObject& fo : splash::flatten(doc.scene()))
+        if (fo.activeInHierarchy && fo.object->particles) add(c.emitters, fo.object->name);
     // The project's string keys and the scene's UI text elements ("Canvas/Element").
     editor::projectStrings().sync(doc.projectRoot());
     for (const splash::StringEntry& e : editor::projectStrings().table().entries) add(c.stringKeys, e.key);
@@ -11924,6 +12268,20 @@ static void statusBar(ImDrawList* dl, ImVec2 size, const editor::Document& doc, 
                        "Rooms the export built, and the triangles no Room box holds. Those go to the catch-all room, "
                        "which psxsplash draws every frame wherever the camera is.") +
                  space::xl;
+        }
+        if (s.particleEmitters > 0) {
+            char ps[96];
+            std::snprintf(ps, sizeof ps, "%d, up to %d quads, %.1f KB", s.particleEmitters, s.particleMax,
+                          double(s.particlePoolBytes) / 1024.0);
+            x += meter("m_particles", ImVec2(x, bar.Min.y), icon::zap, "Particles", -1, ps,
+                       "Particle emitters the export wrote and the most particles they hold at once. Their pools take "
+                       "that much RAM when the scene loads (in the RAM meter), and each drawn particle a quad of the "
+                       "render buffer every frame (in the size the export gives it).") +
+                 space::xl;
+            scriptLine("statusbar.particles", "statusbar: particles emitters " + std::to_string(s.particleEmitters) + " max " +
+                                                  std::to_string(s.particleMax) + " pool " + std::to_string(s.particlePoolBytes) +
+                                                  " bump " + std::to_string(s.particleBumpBytes) + " ram " +
+                                                  std::to_string(r.used) + " bumpsize " + std::to_string(s.bumpAllocatorSize));
         }
     }
     if (!res || !res->ok()) {

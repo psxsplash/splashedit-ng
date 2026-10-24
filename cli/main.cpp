@@ -697,6 +697,9 @@ int main(int argc, char** argv) {
                         st.clutBytes, st.fontBytes, st.vramBytes(), st.spuEnd, st.triangles);
             std::printf("ram=%zu ordering_table=%u bump=%u\n", splash::ramBudget(st).used, st.orderingTableSize,
                         st.bumpAllocatorSize);
+            if (st.particleEmitters)
+                std::printf("particles emitters=%d max=%d pool=%u bump=%u\n", st.particleEmitters, st.particleMax,
+                            st.particlePoolBytes, st.particleBumpBytes);
             for (const auto& t : st.textures)
                 std::printf("texture bpp=%d cutout=%d size=%dx%d vram=%d,%d clut=%d,%d,%d %s\n", t.bitDepth, t.cutout ? 1 : 0,
                             t.width, t.height, t.x, t.y, t.clutX, t.clutY, t.clutLength, t.source.c_str());

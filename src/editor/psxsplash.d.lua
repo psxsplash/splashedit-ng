@@ -1637,6 +1637,62 @@ function Sprite.GetViewOffset() end
 ---@return any
 function Sprite.Count() end
 
+---@class Particles
+Particles = {}
+
+--- The emitter's number, or nil when no emitter has that name.
+---
+--- `Particles.Find(name) -> emitter or nil`
+---@param name any
+---@return any # emitter or nil
+function Particles.Find(name) end
+
+--- Starts emitting from the beginning: the burst is spawned, the rate carries on (a one-shot
+--- emitter for its duration) and the random spread starts again from the emitter's seed. Live
+--- particles are kept.
+---
+--- `Particles.Play(emitter)`
+---@param emitter any
+---@return any
+function Particles.Play(emitter) end
+
+--- Stops spawning; the live particles finish their lives.
+---
+--- `Particles.Stop(emitter)`
+---@param emitter any
+---@return any
+function Particles.Stop(emitter) end
+
+--- Removes every live particle at once; a playing emitter keeps spawning.
+---
+--- `Particles.Clear(emitter)`
+---@param emitter any
+---@return any
+function Particles.Clear(emitter) end
+
+--- Spawns count particles at once, playing or not (as many as the pool has room for).
+---
+--- `Particles.Burst(emitter, count)`
+---@param emitter any
+---@param count any
+---@return any
+function Particles.Burst(emitter, count) end
+
+--- True while the emitter spawns: after Play until Stop, or until a one-shot emitter's duration
+--- ends.
+---
+--- `Particles.IsPlaying(emitter) -> boolean`
+---@param emitter any
+---@return any # boolean
+function Particles.IsPlaying(emitter) end
+
+--- How many of its particles are alive.
+---
+--- `Particles.Count(emitter) -> number`
+---@param emitter any
+---@return any # number
+function Particles.Count(emitter) end
+
 ---@class Light
 Light = {}
 

@@ -273,6 +273,28 @@ json writeFollowPath(const FollowPathComponent& f) {
     return j;
 }
 
+json writeParticles(const ParticleEmitterComponent& p) {
+    json j = {{"type", "particles"},
+              {"sheet", p.sheet},
+              {"anim", p.anim},
+              {"cell", p.cell},
+              {"rate", p.rate},
+              {"burst", p.burst},
+              {"lifetime", p.lifetime},
+              {"velocity", vec3(p.velocity)},
+              {"spread", vec3(p.spread)},
+              {"gravity", p.gravity},
+              {"startColor", json::array({p.startColor[0], p.startColor[1], p.startColor[2]})},
+              {"endColor", json::array({p.endColor[0], p.endColor[1], p.endColor[2]})},
+              {"size", p.size},
+              {"maxParticles", p.maxParticles},
+              {"loop", p.loop},
+              {"autoplay", p.autoplay},
+              {"duration", p.duration}};
+    putExtras(j, p.extra);
+    return j;
+}
+
 json writeTerrain(const TerrainComponent& t) {
     json j = {{"type", "terrain"}, {"data", t.data}, {"sizeX", t.sizeX}, {"sizeZ", t.sizeZ}, {"tileCells", t.tileCells}};
     putExtras(j, t.extra);
@@ -484,6 +506,36 @@ Object readObject(const json& j) {
             if (!(pc.speed >= 0)) fail("object '" + o.name + "': path speed must be 0 or more");
             pc.extra = extrasOf(c, writePath(pc));
             o.path = pc;
+        } else if (type == "particles") {
+            ParticleEmitterComponent pe;
+            pe.sheet = c.value("sheet", pe.sheet);
+            pe.anim = c.value("anim", pe.anim);
+            pe.cell = c.value("cell", pe.cell);
+            pe.rate = c.value("rate", pe.rate);
+            pe.burst = c.value("burst", pe.burst);
+            pe.lifetime = c.value("lifetime", pe.lifetime);
+            if (c.contains("velocity")) pe.velocity = vec3(c["velocity"]);
+            if (c.contains("spread")) pe.spread = vec3(c["spread"]);
+            pe.gravity = c.value("gravity", pe.gravity);
+            for (const char* key : {"startColor", "endColor"})
+                if (c.contains(key))
+                    for (int i = 0; i < 3; i++)
+                        (key[0] == 's' ? pe.startColor : pe.endColor)[size_t(i)] = f(c[key].at(size_t(i)));
+            pe.size = c.value("size", pe.size);
+            pe.maxParticles = c.value("maxParticles", pe.maxParticles);
+            pe.loop = c.value("loop", pe.loop);
+            pe.autoplay = c.value("autoplay", pe.autoplay);
+            pe.duration = c.value("duration", pe.duration);
+            const std::string at = "object '" + o.name + "': particles ";
+            if (!(pe.rate >= 0)) fail(at + "rate must be 0 or more");
+            if (pe.burst < 0) fail(at + "burst must be 0 or more");
+            if (!(pe.lifetime > 0)) fail(at + "lifetime must be more than 0");
+            if (!(pe.size > 0)) fail(at + "size must be more than 0");
+            if (pe.maxParticles < 1) fail(at + "maxParticles must be 1 or more");
+            if (pe.cell < 0) fail(at + "cell must be 0 or more");
+            if (!(pe.duration >= 0)) fail(at + "duration must be 0 or more");
+            pe.extra = extrasOf(c, writeParticles(pe));
+            o.particles = pe;
         } else if (type == "followPath") {
             FollowPathComponent fp;
             fp.path = c.value("path", fp.path);
@@ -547,6 +599,7 @@ json writeObject(const Object& o) {
     if (o.terrain) comps.push_back(writeTerrain(*o.terrain));
     if (o.path) comps.push_back(writePath(*o.path));
     if (o.followPath) comps.push_back(writeFollowPath(*o.followPath));
+    if (o.particles) comps.push_back(writeParticles(*o.particles));
     for (const std::string& c : o.unknownComponents) comps.push_back(json::parse(c));
     j["components"] = comps;
     json kids = json::array();
