@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "editor/blocks_view.hh"
+#include "editor/luadebug.hh"
 
 namespace ui {
 
@@ -77,6 +78,29 @@ public:
     // sounds, cutscenes); set each frame before draw().
     void setBlockContext(BlocksView::Context c) { m_blockContext = std::move(c); }
 
+    // Lua breakpoints (editor/luadebug.hh), drawn as red dots in the gutter of
+    // a Lua tab, where a click sets or clears one; chunks are named from
+    // `project`. Set each frame before draw(); nullptr draws none.
+    void setBreakpoints(editor::Breakpoints* b, const std::filesystem::path& project) {
+        m_bps = b;
+        m_project = project;
+    }
+    // A gutter click changed the breakpoints since the last call.
+    bool takeBreakpointsChanged() {
+        const bool c = m_bpChanged;
+        m_bpChanged = false;
+        return c;
+    }
+    // The line (from 1) of `chunk` the game is stopped at, marked in its tab;
+    // an empty chunk marks none.
+    void setStopLine(const std::string& chunk, int line) {
+        m_stopChunk = chunk;
+        m_stopLine = line;
+    }
+    // Shows `file` with the cursor at the start of `line` (from 1), opened if
+    // needed and scrolled to it.
+    bool showLine(const std::filesystem::path& file, int line, std::string* error);
+
     // A blocks script (absolute path) the user asked to turn into Lua, from
     // its tab's menu, saved first; taken once.
     std::optional<std::filesystem::path> takeConvertRequest();
@@ -112,6 +136,11 @@ private:
     std::optional<std::filesystem::path> m_convertRequest;
     std::vector<std::filesystem::path> m_saved;
     BlocksView::Context m_blockContext;
+    editor::Breakpoints* m_bps = nullptr;
+    std::filesystem::path m_project;
+    bool m_bpChanged = false;
+    std::string m_stopChunk;
+    int m_stopLine = 0;
 };
 
 }  // namespace ui
