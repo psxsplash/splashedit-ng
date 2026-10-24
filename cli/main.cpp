@@ -48,10 +48,11 @@ static std::vector<std::string> readNameTable(const std::string& path) {
 static int usage() {
     std::fprintf(stderr,
                  "usage: splashpack-cli export <scene> -o <out.splashpack> [--project <dir>] [--order-from <ref.splashpack>]\n"
-                 "                              [--lua-bytecode] [--stats]\n"
+                 "                              [--lua-bytecode | --lua-debug] [--stats]\n"
                  "  --project defaults to the directory holding the scene file\n"
                  "  writes .vram and .spu next to <out>, and .loading when the scene has a loading canvas\n"
                  "  --lua-bytecode stores Lua scripts compiled (as luac_psx would) instead of as source\n"
+                 "  --lua-debug does the same keeping line numbers and local names, for Lua breakpoints\n"
                  "  --order-from (parity tests) orders objects like the name table of ref\n"                 "  --stats prints what the export takes in VRAM, SPU RAM and main RAM,\n"
                  "    and a texture line per packed texture with its VRAM and CLUT position\n"
                  "usage: splashpack-cli texstats <image> [--bpp 4|8|16] [--cutout] [--out <decoded.png>]\n"
@@ -79,8 +80,8 @@ static int usage() {
                  "    into <destDir>/music and listed in disc.json\n"
                  "usage: splashpack-cli resave <in.scene|in.mesh> <out>\n"
                  "  loads and saves a scene or mesh file\n"
-                 "usage: splashpack-cli luac <in.lua> -o <out.luac>\n"
-                 "  compiles one Lua file to PS1 bytecode, as --lua-bytecode does\n"
+                 "usage: splashpack-cli luac <in.lua> -o <out.luac> [--debug]\n"
+                 "  compiles one Lua file to PS1 bytecode, as --lua-bytecode does (--debug: as --lua-debug does)\n"
                  "usage: splashpack-cli blocks <in.blocks>\n"
                  "  prints the Lua a block script exports as\n"
                  "usage: splashpack-cli build <scene>... -o <dir> [--project <dir>] [--lua-bytecode]\n"
@@ -431,12 +432,13 @@ static int importClipsCmd(int argc, char** argv) {
 }
 
 static int luac(int argc, char** argv) {
-    if (argc != 5 || std::strcmp(argv[3], "-o") != 0) return usage();
+    const bool debug = argc == 6 && !std::strcmp(argv[5], "--debug");
+    if ((argc != 5 && !debug) || std::strcmp(argv[3], "-o") != 0) return usage();
     try {
         std::ifstream in(argv[2], std::ios::binary);
         if (!in) throw std::runtime_error(std::string("cannot open ") + argv[2]);
         std::string src((std::istreambuf_iterator<char>(in)), {});
-        std::vector<uint8_t> bc = splash::compileLua(src, fs::path(argv[2]).filename().string());
+        std::vector<uint8_t> bc = splash::compileLua(src, fs::path(argv[2]).filename().string(), debug);
         std::ofstream out(argv[4], std::ios::binary);
         out.write(reinterpret_cast<const char*>(bc.data()), std::streamsize(bc.size()));
         if (!out) throw std::runtime_error(std::string("cannot write ") + argv[4]);
@@ -650,7 +652,7 @@ int main(int argc, char** argv) {
     if (argc >= 2 && std::strcmp(argv[1], "blocks") == 0) return blocks(argc, argv);
     if (argc < 2 || std::strcmp(argv[1], "export") != 0) return usage();
     std::string scenePath, outPath, project, orderFrom;
-    bool luaBytecode = false, stats = false;
+    bool luaBytecode = false, luaDebug = false, stats = false;
     for (int i = 2; i < argc; i++) {
         std::string a = argv[i];
         if (a == "-o" && i + 1 < argc)
@@ -659,6 +661,8 @@ int main(int argc, char** argv) {
             project = argv[++i];
         else if (a == "--order-from" && i + 1 < argc)
             orderFrom = argv[++i];
+        else if (a == "--lua-debug")
+            luaBytecode = luaDebug = true;
         else if (a == "--lua-bytecode")
             luaBytecode = true;
         else if (a == "--stats")
@@ -676,6 +680,7 @@ int main(int argc, char** argv) {
         opt.vram = splash::readVramSettings(root / "vram.json");
         if (!orderFrom.empty()) opt.objectOrder = readNameTable(orderFrom);
         opt.luaBytecode = luaBytecode;
+        opt.luaDebugInfo = luaDebug;
         // Prefab instances filled in from their files; one that cannot be is an error.
         splash::ExportResult r;
         r.errors = splash::resolvePrefabs(scene, root);

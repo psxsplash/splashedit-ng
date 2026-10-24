@@ -12,6 +12,7 @@
 #include <system_error>
 
 #include "disc.hh"
+#include "editor/luadebug.hh"
 #include "editor/project.hh"
 #include "editor/tv_preview.hh"
 #include "scene.hh"
@@ -268,6 +269,9 @@ static std::string sceneStem(size_t i) { return "scene_" + std::to_string(i); }
 static splash::ExportOptions playOptions(const fs::path& projectRoot) {
     splash::ExportOptions opt;
     opt.luaBytecode = true;
+    // Line numbers and local names for the engine's Lua debugger, only while
+    // the project has breakpoints: they about double the bytecode, in RAM too.
+    opt.luaDebugInfo = !loadBreakpoints(projectRoot).empty();
     opt.vram = loadVramSettings(projectRoot);
     return opt;
 }

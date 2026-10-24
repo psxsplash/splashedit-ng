@@ -146,6 +146,7 @@ static std::filesystem::path playDir() {
 static void notify(State& st, std::string msg, bool bad);
 static void scriptLine(const char* tag, const std::string& line);
 static std::string utf8(const std::filesystem::path& p);
+static void debuggerAction(State& st, const editor::Document& doc, ui::DebuggerPanel::Action a);
 
 // Stop: every console of the session, and the relay they went through.
 static void stopPlay(State::Play& p) {
@@ -416,7 +417,8 @@ static void sendEdits(State& st, const editor::Document& doc) {
         p.seenRev = doc.revision();
         p.seenAt = now;
     }
-    if (doc.revision() == p.sentRev || now - p.seenAt < 0.3) return;
+    if (!p.reloadDebug && (doc.revision() == p.sentRev || now - p.seenAt < 0.3)) return;
+    p.reloadDebug = false;
     p.sentRev = doc.revision();
     const unsigned gen = ++p.reloadGeneration;
     splash::Scene scene = p.players >= 2 ? editor::withLinkReporter(doc.scene(), linkReporterFile()) : doc.scene();
@@ -457,6 +459,7 @@ static void updatePlay(State& st, const editor::Document& doc) {
             editor::LinkStatus ls;
             if (editor::parseLinkStatus(line, &ls)) c.link = ls;
             else if (k > 0) continue;
+            else if (p.debugOn && p.debug.feed(line)) continue;
             else if (editor::parseRenderPeak(line, &rp)) p.peak = rp;
             else if (editor::parseRenderLost(line, &rl)) {
                 const double now = ImGui::GetTime();
@@ -467,6 +470,18 @@ static void updatePlay(State& st, const editor::Document& doc) {
             }
         }
         c.linesSeen = c.emu.lineCount();
+    }
+    // A new stop at a breakpoint: show its line and the Debugger tab.
+    if (p.debug.stops() != p.debugShown) {
+        p.debugShown = p.debug.stops();
+        if (p.debug.stopped()) {
+            const editor::DebugStop& s = p.debug.stop();
+            std::string err;
+            const std::filesystem::path file = doc.projectRoot() / std::filesystem::path(std::u8string(s.chunk.begin(), s.chunk.end()));
+            if (!st.scripts.showLine(file, s.line, &err)) notify(st, "Stopped at " + s.chunk + ":" + std::to_string(s.line) + "; " + err, true);
+            ++st.debugger.shows;
+            scriptLine(nullptr, "play: stopped " + std::to_string(s.id) + " at " + s.chunk + ":" + std::to_string(s.line));
+        }
     }
     // Console k starts once console k-1 has connected: to console 1's link
     // server with 2 linked directly, to the relay (its k-th connection, which
@@ -508,6 +523,8 @@ static void updatePlay(State& st, const editor::Document& doc) {
         if (!p.cons[0].game.attached() && p.message.empty() && SDL_GetTicks() - p.startedAt > 10000)
             p.message = "pcsx-redux started but shows nothing here; it needs -shmdisplay support";
     } else {
+        // A stop dies with the game: no marker, no Continue.
+        if (p.debug.on() || p.debug.stopped()) p.debug.reset();
         // Console 1 gone ends the session: the others and the relay go with it.
         if (p.starting || std::any_of(p.cons.begin() + 1, p.cons.end(), [](const State::Play::Console& c) { return c.emu.running(); }) ||
             (p.relay && p.relay->running()))
@@ -563,6 +580,13 @@ static void updatePlay(State& st, const editor::Document& doc) {
         console = editor::consoleDir(playDir(), 0);
         if (p.relayed) scriptLine(nullptr, "play: relay listening, port " + std::to_string(p.linkPort));
     }
+    // Lua breakpoints: luabp.txt in the PCdrv directory turns the engine's
+    // debugger on; linked consoles share that directory, so only 1 player.
+    editor::removeDebugFiles(playDir());
+    p.debug.reset();
+    p.debugShown = 0;
+    p.debugOn = p.players < 2 && editor::writeBreakpointsFile(playDir(), st.breakpoints, ++p.bpGeneration);
+    p.debugBuilt = !st.breakpoints.empty();  // the build read the same .breakpoints.json
     if (!p.cons[0].emu.start(editor::reduxCommand(eff, playDir(), p.captureScript, console), &err))
     {
         p.message = "Could not start pcsx-redux: " + err;
@@ -815,7 +839,8 @@ static int g_menuIgnoreClick = -1;
 // The bottom dock: the Timeline and Frame tabs show while they are open; the one in front draws.
 static bool timelineInFront(const State& st) { return st.timeline.open && st.bottomTab == State::BottomTab::Timeline; }
 static bool frameInFront(const State& st) { return st.frame.open && st.bottomTab == State::BottomTab::Frame; }
-static bool projectInFront(const State& st) { return !timelineInFront(st) && !frameInFront(st); }
+static bool debuggerInFront(const State& st) { return st.debugger.open && st.bottomTab == State::BottomTab::Debugger; }
+static bool projectInFront(const State& st) { return !timelineInFront(st) && !frameInFront(st) && !debuggerInFront(st); }
 
 // Shows the Project tab in front, or folds it to its header when it already is and shows.
 static void toggleProjectTab(State& st) {
@@ -832,7 +857,8 @@ static void toggleProjectTab(State& st) {
 // panel in front's header.
 static float dockTabWidth(const char* label) { return measure(fonts().semibold, type::body, label).x + 30 + space::md * 2; }
 static float dockTabsWidth(const State& st) {
-    return dockTabWidth("Project") + (st.timeline.open ? dockTabWidth("Timeline") : 0) + (st.frame.open ? dockTabWidth("Frame") : 0);
+    return dockTabWidth("Project") + (st.timeline.open ? dockTabWidth("Timeline") : 0) + (st.frame.open ? dockTabWidth("Frame") : 0) +
+           (st.debugger.open ? dockTabWidth("Debugger") : 0);
 }
 static void dockTabs(State& st, ImDrawList* dl, ImRect r) {
     Fonts& f = fonts();
@@ -858,6 +884,9 @@ static void dockTabs(State& st, ImDrawList* dl, ImRect r) {
         st.bottomTab = State::BottomTab::Timeline;
     if (st.frame.open && tab("tab_frame", "Frame", icon::image, rgb(0x5ccfe0), frameInFront(st), true))
         st.bottomTab = State::BottomTab::Frame;
+    if (st.debugger.open &&
+        tab("tab_debugger", "Debugger", icon::script, st.play.debug.stopped() ? color::warn : rgb(0xe5484d), debuggerInFront(st), true))
+        st.bottomTab = State::BottomTab::Debugger;
 }
 
 // The Players button's words for `t`: "1 player", "2 linked", "2 via relay", "4 players".
@@ -12371,6 +12400,11 @@ static void shortcuts(State& st, editor::Document& doc) {
     const bool ctrl = io.KeyCtrl, shift = io.KeyShift;
     // The script editor keeps the keyboard, but Play and Run on hardware still answer.
     // Not gated on WantTextInput: the editor asks for text input itself, so it is set.
+    // Stopped at a breakpoint: F8 continues, F10 steps, whoever has the keyboard.
+    if (st.play.debug.stopped() && !st.unsavedShown && st.menuOpen < 0) {
+        if (!ctrl && !shift && pressed(ImGuiKey_F8)) debuggerAction(st, doc, ui::DebuggerPanel::Action::Continue);
+        if (!ctrl && !shift && pressed(ImGuiKey_F10)) debuggerAction(st, doc, ui::DebuggerPanel::Action::Step);
+    }
     if (st.scripts.hasKeyboard()) {
         if (st.unsavedShown || st.newProject.shown || st.unityImport.shown || st.strings.shown || st.menuOpen >= 0) return;
         if (!shift && pressed(ImGuiKey_F5)) ctrl ? toggleRun(st, doc) : togglePlay(st, doc);
@@ -12498,6 +12532,42 @@ static void updateImports(State& st, editor::Document& doc, const viewport::Ps1V
     }
 }
 
+// A gutter click set or cleared a breakpoint: saved with the project, and
+// sent to a game that has the debugger on.
+static void breakpointsChanged(State& st, const editor::Document& doc) {
+    std::string err;
+    if (!editor::saveBreakpoints(doc.projectRoot(), st.breakpoints, &err)) notify(st, "Breakpoints not saved: " + err, true);
+    State::Play& p = st.play;
+    if (!p.debugOn || !p.cons[0].emu.running()) return;
+    editor::writeBreakpointsFile(playDir(), st.breakpoints, ++p.bpGeneration);
+    // The first breakpoint of a Play built without line numbers: the scene
+    // reloads with them (a live edit), or the engine could not match a line.
+    if (!p.debugBuilt && !st.breakpoints.empty() && p.reloadIndex >= 0) {
+        p.reloadDebug = p.debugBuilt = true;
+        notify(st, "Breakpoints on: the scene reloads with line numbers", false);
+    }
+}
+
+// Continue or Step in the Debugger tab (or F8 / F10): resumes the stopped game.
+static void debuggerAction(State& st, const editor::Document& doc, ui::DebuggerPanel::Action a) {
+    State::Play& p = st.play;
+    if (a == ui::DebuggerPanel::Action::None || !p.debug.stopped()) return;
+    const editor::DebugStop& s = p.debug.stop();
+    if (a == ui::DebuggerPanel::Action::Show) {
+        std::string err;
+        const std::filesystem::path file = doc.projectRoot() / std::filesystem::path(std::u8string(s.chunk.begin(), s.chunk.end()));
+        if (!st.scripts.showLine(file, s.line, &err)) notify(st, err, true);
+        return;
+    }
+    const bool step = a == ui::DebuggerPanel::Action::Step;
+    if (!editor::writeDebugCommand(playDir(), s.id, step)) {
+        notify(st, "Could not resume the game: cannot write to " + utf8(playDir()), true);
+        return;
+    }
+    scriptLine(nullptr, std::string("play: ") + (step ? "step " : "continue ") + std::to_string(s.id));
+    p.debug.resumed();
+}
+
 ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view, ImVec2 size) {
     st.importPanel.shown.clear();
     // A file dialog whose caller names no folder opens in the project, not Documents (#160).
@@ -12515,6 +12585,18 @@ ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view,
     st.timelineShows = st.timeline.shows;
     st.frameWasOpen = st.frame.open;
     st.frameShows = st.frame.shows;
+    // The Debugger tab lives as long as a Play whose engine has the debugger on.
+    st.debugger.open = st.play.debugOn && st.play.cons[0].emu.running() && st.play.debug.on();
+    if (st.debugger.open && st.debugger.shows != st.debuggerShows) st.bottomTab = State::BottomTab::Debugger;
+    if (!st.debugger.open && st.bottomTab == State::BottomTab::Debugger)
+        st.bottomTab = st.frame.open ? State::BottomTab::Frame : st.timeline.open ? State::BottomTab::Timeline : State::BottomTab::Project;
+    st.debuggerWasOpen = st.debugger.open;
+    st.debuggerShows = st.debugger.shows;
+    // The project's breakpoints come with it.
+    if (st.breakpointsProject != doc.projectRoot()) {
+        st.breakpoints = editor::loadBreakpoints(doc.projectRoot());
+        st.breakpointsProject = doc.projectRoot();
+    }
     // The timeline takes Delete and Space while it has focus, before the
     // scene's shortcuts see them; only while its tab is in front.
     if (timelineInFront(st)) st.timeline.takeKeys(doc);
@@ -12578,17 +12660,23 @@ ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view,
     }
     // The bottom dock: the tab in front takes its height from the bottom of
     // the middle panel; the other is not drawn until it is picked.
-    const bool tl = timelineInFront(st), fr = frameInFront(st);
+    const bool tl = timelineInFront(st), fr = frameInFront(st), db = debuggerInFront(st);
     const float tabsW = dockTabsWidth(st);
     auto tabs = [&st](ImDrawList* d, ImRect r) { dockTabs(st, d, r); };
     st.timeline.tabs = tabs;
     st.timeline.tabsWidth = tabsW;
     st.frame.tabs = tabs;
     st.frame.tabsWidth = tabsW;
+    st.debugger.tabs = tabs;
+    st.debugger.tabsWidth = tabsW;
     st.assets.tabs = tabs;
     st.assets.tabsWidth = tabsW;
     st.scripts.setTilesTab(doc.scene().tilemap.has_value());
-    const ImRect body = st.scripts.tabStrip(dl, tl ? st.timeline.dock(mid) : fr ? st.frame.dock(mid) : st.assets.dock(mid));
+    const ImRect body = st.scripts.tabStrip(dl, tl   ? st.timeline.dock(mid)
+                                                : fr ? st.frame.dock(mid)
+                                                : db ? st.debugger.dock(mid)
+                                                     : st.assets.dock(mid));
+    if (db) debuggerAction(st, doc, st.debugger.draw(dl, st.play.debug, st.breakpoints.count()));
     // The timeline takes this frame's scrub first, so the Scene draws the
     // pose at the new scrub head now rather than a frame late (empty when
     // closed or behind the Project tab).
@@ -12627,7 +12715,13 @@ ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view,
         st.viewportRect = ImRect();
     } else {
         st.scripts.setBlockContext(blockContext(doc));
+        st.scripts.setBreakpoints(&st.breakpoints, doc.projectRoot());
+        st.scripts.setStopLine(st.play.debug.stopped() ? st.play.debug.stop().chunk : std::string(), st.play.debug.stop().line);
+        scriptLine("debug.stopline", st.play.debug.stopped() ? "luaeditor: stop line " + st.play.debug.stop().chunk + ":" +
+                                                                    std::to_string(st.play.debug.stop().line)
+                                                              : std::string("luaeditor: stop line none"));
         st.scripts.draw(dl, body);
+        if (st.scripts.takeBreakpointsChanged()) breakpointsChanged(st, doc);
         st.viewportRect = ImRect();
         if (st.scripts.hasKeyboard()) st.play.gameFocus = false;
     }
@@ -12643,7 +12737,7 @@ ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view,
         if (!ec && !rel.empty()) savedScripts.push_back(utf8(rel.generic_u8string()));
     }
     if (!savedScripts.empty()) doc.refreshAssets(savedScripts);
-    if (!tl && !fr) st.assets.draw(dl, doc);
+    if (!tl && !fr && !db) st.assets.draw(dl, doc);
     // Project files renamed, moved or deleted (or that undone): open script
     // tabs follow their file; a move an undo or redo could not make is said.
     // A blocks tab's menu asked for its script as Lua.

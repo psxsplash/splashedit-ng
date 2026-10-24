@@ -616,6 +616,18 @@ toggle must be saved in the play settings. Needs a display (CI runs it under `xv
 
     python3 safeareacheck.py <splashedit> [screenshot prefix]
 
+`luabreakpointscheck.py` clicks a Lua tab's gutter: the click must set a breakpoint on that line
+(saved in the project's `.breakpoints.json`) and a second click clear it (the file going with the
+last one), while a click in the code beside it sets none. Play then runs a stand-in pcsx-redux (a
+shell script printing psxsplash's `psxsplash: lua break` stop reports, waiting on the `luabp.cmd`
+the editor writes, then running `emulator_tests` for the display block): Play must write
+`luabp.txt` with the breakpoint, the stop must open the script and fill the Debugger tab's locals
+and globals, Step must send `1 step` and Continue `2 continue`, and a breakpoint set while
+playing must reach `luabp.txt`. No Debugger tab before Play, nor with an engine that never says
+its debugger is on. Needs a display (CI runs it under `xvfb-run`).
+
+    python3 luabreakpointscheck.py <splashedit> [screenshot]
+
 `linkplaycheck.py` plays a copy of the courtyard whose scripts call `Net.Connect()` and
 `Net.Send()` with 2 linked consoles, on a real pcsx-redux: both views must show frames, their
 status lines must reach Linked with exactly one host, slots 0 and 1 and the no-Network-id hint;
