@@ -69,7 +69,8 @@ public:
     // "self" first), audio clip names, cutscene names.
     struct Context {
         // lights: the runtime point lights, the ones Light.Find can reach.
-        std::vector<std::string> objects, sounds, cutscenes, lights;
+        // emitters: objects with a Particle Emitter, the names Particles.Play takes.
+        std::vector<std::string> objects, sounds, cutscenes, lights, emitters;
         // stringKeys: the project's string table; uiTexts: "Canvas/Element" text elements.
         std::vector<std::string> stringKeys, uiTexts;
     };

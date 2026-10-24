@@ -76,6 +76,12 @@ const std::vector<BlockSpec> kCatalogue = {
      "Switches the chosen light on; only point lights lit on the console (runtime lights) can be switched, and the list offers those."},
     {"light_off", K::Statement, "turn light %f off", 0, 0, F::Light, "Objects",
      "Switches the chosen light off; only point lights lit on the console (runtime lights) can be switched, and the list offers those."},
+    {"particles_play", K::Statement, "start particles %f", 0, 0, F::Emitter, "Objects",
+     "Starts the chosen particle emitter from the beginning: its burst at once, then its rate (a one-shot emitter for its duration)."},
+    {"particles_stop", K::Statement, "stop particles %f", 0, 0, F::Emitter, "Objects",
+     "Stops the chosen particle emitter spawning; the particles already out finish their lives."},
+    {"particles_burst", K::Statement, "burst %1 particles from %f", 1, 0, F::Emitter, "Objects",
+     "Spawns that many particles from the chosen emitter at once, playing or not, as many as its pool has room for."},
     {"path_start", K::Statement, "start path %f", 0, 0, F::Object, "Paths",
      "Starts the chosen path's followers (or the path a chosen follower rides); it does nothing while they run."},
     {"path_stop", K::Statement, "stop path %f", 0, 0, F::Object, "Paths",
@@ -456,6 +462,12 @@ struct Gen {
         return luaString(b.field);
     }
 
+    // An emitter by its object's name: Particles.* take the name itself.
+    std::string emitter(const Block& b, const std::string& at) {
+        if (b.field.empty()) error(at, "no particle emitter chosen");
+        return luaString(b.field);
+    }
+
     std::string light(const Block& b, const std::string& at) {
         if (b.field.empty()) error(at, "no light chosen");
         return "Light.Find(" + luaString(b.field) + ")";
@@ -610,6 +622,11 @@ struct Gen {
                 line(out, depth, "Entity.SetActive(" + object(b, at).s + (op == "show" ? ", true)" : ", false)"));
             } else if (op == "light_on" || op == "light_off") {
                 line(out, depth, "Light.SetEnabled(" + light(b, at) + (op == "light_on" ? ", true)" : ", false)"));
+            } else if (op == "particles_play" || op == "particles_stop") {
+                line(out, depth, std::string(op == "particles_play" ? "Particles.Play(" : "Particles.Stop(") + emitter(b, at) + ")");
+            } else if (op == "particles_burst") {
+                const std::string e = emitter(b, at);
+                line(out, depth, "Particles.Burst(" + e + ", " + input(b, 0, at).s + ")");
             } else if (op == "path_start" || op == "path_stop" || op == "camera_ride") {
                 const char* fn = op == "path_start" ? "Path.Start(" : op == "path_stop" ? "Path.Stop(" : "Path.RideCamera(";
                 line(out, depth, fn + object(b, at).s + ")");

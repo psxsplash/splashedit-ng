@@ -206,6 +206,7 @@ const char* placeholder(BlockField f) {
         case BlockField::Sound: return "sound";
         case BlockField::Cutscene: return "cutscene";
         case BlockField::Light: return "light";
+        case BlockField::Emitter: return "emitter";
         case BlockField::Key: return "name";
         case BlockField::StringKey: return "key";
         case BlockField::UiText: return "UI text";

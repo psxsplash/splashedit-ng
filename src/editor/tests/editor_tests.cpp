@@ -81,6 +81,7 @@
 #include "navregion.hh"
 #include "rooms.hh"
 #include "splashpack.hh"
+#include "particles.hh"
 #include "shadow.hh"
 #include "texture.hh"
 #include "unity_import.hh"
@@ -15344,6 +15345,215 @@ static void testPathBlocks() {
     CHECK(found);
 }
 
+// Particle emitters (splashedit-ng#196): the scene file, the simulation
+// against psxsplash's golden run, the v31 table bytes, and the meters equal
+// to what the export writes. Fixture: tests/particles/particles.scene
+// (Fountain: looping autoplay, 24/s for 1.5 s, pool 40, still cell 1;
+// Sparks: one-shot, anim twinkle, pool 48; a crate mesh).
+static void testParticles() {
+    namespace fs = std::filesystem;
+    namespace P = splash::particles;
+    using roomtest::rd16;
+    using roomtest::rd32;
+    const fs::path project = fs::path(SPLASHEDIT_SOURCE_DIR) / "tests" / "particles";
+    const fs::path dir = g_outDir / "particles";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    auto slurp = [](const fs::path& p) {
+        std::ifstream in(p, std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(in), {});
+    };
+    auto find = [](splash::Scene& sc, const std::string& name) -> splash::Object* {
+        for (splash::Object& o : sc.objects)
+            if (o.name == name) return &o;
+        return nullptr;
+    };
+    const splash::Scene base = splash::loadScene(project / "particles.scene");
+
+    // Scene file: every field read, and saving again gives the same text
+    // (no key is left over as an extra).
+    {
+        splash::Scene sc = base;
+        splash::Object* f = find(sc, "Fountain");
+        CHECK(f && f->particles);
+        if (!f || !f->particles) return;
+        const splash::ParticleEmitterComponent& pe = *f->particles;
+        CHECK(pe.sheet == "spark" && pe.anim.empty() && pe.cell == 1 && pe.rate == 24 && pe.burst == 0);
+        CHECK(pe.lifetime == 1.5f && (pe.velocity == splash::Vec3{0, 2.6f, 0}) && pe.gravity == 3.5f && pe.maxParticles == 40);
+        CHECK(pe.startColor == (std::array<float, 3>{1.0f, 0.8f, 0.5f}) && pe.loop && pe.autoplay && pe.size == 0.3f);
+        CHECK(pe.extra.empty());
+        splash::saveScene(sc, dir / "a.scene");
+        splash::Scene back = splash::loadScene(dir / "a.scene");
+        splash::saveScene(back, dir / "b.scene");
+        CHECK(slurp(dir / "a.scene") == slurp(dir / "b.scene"));
+        CHECK(find(back, "Sparks") && find(back, "Sparks")->particles && find(back, "Sparks")->particles->anim == "twinkle" &&
+              !find(back, "Sparks")->particles->loop && find(back, "Sparks")->particles->duration == 0.8f);
+        // A new component's defaults survive the file too.
+        splash::Object o;
+        o.name = "New";
+        o.particles.emplace();
+        const std::optional<std::vector<splash::Object>> rt = splash::readObjectsText(splash::writeObjectsText({o}));
+        CHECK(rt && rt->size() == 1 && (*rt)[0].particles && (*rt)[0].particles->maxParticles == 32 &&
+              (*rt)[0].particles->rate == 10 && ((*rt)[0].particles->velocity == splash::Vec3{0, 2, 0}));
+        // Out of range values are refused when the file is read.
+        CHECK(!splash::readObjectsText(R"([{"name":"X","components":[{"type":"particles","lifetime":0}]}])"));
+        CHECK(!splash::readObjectsText(R"([{"name":"X","components":[{"type":"particles","maxParticles":0}]}])"));
+    }
+
+    // The simulation repeats psxsplash's golden run (tests/host/test_particle.cpp).
+    {
+        P::Record r;
+        r.vel = {0, -8192, 0};
+        r.spread = {4096, 0, 4096};
+        r.gravity = 256;
+        r.rate = 65536 / 2;
+        r.lifetime = 30;
+        r.maxParticles = 64;
+        r.burst = 3;
+        r.duration = 40;
+        r.flags = P::kFlagLoop | P::kFlagAutoplay;
+        r.seed = 12345;
+        r.pos = {10, -20, 30};
+        P::State e = P::simulate(r, 60);
+        uint32_t sum = 0, slot = e.head;
+        for (int k = 0; k < e.count; k++) {
+            const P::Particle& p = e.particles[slot];
+            for (int32_t v : p.pos) sum = sum * 31u + uint32_t(v);
+            sum = sum * 31u + p.age;
+            slot = slot + 1 >= r.maxParticles ? 0 : slot + 1;
+        }
+        CHECK(e.count == 15 && e.head == 18 && e.rng == 3137681654u);
+        CHECK(sum == 2719162360u);
+    }
+
+    // Export: v31, a 172-byte header whose last word points at the table.
+    splash::ExportResult res = splash::exportSplashpack(base, project, dir / "p.splashpack");
+    CHECK(res.ok());
+    if (!res.ok()) {
+        for (const std::string& e : res.errors) std::fprintf(stderr, "  %s\n", e.c_str());
+        return;
+    }
+    const std::string b = slurp(dir / "p.splashpack");
+    CHECK(b.size() > 172 && rd16(b, 2) == 31);
+    CHECK(rd32(b, 160) == 0 && rd32(b, 164) == 0);
+    const size_t t = size_t(rd32(b, 168));
+    CHECK(t >= 172 && t % 4 == 0 && t + 4 + 2 * P::kRecordBytes <= b.size());
+    if (t < 172 || t + 4 + 2 * P::kRecordBytes > b.size()) return;
+    CHECK(rd16(b, t) == 2 && rd16(b, t + 2) == 0);
+    const float gte = base.settings.gteScaling;
+    auto name = [&](size_t rec) { return std::string(b.c_str() + size_t(rd32(b, rec))); };
+    {
+        const size_t r0 = t + 4;  // Fountain
+        CHECK(name(r0) == "Fountain");
+        CHECK(rd32(b, r0 + 4) == splash::roundToInt(-0.6f / gte * 4096.f) && rd32(b, r0 + 8) == splash::roundToInt(0.9f / gte * 4096.f) &&
+              rd32(b, r0 + 12) == splash::roundToInt(4.0f / gte * 4096.f));
+        // 2.6 m/s up: -(2.6 / gte * 4096) * 4096 / 60 P12 a tick.
+        CHECK(rd32(b, r0 + 16) == 0 && rd32(b, r0 + 20) == int32_t(std::llround(-2.6 / gte * 4096.0 * 4096.0 / 60.0)));
+        CHECK(rd32(b, r0 + 40) == int32_t(std::llround(3.5 / gte * 4096.0 * 4096.0 / 3600.0)));
+        CHECK(uint32_t(rd32(b, r0 + 44)) == uint32_t(std::llround(24 * 65536.0 / 60)));
+        CHECK(rd16(b, r0 + 48) == 90 && rd16(b, r0 + 50) == 40 && rd16(b, r0 + 52) == 0);
+        CHECK(rd16(b, r0 + 56) == P::kNoObject);  // no mesh: a fixed point
+        CHECK(rd16(b, r0 + 58) == uint16_t(splash::roundToInt(0.3f / gte * 4096.f)));
+        CHECK(uint8_t(b[r0 + 60]) == 0 && uint8_t(b[r0 + 61]) == P::kNoAnim && uint8_t(b[r0 + 62]) == 1 &&
+              uint8_t(b[r0 + 63]) == (P::kFlagLoop | P::kFlagAutoplay));
+        CHECK(uint8_t(b[r0 + 64]) == 255 && uint8_t(b[r0 + 65]) == 204 && uint8_t(b[r0 + 66]) == 128);
+        CHECK(uint32_t(rd32(b, r0 + 72)) == P::seedOf("Fountain"));
+        const size_t r1 = r0 + P::kRecordBytes;  // Sparks: animated, one-shot, not autoplayed
+        CHECK(name(r1) == "Sparks");
+        CHECK(uint8_t(b[r1 + 61]) == 0 && uint8_t(b[r1 + 63]) == 0 && rd16(b, r1 + 50) == 48 && rd16(b, r1 + 52) == 6 &&
+              rd16(b, r1 + 54) == 48);
+    }
+
+    // The meters are what the export wrote: the pool from the table's own
+    // counts, the RAM meter over it by exactly that, the render buffer by a
+    // quad a particle.
+    {
+        const splash::ExportStats& st = res.stats;
+        uint32_t sumMax = 0;
+        for (int i = 0; i < rd16(b, t); i++) sumMax += rd16(b, t + 4 + size_t(i) * P::kRecordBytes + 50);
+        const uint32_t poolFromBytes = P::poolBytes(rd16(b, t), sumMax);
+        CHECK(st.particleEmitters == 2 && st.particleMax == int(sumMax) && sumMax == 88);
+        CHECK(st.particlePoolBytes == poolFromBytes && poolFromBytes == 2 * 36 + 88 * 28);
+        splash::ExportStats without = st;
+        without.particlePoolBytes = 0;
+        CHECK(splash::ramBudget(st).used - splash::ramBudget(without).used == poolFromBytes);
+        CHECK(st.particleBumpBytes == sumMax * P::kBumpBytes);
+        // The same scene without its emitters: v27, a bump allocator smaller by the quads.
+        splash::Scene none = base;
+        none.objects.erase(std::remove_if(none.objects.begin(), none.objects.end(),
+                                          [](const splash::Object& o) { return bool(o.particles); }),
+                           none.objects.end());
+        splash::ExportResult rn = splash::exportSplashpack(none, project, dir / "none.splashpack");
+        const std::string n = slurp(dir / "none.splashpack");
+        CHECK(rn.ok() && rd16(n, 2) == 27 && rn.stats.particleEmitters == 0 && rn.stats.particlePoolBytes == 0);
+        CHECK(uint32_t(rd32(b, 152)) == uint32_t(rd32(n, 152)) + sumMax * P::kBumpBytes);
+        CHECK(rn.stats.bumpAllocatorNeed + sumMax * P::kBumpBytes == st.bumpAllocatorNeed);
+        // An emitter on an inactive object is not exported: byte for byte the pack without it.
+        splash::Scene off = base;
+        for (splash::Object& o : off.objects)
+            if (o.particles) o.active = false;
+        CHECK(splash::exportSplashpack(off, project, dir / "off.splashpack").ok());
+        CHECK(slurp(dir / "off.splashpack") == n);
+    }
+
+    // An emitter on a mesh object follows its game object.
+    {
+        splash::Scene sc = base;
+        splash::Object* crate = find(sc, "Crate");
+        crate->particles = find(sc, "Fountain")->particles;
+        splash::ExportResult rc = splash::exportSplashpack(sc, project, dir / "crate.splashpack");
+        const std::string c = slurp(dir / "crate.splashpack");
+        const size_t tc = size_t(rd32(c, 168));
+        CHECK(rc.ok() && rd16(c, tc) == 3 && std::string(c.c_str() + size_t(rd32(c, tc + 4))) == "Crate");
+        CHECK(rd16(c, tc + 4 + 56) == 0 && rd32(c, tc + 4 + 4) == 0 && rd32(c, tc + 4 + 8) == 0);
+    }
+
+    // Problems the export refuses.
+    {
+        splash::Scene sc = base;
+        find(sc, "Fountain")->particles->sheet = "nope";
+        splash::ExportResult re = splash::exportSplashpack(sc, project, dir / "bad.splashpack");
+        CHECK(!re.ok() && !re.errors.empty() && re.errors[0].find("no sprite sheet named 'nope'") != std::string::npos);
+        sc = base;
+        find(sc, "Fountain")->particles->maxParticles = 300;
+        re = splash::exportSplashpack(sc, project, dir / "bad.splashpack");
+        CHECK(!re.ok() && re.errors[0].find("at most 256") != std::string::npos);
+        sc = base;
+        find(sc, "Sparks")->particles->anim = "gone";
+        CHECK(!splash::exportSplashpack(sc, project, dir / "bad.splashpack").ok());
+        sc = base;
+        for (int i = 0; i < 32; i++) {
+            splash::Object o = *find(sc, "Sparks");
+            o.name = "S" + std::to_string(i);
+            sc.objects.push_back(o);
+        }
+        re = splash::exportSplashpack(sc, project, dir / "bad.splashpack");
+        CHECK(!re.ok() && re.errors[0].find("34 particle emitters") != std::string::npos);
+        // Too small a pool for the rate: a warning, not an error.
+        sc = base;
+        find(sc, "Fountain")->particles->maxParticles = 10;
+        re = splash::exportSplashpack(sc, project, dir / "warn.splashpack");
+        bool warned = false;
+        for (const std::string& w : re.warnings) warned |= w.find("the pool holds 10") != std::string::npos;
+        CHECK(re.ok() && warned);
+    }
+
+    // Blocks start, stop and burst an emitter by its object's name.
+    {
+        splash::LuaGen g = splash::blocksToLua(blockScript(
+            {}, {{blk("on_scene_start"), blk("particles_play", "Fountain"), blk("particles_stop", "Fountain"),
+                  blk("particles_burst", "Sparks", {bnum("12")})}}));
+        CHECK(g.errors.empty());
+        for (const char* want : {"Particles.Play(\"Fountain\")", "Particles.Stop(\"Fountain\")", "Particles.Burst(\"Sparks\", 12)"})
+            CHECK(g.lua.find(want) != std::string::npos);
+        CHECK(!splash::blocksToLua(blockScript({}, {{blk("on_scene_start"), blk("particles_play")}})).errors.empty());
+        bool found = false;
+        for (const editor::lua::ApiSymbol& a : editor::lua::api())
+            if (std::string(a.table) == "Particles" && std::string(a.name) == "Burst") found = true;
+        CHECK(found);
+    }
+}
+
 static void testPathTimeline() {
     using splash::TrackType;
     splash::Scene sc;
@@ -16086,6 +16296,7 @@ int main(int argc, char** argv) {
     testPathExport();
     testPathBlocks();
     testPathTimeline();
+    testParticles();
     testStringTable();
     testStringScan();
     testStringsBake();

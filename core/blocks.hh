@@ -60,7 +60,8 @@ std::string saveBlocks(const BlockScript& script);
 enum class BlockKind { Hat, Statement, CBlock, Reporter, Boolean };
 // StringKey: a key of the project's string table (core/strings.hh); UiText:
 // a UI text element as "Canvas/Element".
-enum class BlockField { None, Variable, Object, Button, Number, Text, Bool, Sound, Cutscene, Light, Key, StringKey, UiText };
+// Emitter: an object with a Particle Emitter, by name (Particles.Play).
+enum class BlockField { None, Variable, Object, Button, Number, Text, Bool, Sound, Cutscene, Light, Key, StringKey, UiText, Emitter };
 
 // Label templates (English, for the block editor): %f is the field, %1..%9
 // the inputs; '|' separates the label shown before each body after the

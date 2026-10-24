@@ -18,7 +18,7 @@ import struct
 import sys
 from pathlib import Path
 
-HEADER = [  # (name, fmt) in order, 160 bytes (v28+); 156 in v25-v27, 148 in v24, 144 in v22-v23
+HEADER = [  # (name, fmt) in order, 172 bytes (v31); 160 in v28, 156 in v25-v27, 148 in v24, 144 in v22-v23
     ("magic", "2s"), ("version", "H"), ("luaFileCount", "H"), ("gameObjectCount", "H"),
     ("textureAtlasCount", "H"), ("clutCount", "H"), ("colliderCount", "H"), ("interactableCount", "H"),
     ("playerStartPos", "3h"), ("playerStartRot", "3h"), ("playerHeight", "H"), ("sceneLuaFileIndex", "h"),
@@ -35,22 +35,22 @@ HEADER = [  # (name, fmt) in order, 160 bytes (v28+); 156 in v25-v27, 148 in v24
     ("memcardTableOffset", "I"), ("streamTableOffset", "I"), ("spriteTableOffset", "I"),
     ("spriteSheetCount", "H"), ("spriteAnimCount", "H"), ("sceneHash", "I"), ("tilemapTableOffset", "I"),
     ("lightTableOffset", "I"), ("orderingTableSize", "I"), ("bumpAllocatorSize", "I"),
-    ("shadowTableOffset", "I"),
+    ("shadowTableOffset", "I"), ("reservedV29", "I"), ("reservedV30", "I"), ("particleTableOffset", "I"),
 ]
 OFFSET_FIELDS = {"nameTableOffset", "audioTableOffset", "cutsceneTableOffset", "uiTableOffset",
                  "animationTableOffset", "skinTableOffset", "memcardTableOffset", "streamTableOffset",
-                 "spriteTableOffset", "tilemapTableOffset", "lightTableOffset", "shadowTableOffset"}
-VERSIONS = range(23, 29)
+                 "spriteTableOffset", "tilemapTableOffset", "lightTableOffset", "shadowTableOffset", "particleTableOffset"}
+VERSIONS = list(range(23, 29)) + [31]  # v29 and v30 belong to formats this writer does not emit
 
 
 def header_size(version):  # psxsplash splashpack.cpp splashpackHeaderSize
-    return 160 if version >= 28 else 156 if version >= 25 else 148 if version >= 24 else 144
+    return 172 if version >= 31 else 160 if version >= 28 else 156 if version >= 25 else 148 if version >= 24 else 144
 
 
 UNSUPPORTED = ["triggerBoxCount", "interactableCount", "audioClipCount",
                "cutsceneCount", "animationCount", "skinnedMeshCount", "agentCount", "uiCanvasCount",
                "uiFontCount", "spriteSheetCount", "memcardTableOffset", "streamTableOffset",
-               "tilemapTableOffset", "lightTableOffset", "shadowTableOffset"]
+               "tilemapTableOffset", "lightTableOffset", "shadowTableOffset", "particleTableOffset"]
 
 
 class Pack:
@@ -77,7 +77,7 @@ class Pack:
             else:
                 self.h[name] = 0
             p += n
-        assert p == 160
+        assert p == 172
         p = size
         h = self.h
         self.lua = []

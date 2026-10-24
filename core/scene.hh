@@ -268,6 +268,35 @@ struct FollowPathComponent {
     ExtraKeys extra;
 };
 
+// Billboard particles cut from a sprite sheet (core/particles.hh has the
+// console's simulation, which the Scene view preview runs too). Spawned at the
+// object's position: `rate` a second while playing, plus `burst` at once when
+// it starts. Each lives `lifetime` seconds, starts at `velocity` (metres per
+// second, in the object's space, so rotating the object aims it) plus a random
+// +-`spread` per world axis, falls by `gravity` (metres per second per second,
+// down) and fades from startColor to endColor (0.5 = the sheet's own colours,
+// as UI images). One-shot emitters (loop off) emit for `duration` seconds.
+// Lua and Blocks start and stop it by the object's name (Particles.Play).
+struct ParticleEmitterComponent {
+    std::string sheet;  // sprite sheet name
+    std::string anim;   // an animation of that sheet, played over each particle's life; empty = `cell`
+    int cell = 0;
+    float rate = 10;      // particles per second
+    int burst = 0;        // spawned at once by Play
+    float lifetime = 1.5f;  // seconds
+    Vec3 velocity{0, 2, 0};
+    Vec3 spread{0.5f, 0.5f, 0.5f};
+    float gravity = 2.0f;
+    std::array<float, 3> startColor{0.5f, 0.5f, 0.5f};
+    std::array<float, 3> endColor{0.5f, 0.5f, 0.5f};
+    float size = 0.25f;     // metres, the billboard's width (its height follows the cell)
+    int maxParticles = 32;  // the pool, allocated when the scene loads
+    bool loop = true;
+    bool autoplay = true;
+    float duration = 1.0f;  // seconds, one-shot emitters only
+    ExtraKeys extra;
+};
+
 struct Transform {
     Vec3 position;
     Quat rotation;
@@ -296,6 +325,7 @@ struct Object {
     std::optional<TerrainComponent> terrain;
     std::optional<PathComponent> path;
     std::optional<FollowPathComponent> followPath;
+    std::optional<ParticleEmitterComponent> particles;
     std::vector<std::string> unknownComponents;  // components of an unknown type, as JSON text
     std::vector<Object> children;
     ExtraKeys extra;

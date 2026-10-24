@@ -168,6 +168,13 @@ struct ExportStats {
     };
     std::vector<NavRegionInfo> navInfo;
     int shadows = 0;  // blob shadow records written (v28 when not 0)
+    // Particle emitters written (v31 when not 0) and their pools: the most
+    // particles alive at once (the sum of Max particles), the heap block
+    // psxsplash allocates for them when the scene loads (counted in the RAM
+    // meter) and the render buffer bytes they can take a frame (in
+    // bumpAllocatorNeed).
+    int particleEmitters = 0, particleMax = 0;
+    uint32_t particlePoolBytes = 0, particleBumpBytes = 0;
     bool navIslands = false;
     // Nav walk-off zones on active objects, in flatten order: the boundary
     // edges each one opened (an edge inside two counts for the first).
