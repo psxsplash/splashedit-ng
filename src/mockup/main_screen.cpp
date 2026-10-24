@@ -523,6 +523,8 @@ static void updatePlay(State& st, const editor::Document& doc) {
         if (!p.cons[0].game.attached() && p.message.empty() && SDL_GetTicks() - p.startedAt > 10000)
             p.message = "pcsx-redux started but shows nothing here; it needs -shmdisplay support";
     } else {
+        // A stop dies with the game: no marker, no Continue.
+        if (p.debug.on() || p.debug.stopped()) p.debug.reset();
         // Console 1 gone ends the session: the others and the relay go with it.
         if (p.starting || std::any_of(p.cons.begin() + 1, p.cons.end(), [](const State::Play::Console& c) { return c.emu.running(); }) ||
             (p.relay && p.relay->running()))
@@ -12715,6 +12717,9 @@ ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view,
         st.scripts.setBlockContext(blockContext(doc));
         st.scripts.setBreakpoints(&st.breakpoints, doc.projectRoot());
         st.scripts.setStopLine(st.play.debug.stopped() ? st.play.debug.stop().chunk : std::string(), st.play.debug.stop().line);
+        scriptLine("debug.stopline", st.play.debug.stopped() ? "luaeditor: stop line " + st.play.debug.stop().chunk + ":" +
+                                                                    std::to_string(st.play.debug.stop().line)
+                                                              : std::string("luaeditor: stop line none"));
         st.scripts.draw(dl, body);
         if (st.scripts.takeBreakpointsChanged()) breakpointsChanged(st, doc);
         st.viewportRect = ImRect();

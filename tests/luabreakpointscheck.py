@@ -201,6 +201,21 @@ check('and is saved', saved(project) == {CHUNK: [9, 11]}, saved(project))
 if shot:
     check('the screenshot was written', os.path.exists(shot))
 
+# Stop Play while the game is stopped: the marker and the tab go, F8 sends nothing.
+project = project_copy({CHUNK: [9]})
+lines = run(project, ['--key', 'f5', '--wait', '30', '--wait-stop', '--wait', '30', '--key', 'f5', '--wait', '60', '--key', 'f8',
+                      '--wait', '10', '--click', '@debug.continue', '--wait', '5'], env=PLAY)
+marks = [l for l in lines if l.startswith('luaeditor: stop line ') or l.startswith('play: ')]
+unmarked = [i for i, l in enumerate(marks) if l == 'luaeditor: stop line none']
+marked = [i for i, l in enumerate(marks) if l == 'luaeditor: stop line %s:9' % CHUNK]
+check('the stopped line is marked, then unmarked when Play stops (before any key)',
+      bool(marked) and any(i > marked[0] for i in unmarked) and not any(l.startswith('play: continue') for l in marks[:max(unmarked)]),
+      marks)
+check('no Continue once Play stopped', any('@debug.continue: no such control drawn' in l for l in lines),
+      [l for l in lines if 'debug.continue' in l])
+check('F8 after Play stopped resumes nothing', not any(l.startswith('play: continue') for l in lines),
+      [l for l in lines if l.startswith('play: ')])
+
 # An engine without the debugger (it never says so): no Debugger tab during Play either.
 plain = os.path.join(work, 'plain-redux.sh')
 with open(plain, 'w', newline='\n') as fh:
