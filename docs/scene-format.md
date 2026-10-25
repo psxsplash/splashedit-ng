@@ -153,9 +153,16 @@ A font is either `source`, a TTF/OTF rasterised at `size` pixels per em (4..64),
 0.5). A bitmap font may give `advances`, 96 widths for 0x20..0x7F; without them each character
 advances by its ink width plus one. At most 3 fonts; names must be unique.
 
+`"greyLevels": true` (either kind; omitted when false) keeps 15 levels of ink instead of one: a
+bitmap's opaque pixel takes level `round(luma * 15)` (luma `0.299 r + 0.587 g + 0.114 b`, at least
+1), a TTF texel `round(coverage * 15 / 255)` (0 is transparent) in place of the 96/255 threshold.
+Level 15 is white, palette index 1, and level q below it index 16 - q, a grey of `round(q * 31 / 15)`
+in each channel; the text colour still tints it. psxsplash before font palettes draws only the
+white texels of such a font.
+
 In the editor, the UI tab's canvas inspector (select a canvas, no element) has a Scene fonts
-section that adds, edits and removes fonts: name, source file, size or glyph cells, with the sheet
-and VRAM each one costs and a sample line. Renaming a font renames it in every text element that
+section that adds, edits and removes fonts: name, source file, size or glyph cells, grey levels,
+with the sheet and VRAM each one costs and a sample line. Renaming a font renames it in every text element that
 uses it; deleting one puts those elements back on the system font. Each change is one undo step.
 
 A canvas's `defaultFont` (a font name, `null` for the system font; Unity's PSXCanvas.defaultFont)

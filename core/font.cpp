@@ -119,12 +119,14 @@ FontSheet fromTrueType(const UIFont& f, const std::filesystem::path& file) {
         bool lost = false;
         for (int y = 0; y < h; y++)
             for (int x = 0; x < w; x++) {
-                if (gl.cov[size_t(y) * w + x] < kInk) continue;
+                const int c = gl.cov[size_t(y) * w + x];
+                const uint8_t ink = f.greyLevels ? fontInkIndex(int(std::lround(c * 15 / 255.0))) : uint8_t(c >= kInk);
+                if (!ink) continue;
                 if (std::max(0, gl.x0) + x >= s.glyphWidth) {
                     lost = true;
                     continue;
                 }
-                s.texels[size_t(oy + y) * kSheetW + ox + x] = 1;
+                s.texels[size_t(oy + y) * kSheetW + ox + x] = ink;
                 if (std::max(0, gl.x0) + x >= drawn) lost = true;
             }
         if (lost) clipped += char(kFirst + i);
@@ -146,8 +148,13 @@ FontSheet fromBitmap(const UIFont& f, const std::filesystem::path& file) {
         fail(f, "bitmap needs " + std::to_string(s.height) + " rows for " + std::to_string(f.glyphWidth) + "x" +
                     std::to_string(f.glyphHeight) + " cells, " + file.string() + " has " + std::to_string(img.height));
     for (int y = 0; y < s.height; y++)
-        for (int x = 0; x < kSheetW; x++)  // Image rows are bottom-up
-            s.texels[size_t(y) * kSheetW + x] = img.pixels[size_t(img.height - 1 - y) * kSheetW + x].a > 0.5f;
+        for (int x = 0; x < kSheetW; x++) {  // Image rows are bottom-up
+            const Image::Px& p = img.pixels[size_t(img.height - 1 - y) * kSheetW + x];
+            uint8_t& t = s.texels[size_t(y) * kSheetW + x];
+            if (!(p.a > 0.5f)) continue;
+            const float luma = 0.299f * p.r + 0.587f * p.g + 0.114f * p.b;
+            t = f.greyLevels ? fontInkIndex(std::clamp(int(std::lround(luma * 15)), 1, 15)) : 1;
+        }
     if (!f.advances.empty()) {
         for (int i = 0; i < 96; i++) s.advances[size_t(i)] = uint8_t(std::clamp(f.advances[size_t(i)], 1, 255));
     } else {
@@ -161,7 +168,8 @@ FontSheet fromBitmap(const UIFont& f, const std::filesystem::path& file) {
         }
         s.advances[95] = uint8_t(s.glyphWidth);
     }
-    for (int x = 0; x < 64; x++)
+    // A grey font's palette goes below the sheet; a binary one's white CLUT on its top row.
+    for (int x = 0; x < 64 && !f.greyLevels; x++)
         if (s.texels[size_t(x)]) {
             s.warnings.push_back("font '" + f.name +
                                  "': the top row of the first glyph cells has ink; psxsplash overwrites 8 texels "
@@ -179,8 +187,30 @@ std::vector<uint8_t> FontSheet::packed4bpp() const {
     return out;
 }
 
+std::vector<uint8_t> FontSheet::vramBytes() const {
+    std::vector<uint8_t> out = packed4bpp();
+    if (!grey) return out;
+    for (uint16_t c : clut) {
+        out.push_back(uint8_t(c));
+        out.push_back(uint8_t(c >> 8));
+    }
+    return out;
+}
+
+std::array<uint16_t, 16> FontSheet::greyClut() {
+    std::array<uint16_t, 16> c{};
+    c[1] = 0x7FFF;
+    for (int i = 2; i < 16; i++) {
+        const int v = int(std::lround((16 - i) * 31 / 15.0));
+        c[size_t(i)] = uint16_t(v | v << 5 | v << 10);
+    }
+    return c;
+}
+
 FontSheet buildFont(const UIFont& font, const std::filesystem::path& root) {
-    return font.bitmap.empty() ? fromTrueType(font, root / font.source) : fromBitmap(font, root / font.bitmap);
+    FontSheet s = font.bitmap.empty() ? fromTrueType(font, root / font.source) : fromBitmap(font, root / font.bitmap);
+    s.grey = font.greyLevels;
+    return s;
 }
 
 }  // namespace splash

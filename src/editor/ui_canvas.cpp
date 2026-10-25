@@ -121,7 +121,7 @@ void commit(Document& doc, std::vector<UICanvas> after, Document::UiSelection se
 
 bool sameFont(const splash::UIFont& a, const splash::UIFont& b) {
     return a.name == b.name && a.source == b.source && a.size == b.size && a.bitmap == b.bitmap && a.glyphWidth == b.glyphWidth &&
-           a.glyphHeight == b.glyphHeight && a.advances == b.advances && a.extra == b.extra;
+           a.glyphHeight == b.glyphHeight && a.advances == b.advances && a.greyLevels == b.greyLevels && a.extra == b.extra;
 }
 
 bool validCanvas(const Document& doc, int c) { return c >= 0 && c < int(doc.scene().canvases.size()); }
@@ -1209,7 +1209,7 @@ const splash::FontSheet* Assets::font(const splash::Scene& scene, const std::str
         return nullptr;
     }
     std::string key = def->source + "|" + std::to_string(def->size) + "|" + def->bitmap + "|" + std::to_string(def->glyphWidth) +
-                      "x" + std::to_string(def->glyphHeight);
+                      "x" + std::to_string(def->glyphHeight) + (def->greyLevels ? "|grey" : "");
     for (int a : def->advances) key += "," + std::to_string(a);
     std::unique_ptr<Font>& slot = m_fonts[name];
     if (!slot || slot->key != key) {
@@ -1286,7 +1286,8 @@ void drawSystemText(Frame& f, int x, int y, const std::string& text, uint16_t co
     }
 }
 
-void drawFontText(Frame& f, int x, int y, const std::string& text, const splash::FontSheet& sh, uint16_t col) {
+// Each texel is its palette entry tinted by the text colour, as the GPU draws it.
+void drawFontText(Frame& f, int x, int y, const std::string& text, const splash::FontSheet& sh, const std::array<float, 3>& color) {
     const int perRow = 256 / std::max(1, sh.glyphWidth);
     for (unsigned char raw : truncateBytes(text, kTextMax)) {
         const uint8_t ch = glyphChar(raw);
@@ -1298,7 +1299,9 @@ void drawFontText(Frame& f, int x, int y, const std::string& text, const splash:
             for (int gy = 0; gy < sh.glyphHeight; gy++)
                 for (int gx = 0; gx < w; gx++) {
                     const int tx = u + gx, ty = v + gy;
-                    if (tx < 256 && ty < sh.height && sh.texels[size_t(ty) * 256 + size_t(tx)]) f.put(x + gx, y + gy, col);
+                    if (tx >= 256 || ty >= sh.height) continue;
+                    const uint8_t t = sh.texels[size_t(ty) * 256 + size_t(tx)];
+                    if (t) f.put(x + gx, y + gy, tint(sh.clut[t & 15], color));
                 }
         }
         x += adv;
@@ -1438,7 +1441,7 @@ std::vector<uint32_t> render(const splash::Scene& scene, const std::vector<bool>
                     if (font.empty()) {
                         systemText.push_back({r.x, r.y, flat(e.color), &e.text});
                     } else if (const splash::FontSheet* sh = assets.font(scene, font)) {
-                        drawFontText(f, r.x, r.y, e.text, *sh, tint(0x7fff, e.color));
+                        drawFontText(f, r.x, r.y, e.text, *sh, e.color);
                     }
                     break;
                 }
