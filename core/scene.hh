@@ -415,6 +415,9 @@ struct UIFont {
     // Bitmap fonts: per-character advance (0x20..0x7F). Empty = measured from
     // each cell's ink.
     std::vector<int> advances;
+    // Keep 15 grey levels of ink (bitmap luma, TTF coverage) instead of one;
+    // the text colour still tints them.
+    bool greyLevels = false;
     ExtraKeys extra;
 };
 

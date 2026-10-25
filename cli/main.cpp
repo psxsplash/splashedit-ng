@@ -104,9 +104,9 @@ static int usage() {
                  "  --track adds a CD-DA music track (WAV, AIFF, MP3, Ogg Vorbis or FLAC; relative to the\n"
                  "    working directory), tracks 2 and up in the order given (Audio.PlayCDDA(2) plays the\n"
                  "    first); any --track replaces disc.json's list\n"
-                 "usage: splashpack-cli font <font.ttf> --size <px> -o <sheet.png>\n"
-                 "       splashpack-cli font <bitmap.png> --cell <w>x<h> -o <sheet.png>\n"
-                 "  builds one UI font sheet the way export does and prints its cell size and height\n"
+                 "usage: splashpack-cli font <font.ttf> --size <px> [--grey] -o <sheet.png>\n"
+                 "       splashpack-cli font <bitmap.png> --cell <w>x<h> [--grey] -o <sheet.png>\n"
+                 "  builds one UI font sheet the way export does (--grey: greyLevels) and prints its cell size and height\n"
                  "usage: splashpack-cli gpudump <capture.gpd> [--vram <out.raw>] [--owner <out.raw>] [--list] [--redux]\n"
                  "  replays a GPU dump in the frame debugger's rasterizer and prints its packet, command and\n"
                  "  primitive counts; --vram writes the final 1024x512 VRAM (16-bit little endian),\n"
@@ -473,6 +473,7 @@ static int font(int argc, char** argv) {
         std::string a = argv[i];
         if (a == "-o" && i + 1 < argc) out = argv[++i];
         else if (a == "--size" && i + 1 < argc) f.size = std::atoi(argv[++i]);
+        else if (a == "--grey") f.greyLevels = true;
         else if (a == "--cell" && i + 1 < argc) {
             if (std::sscanf(argv[++i], "%dx%d", &f.glyphWidth, &f.glyphHeight) != 2) return usage();
         } else if (in.empty()) in = a;
@@ -489,14 +490,14 @@ static int font(int argc, char** argv) {
         img.pixels.resize(s.texels.size());
         for (int y = 0; y < s.height; y++)
             for (int x = 0; x < 256; x++) {
-                float v = s.texels[size_t(y) * 256 + x];
-                img.pixels[size_t(s.height - 1 - y) * 256 + x] = {v, v, v, 1};
+                const uint16_t c = s.texels[size_t(y) * 256 + x] ? s.clut[s.texels[size_t(y) * 256 + x] & 15] : 0;
+                img.pixels[size_t(s.height - 1 - y) * 256 + x] = {(c & 31) / 31.f, (c >> 5 & 31) / 31.f, (c >> 10 & 31) / 31.f, 1};
             }
         splash::savePng(img, out);
         int ink = 0;
-        for (uint8_t t : s.texels) ink += t;
+        for (uint8_t t : s.texels) ink += t != 0;
         std::printf("%s cell=%dx%d height=%d vram_bytes=%zu ink=%d\n", in.c_str(), s.glyphWidth, s.glyphHeight,
-                    s.height, s.texels.size() / 2, ink);
+                    s.height, s.vramBytes().size(), ink);
         return 0;
     } catch (const std::exception& e) {
         std::fprintf(stderr, "error: %s\n", e.what());
