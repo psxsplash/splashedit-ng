@@ -11330,7 +11330,8 @@ void testLoaderPack() {
         CHECK(len >= 4 && len <= 16 && in(off, size_t(len) * 2));  // 4bpp, padded to 4 entries
         CHECK(clutX * 16 + len <= 1024 && clutY < 512 && !fb(clutX * 16, clutY, len, 1));
     }
-    // Fonts: the sheet's 4bpp texels at dataOffset, 64 words x textureH.
+    // Fonts: the sheet's 4bpp texels at dataOffset, 64 words x textureH (a
+    // binary font: no palette).
     const std::vector<uint8_t> sheet = splash::buildFont(font, project).packed4bpp();
     for (size_t i = 0; i < fontCount; i++) {
         const size_t at = table + 112 * i;
@@ -11401,6 +11402,251 @@ void testLoaderPack() {
     CHECK(pr.ok() && readAll(dir / "scene_0.loading") == b);
     pr = editor::exportForPlay(plain, project, dir);
     CHECK(pr.ok() && fs::exists(dir / "scene_0.splashpack") && !fs::exists(dir / "scene_0.loading"));
+}
+
+// Grey-level fonts (#273): each font record carries a 16-entry palette after
+// its sheet (0 transparent, 1 white, 2..15 greys of level 16 - i); greyLevels
+// maps a bitmap's luma and a TTF's coverage to those levels, and without it a
+// sheet is the binary one it always was. The palette takes the row below the
+// sheet in the font column.
+void testFontGreyLevels() {
+    using namespace roomtest;
+    using K = splash::ExportStats::VramKind;
+    const fs::path src = SPLASHEDIT_SOURCE_DIR;
+    const fs::path project = g_outDir / "greyfont";
+    fs::remove_all(project);
+    fs::create_directories(project);
+    fs::copy(src / "examples" / "courtyard", project, fs::copy_options::recursive);
+    fs::copy_file(src / "assets" / "fonts" / "Inter-Regular.ttf", project / "inter.ttf");
+
+    // The palette: grey of level q = 16 - i is round(q * 31 / 15) in r, g and b.
+    const std::array<uint16_t, 16> pal = splash::FontSheet::greyClut();
+    auto grey = [](int v) { return uint16_t(v | v << 5 | v << 10); };
+    CHECK(pal[0] == 0 && pal[1] == 0x7FFF && pal[2] == grey(29) && pal[8] == grey(17) && pal[15] == grey(2));
+    for (int i = 2; i < 16; i++) CHECK(pal[size_t(i)] != 0 && (pal[size_t(i)] & 31) < (pal[size_t(i - 1)] & 31));
+    CHECK(splash::fontInkIndex(0) == 0 && splash::fontInkIndex(15) == 1 && splash::fontInkIndex(8) == 8 &&
+          splash::fontInkIndex(1) == 15);
+
+    // A 256 x 48 bitmap of 8 x 16 cells. Cell '!' (x 8..15): white, mid grey,
+    // transparent, near black and a 0.4 grey on row 2; ink on the sheet's top
+    // row of the first cells too, which no longer warns.
+    splash::Image img;
+    img.width = 256, img.height = 48;
+    img.pixels.assign(size_t(256) * 48, splash::Image::Px{0, 0, 0, 0});
+    auto put = [&](int x, int y, splash::Image::Px p) { img.pixels[size_t(47 - y) * 256 + size_t(x)] = p; };  // bottom-up
+    put(8, 2, {1, 1, 1, 1});
+    put(9, 2, {0.5f, 0.5f, 0.5f, 1});
+    put(10, 2, {1, 1, 1, 0.2f});
+    put(11, 2, {0.02f, 0.02f, 0.02f, 1});
+    put(12, 2, {0.4f, 0.4f, 0.4f, 1});
+    put(13, 2, {1, 0, 0, 1});  // luma 0.299: level 4
+    for (int x = 0; x < 64; x++) put(x, 0, {0.6f, 0.6f, 0.6f, 1});
+    for (int x = 16; x < 24; x++)  // '"': a gradient 0..1 across the cell
+        for (int y = 1; y < 15; y++) put(x, y, {(x - 16) / 7.f, (x - 16) / 7.f, (x - 16) / 7.f, 1});
+    splash::savePng(img, project / "grey.png");
+    splash::Image stored = splash::loadImage(project / "grey.png");
+    splash::UIFont bf;
+    bf.name = "grey";
+    bf.bitmap = "grey.png";
+    bf.glyphWidth = 8, bf.glyphHeight = 16;
+    bf.greyLevels = true;
+    const splash::FontSheet g = splash::buildFont(bf, project);
+    auto at = [](const splash::FontSheet& sh, int x, int y) { return int(sh.texels[size_t(y) * 256 + size_t(x)]); };
+    CHECK(g.height == 48 && g.clut == pal && g.warnings.empty());
+    CHECK(at(g, 8, 2) == 1 && at(g, 9, 2) == 8 && at(g, 10, 2) == 0 && at(g, 11, 2) == 15 && at(g, 12, 2) == 10 &&
+          at(g, 13, 2) == 12 && at(g, 0, 0) == 7);
+    // Every texel: transparent 0, else the level of the stored pixel's luma.
+    bool mapped = true;
+    std::set<int> levels;
+    for (int y = 0; y < 48; y++)
+        for (int x = 0; x < 256; x++) {
+            const splash::Image::Px& p = stored.pixels[size_t(47 - y) * 256 + size_t(x)];
+            const int q = std::clamp(int(std::lround((0.299f * p.r + 0.587f * p.g + 0.114f * p.b) * 15)), 1, 15);
+            const int want = p.a > 0.5f ? (q == 15 ? 1 : 16 - q) : 0;
+            mapped = mapped && at(g, x, y) == want;
+            if (x >= 16 && x < 24 && y == 5) levels.insert(at(g, x, y));
+        }
+    CHECK(mapped);
+    CHECK(levels.size() == 8 && levels.count(1) && levels.count(15));  // the gradient: 8 columns, 8 levels
+    const std::vector<uint8_t> packed = g.vramBytes();
+    CHECK(packed.size() == size_t(48) * 128 + 32);
+    CHECK(packed[2 * 128 + 4] == uint8_t(1 | 8 << 4) && packed[2 * 128 + 5] == uint8_t(0 | 15 << 4));
+    const size_t pa = size_t(48) * 128;  // the palette after the sheet
+    CHECK(packed.size() == pa + 32 && packed[pa] == 0 && packed[pa + 1] == 0 && packed[pa + 2] == 0xFF && packed[pa + 3] == 0x7F &&
+          packed[pa + 16] == uint8_t(pal[8]) && packed[pa + 17] == uint8_t(pal[8] >> 8));
+
+    // The canvas preview draws each texel's palette entry tinted by the text
+    // colour (0.5: tint 128, the entry as it is), as psxsplash does.
+    {
+        editor::uic::Assets assets;
+        assets.refresh(project, 1);
+        const editor::uic::Screen sc;
+        splash::Scene one;
+        one.fonts = {bf};
+        splash::UICanvas cv;
+        cv.name = "c";
+        splash::UIElement te = uiBox("t", 0, 0, 64, 16);
+        te.type = splash::UIElementType::Text;
+        te.text = "\"";
+        te.font = "grey";
+        te.color = {0.5f, 0.5f, 0.5f};
+        cv.elements.push_back(te);
+        one.canvases.push_back(cv);
+        const std::vector<uint32_t> px = editor::uic::render(one, {true}, sc, assets, 0);
+        auto ex = [](int c5) { return uint32_t((c5 << 3) | (c5 >> 2)); };
+        bool shown = px.size() == size_t(sc.w) * size_t(sc.h);
+        for (int x = 0; x < 8 && shown; x++) {
+            const uint32_t c = px[size_t(5) * size_t(sc.w) + size_t(x)], want = ex(pal[size_t(at(g, 16 + x, 5))] & 31);
+            shown = (c & 0xff) == want && (c >> 8 & 0xff) == want && (c >> 16 & 0xff) == want;
+        }
+        CHECK(shown);
+    }
+
+    // greyLevels off: the binary sheet, every opaque pixel ink 1, as before.
+    bf.greyLevels = false;
+    const splash::FontSheet b1 = splash::buildFont(bf, project);
+    bool binary = true;
+    for (int y = 0; y < 48; y++)
+        for (int x = 0; x < 256; x++) binary = binary && at(b1, x, y) == int(stored.pixels[size_t(47 - y) * 256 + size_t(x)].a > 0.5f);
+    CHECK(binary && b1.advances == g.advances && b1.clut == pal && !b1.grey && b1.vramRows() == 48 && g.grey && g.vramRows() == 49);
+    // The top-row ink still warns for a binary font (psxsplash#56), not a grey one.
+    CHECK(b1.warnings.size() == 1 && b1.warnings[0].find("psxsplash#56") != std::string::npos);
+    std::vector<uint8_t> oldPacked(b1.texels.size() / 2);
+    for (size_t i = 0; i < oldPacked.size(); i++) oldPacked[i] = uint8_t(b1.texels[2 * i] | b1.texels[2 * i + 1] << 4);
+    CHECK(b1.packed4bpp() == oldPacked && b1.vramBytes() == oldPacked);
+
+    // A TTF: greyLevels keeps its antialiasing; off, only 0 and 1, and the
+    // binary ink is all inked in the grey sheet (coverage 96 is level 6).
+    splash::UIFont tf;
+    tf.name = "ttf";
+    tf.source = "inter.ttf";
+    tf.size = 12;
+    const splash::FontSheet t1 = splash::buildFont(tf, project);
+    tf.greyLevels = true;
+    const splash::FontSheet tg = splash::buildFont(tf, project);
+    std::set<int> t1v(t1.texels.begin(), t1.texels.end()), tgv(tg.texels.begin(), tg.texels.end());
+    CHECK(t1v == std::set<int>({0, 1}) && tgv.size() > 8 && *tgv.rbegin() <= 15);
+    CHECK(t1.height == tg.height && t1.glyphWidth == tg.glyphWidth && t1.glyphHeight == tg.glyphHeight && t1.advances == tg.advances);
+    bool covered = t1.texels.size() == tg.texels.size();
+    for (size_t i = 0; covered && i < t1.texels.size(); i++)
+        covered = !t1.texels[i] || tg.texels[i] == 1 || (tg.texels[i] >= 2 && tg.texels[i] <= 10);
+    CHECK(covered);
+
+    // Export: the descriptor's and the .vram record's dataSize take the
+    // palette, the bytes are the sheet then the palette, and the next font
+    // starts below the palette row, which the VRAM map shows.
+    splash::Scene scene = splash::loadScene(project / "courtyard.scene");
+    scene.canvases.clear();
+    scene.settings.loadingCanvas.clear();
+    bf.greyLevels = true;
+    tf.greyLevels = false;
+    splash::UIFont bb = bf;  // the same bitmap, binary
+    bb.name = "binary";
+    bb.greyLevels = false;
+    scene.fonts = {bf, tf, bb};
+    splash::UICanvas hud;
+    hud.name = "hud";
+    splash::UIElement t = uiBox("t", 8, 8, 100, 16);
+    t.type = splash::UIElementType::Text;
+    t.text = "!\"";
+    t.font = "grey";
+    hud.elements.push_back(t);
+    scene.canvases.push_back(hud);
+    splash::ExportResult r = splash::exportSplashpack(scene, project, project / "g.splashpack");
+    for (const std::string& e : r.errors) std::fprintf(stderr, "grey font: %s\n", e.c_str());
+    CHECK(r.ok());
+    const std::string p = readAll(project / "g.splashpack"), v = readAll(project / "g.vram");
+    CHECK(p.size() > 100 && uint8_t(p[94]) == 3 && v.size() > 8 && uint8_t(v[6]) == 3);
+    if (p.size() <= 100 || v.size() <= 8) return;
+    const size_t table = size_t(rd32(p, 96));
+    const std::vector<uint8_t> want[3] = {g.vramBytes(), t1.vramBytes(), b1.vramBytes()};
+    CHECK(want[0].size() == 48 * 128 + 32 && want[1] == t1.packed4bpp() && want[2] == b1.packed4bpp());
+    int descY[3] = {-1, -1, -1}, descH[3] = {0, 0, 0};
+    for (size_t i = 0; i < 3; i++) {
+        const size_t d = table + 112 * i;
+        descY[i] = rd16(p, d + 4), descH[i] = rd16(p, d + 6);
+        CHECK(rd16(p, d + 2) == 960 && rd32(p, d + 8) == 0 &&
+              size_t(rd32(p, d + 12)) == size_t(descH[i]) * 128 + (i == 0 ? 32 : 0) && size_t(rd32(p, d + 12)) == want[i].size());
+    }
+    // The grey sheet's palette row, then the binary sheets back to back as before.
+    CHECK(descY[0] == 0 && descH[0] == 48 && descY[1] == 49 && descY[2] == descY[1] + descH[1] && descH[2] == 48);
+    size_t q = 8;
+    for (size_t i = 0, n = rd16(v, 2); i < n; i++) q = (q + 8 + size_t(rd16(v, q + 4)) * rd16(v, q + 6) * 2 + 3) & ~size_t(3);
+    for (size_t i = 0, n = rd16(v, 4); i < n; i++) q = (q + 8 + size_t(rd16(v, q + 4)) * 2 + 3) & ~size_t(3);
+    for (size_t i = 0; i < 3 && q + 12 <= v.size(); i++) {
+        const size_t size = size_t(rd32(v, q + 8));
+        CHECK(rd16(v, q + 2) == 960 && rd16(v, q + 4) == descY[i] && rd16(v, q + 6) == descH[i] && size == want[i].size() &&
+              q + 12 + size <= v.size() && std::memcmp(v.data() + q + 12, want[i].data(), want[i].size()) == 0);
+        if (i == 0)
+            CHECK(q + 12 + size <= v.size() && rd16(v, q + 12 + size - 32 + 2) == 0x7FFF && rd16(v, q + 12 + size - 32 + 2 * 8) == pal[8]);
+        q = (q + 12 + size + 3) & ~size_t(3);
+    }
+    CHECK(q == v.size());
+    int palettes = 0;
+    for (const auto& m : r.stats.vramMap)
+        if (m.kind == K::Clut && m.x == 960) palettes++;
+    CHECK(palettes == 1 && std::any_of(r.stats.vramMap.begin(), r.stats.vramMap.end(), [&](const splash::ExportStats::VramRect& m) {
+              return m.kind == K::Clut && m.x == 960 && m.y == 48 && m.w == 16 && m.h == 1;
+          }));
+    CHECK(r.stats.fontBytes == want[0].size() + want[1].size() + want[2].size());
+
+    // The loader pack carries the grey font's sheet and palette at its dataOffset.
+    scene.settings.loadingCanvas = "hud";
+    splash::ExportResult lr = splash::exportLoaderPack(scene, project, project / "g.loading");
+    CHECK(lr.ok());
+    const std::string lp = readAll(project / "g.loading");
+    CHECK(lp.size() > 16 && lp[0] == 'L' && uint8_t(lp[4]) == 1);
+    if (lp.size() > 16) {
+        const size_t lt = size_t(rd32(lp, 12));
+        const size_t off = size_t(rd32(lp, lt + 8)), size = size_t(rd32(lp, lt + 12));
+        CHECK(rd16(lp, lt + 4) == 0 && rd16(lp, lt + 6) == 48 && size == want[0].size() && off != 0 && off + size <= lp.size() &&
+              std::memcmp(lp.data() + off, want[0].data(), size) == 0);
+    }
+    scene.settings.loadingCanvas.clear();
+
+    // A 9 x 64 bitmap font fills rows 0-255 exactly. Binary, the next font
+    // starts at 256 as before; grey, its palette goes on row 256 and the next
+    // font starts at 257; with the second bin taken, the grey one cannot fit.
+    splash::Image tall;
+    tall.width = 256, tall.height = 256;
+    tall.pixels.assign(size_t(256) * 256, splash::Image::Px{1, 1, 1, 1});
+    splash::savePng(tall, project / "tall.png");
+    splash::UIFont tl;
+    tl.name = "tall";
+    tl.bitmap = "tall.png";
+    tl.glyphWidth = 9, tl.glyphHeight = 64;
+    CHECK(splash::buildFont(tl, project).height == 256);
+    auto secondY = [&](const char* name) {
+        const std::string pt = readAll(project / name);
+        return pt.size() > 100 ? int(rd16(pt, size_t(rd32(pt, 96)) + 112 + 4)) : -1;
+    };
+    scene.fonts = {tl, bf};
+    CHECK(splash::exportSplashpack(scene, project, project / "tall.splashpack").ok() && secondY("tall.splashpack") == 256);
+    tl.greyLevels = true;
+    scene.fonts = {tl, bf};
+    CHECK(splash::exportSplashpack(scene, project, project / "tallg.splashpack").ok() && secondY("tallg.splashpack") == 257);
+    scene.fonts = {bf, tl};  // the small font first: rows 0-48 and 256-..., no room left for the tall one
+    r = splash::exportSplashpack(scene, project, project / "tall2.splashpack");
+    CHECK(!r.ok() && hasError(r, "'tall' (256 rows and one more for its grey palette) does not fit"));
+
+    // Saved only when on; a round trip keeps it; the toggle is one undo step.
+    splash::Scene sv;
+    bf.greyLevels = true;
+    tf.greyLevels = false;
+    sv.fonts = {bf, tf};
+    splash::saveScene(sv, project / "grey.scene");
+    const std::string js = readAll(project / "grey.scene");
+    size_t first = js.find("\"greyLevels\"");
+    CHECK(first != std::string::npos && js.find("\"greyLevels\"", first + 1) == std::string::npos);
+    splash::Scene back = splash::loadScene(project / "grey.scene");
+    CHECK(back.fonts.size() == 2 && back.fonts[0].greyLevels && !back.fonts[1].greyLevels);
+    splash::saveScene(back, project / "grey2.scene");
+    CHECK(readAll(project / "grey2.scene") == js);
+    editor::Document d;
+    d.reset(sv);
+    CHECK(editor::uic::editFont(d, 1, [](splash::UIFont& x) { x.greyLevels = !x.greyLevels; }) && d.scene().fonts[1].greyLevels &&
+          d.historySize() == 1);
+    CHECK(d.undo() && !d.scene().fonts[1].greyLevels);
 }
 
 // A canvas's default font in the export: a text element with no font of its
@@ -17040,6 +17286,7 @@ int main(int argc, char** argv) {
     testUiMatchesRuntime();
     testLoaderPack();
     testExportCanvasDefaultFont();
+    testFontGreyLevels();
     testDiscLicenceParse();
     testDiscSettings();
     testDiscLicenceImage();
