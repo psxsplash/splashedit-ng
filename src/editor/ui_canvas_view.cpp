@@ -1846,7 +1846,7 @@ void CanvasView::fontsSection(ImDrawList* dl, float x0, float x1, float* yp, edi
         else b.sheet = m_assets.font(doc.scene(), uf.name, &b.error);
         if (b.sheet) {
             const splash::FontSheet& sh = *b.sheet;
-            const size_t vram = sh.packed4bpp().size();
+            const size_t vram = sh.vramBytes().size();
             char info[160];
             std::snprintf(info, sizeof info, "%d x %d cells of %d x %d, sheet 256 x %d, VRAM %zu bytes", 256 / std::max(1, sh.glyphWidth),
                           sh.height / std::max(1, sh.glyphHeight), sh.glyphWidth, sh.glyphHeight, sh.height, vram);
@@ -1964,6 +1964,13 @@ void CanvasView::fontsSection(ImDrawList* dl, float x0, float x1, float* yp, edi
             if (fh.done) doc.endMerge();
         }
 
+        ImRect lf = rows.row("lfgrey", "Grey levels",
+                             "Keeps 15 levels of ink instead of one: a bitmap's brightness, a TTF's antialiasing. The text colour "
+                             "still tints them. Off, every inked texel is full white.");
+        const ImRect gt(ImVec2(lf.Min.x, lf.GetCenter().y - 8), ImVec2(lf.Min.x + 30, lf.GetCenter().y + 8));
+        nameRect(id + ".grey", gt);
+        if (toggle("fgrey", gt, uf.greyLevels)) uic::editFont(doc, i, [](splash::UIFont& x) { x.greyLevels = !x.greyLevels; });
+
         // What the export makes of it, or why it cannot: one line, the whole reason in its tooltip.
         {
             // Two lines, wrapped, reserved whether or not the text needs them.
@@ -1990,7 +1997,7 @@ void CanvasView::fontsSection(ImDrawList* dl, float x0, float x1, float* yp, edi
             FontSample& smp = m_samples[size_t(i)];
             const std::string key = uf.name + "|" + uf.source + "|" + uf.bitmap + "|" + std::to_string(uf.size) + "|" +
                                     std::to_string(uf.glyphWidth) + "x" + std::to_string(uf.glyphHeight) + "|" +
-                                    std::to_string(doc.assetsId()) + "|" + doc.projectRoot().string();
+                                    (uf.greyLevels ? "grey|" : "") + std::to_string(doc.assetsId()) + "|" + doc.projectRoot().string();
             if (!smp.tex || smp.key != key) {
                 uic::Screen size;
                 std::vector<uint32_t> px = uic::renderSample(doc.scene(), m_assets, uf.name, "AaBbCc 0123 !?", 0, &size);
