@@ -849,7 +849,9 @@ void prepareUi(const Scene& scene, const std::vector<UICanvas>& canvases, const 
                              std::to_string(kUiMaxFonts));
     // Fonts go in the column at x = 960 that the VRAM packer keeps free, above
     // the system font (960, 464, 48 rows). A sheet must not cross a texture
-    // page, so the column is two bins: rows 0-255 and 256-463.
+    // page, so the column is two bins: rows 0-255 and 256-463. A greyLevels
+    // font's 16-entry palette takes the row below its sheet; a sheet that ends
+    // on row 255 puts it on row 256 while the second bin is still empty.
     struct Bin {
         int y, end;
     } bins[2] = {{0, 256}, {256, 464}};
@@ -876,16 +878,21 @@ void prepareUi(const Scene& scene, const std::vector<UICanvas>& canvases, const 
         FontSheet& sh = sheets.back();
         res.warnings.insert(res.warnings.end(), sh.warnings.begin(), sh.warnings.end());
         bool placed = false;
-        for (Bin& b : bins)
-            if (b.y + sh.height <= b.end && !clash(960, b.y, 64, sh.height)) {
+        const int rows = sh.vramRows();
+        for (Bin& b : bins) {
+            const int end = sh.grey && &b == &bins[0] && bins[1].y == bins[0].end ? b.end + 1 : b.end;
+            if (b.y + rows <= end && !clash(960, b.y, 64, sh.height) && !(sh.grey && clash(960, b.y + sh.height, 16, 1))) {
                 fontVram.push_back({960, b.y});
-                b.y += sh.height;
+                b.y += rows;
+                if (b.y > bins[1].y) bins[1].y = b.y;
                 placed = true;
                 break;
             }
+        }
         if (!placed) {
             res.errors.push_back("font '" + f.name + "' (" + std::to_string(sh.height) +
-                                 " rows) does not fit in the font column of VRAM");
+                                 (sh.grey ? " rows and one more for its grey palette" : " rows") +
+                                 ") does not fit in the font column of VRAM");
             sheets.pop_back();
             continue;
         }
@@ -1021,7 +1028,7 @@ void writeUi(BinWriter& w, size_t tableOffsetPos, const std::vector<UICanvas>& c
         w.u16(uint16_t(fontVram[i][1]));
         w.u16(uint16_t(sheets[i].height));
         w.u32(fontDataOffsets ? fontDataOffsets->at(i) : 0);
-        w.u32(uint32_t(sheets[i].texels.size() / 2));
+        w.u32(uint32_t(sheets[i].vramBytes().size()));
         w.bytes(sheets[i].advances.data(), 96);
     }
     // Canvas descriptors (12 bytes).
@@ -2369,9 +2376,13 @@ static ExportResult exportSplashpackBaked(const Scene& scene, const fs::path& ro
         std::vector<std::string> fontNames(fontSheets.size());
         for (const auto& [name, idx] : fontIndex)
             if (idx >= 1 && size_t(idx) <= fontNames.size()) fontNames[idx - 1] = name;
-        for (size_t i = 0; i < fontSheets.size() && i < fontVram.size(); i++)
+        for (size_t i = 0; i < fontSheets.size() && i < fontVram.size(); i++) {
             map.push_back({K::Font, fontVram[i][0], fontVram[i][1], 64, fontSheets[i].height,
                            "Font '" + fontNames[i] + "'"});
+            if (fontSheets[i].grey)
+                map.push_back({K::Clut, fontVram[i][0], fontVram[i][1] + fontSheets[i].height, 16, 1,
+                               "Font '" + fontNames[i] + "' palette"});
+        }
     }
     if (!res.ok()) return res;
 
@@ -3407,7 +3418,7 @@ static ExportResult exportSplashpackBaked(const Scene& scene, const fs::path& ro
         v.align4();
     }
     for (size_t i = 0; i < fontSheets.size(); i++) {
-        std::vector<uint8_t> px = fontSheets[i].packed4bpp();
+        std::vector<uint8_t> px = fontSheets[i].vramBytes();
         v.u8(uint8_t(fontSheets[i].glyphWidth));
         v.u8(uint8_t(fontSheets[i].glyphHeight));
         v.u16(uint16_t(fontVram[i][0]));
@@ -3448,7 +3459,7 @@ static ExportResult exportSplashpackBaked(const Scene& scene, const fs::path& ro
                                    t->hasPalette ? int(t->palette.size()) : 0});
         }
     }
-    for (const FontSheet& f : fontSheets) st.fontBytes += f.packed4bpp().size();
+    for (const FontSheet& f : fontSheets) st.fontBytes += f.vramBytes().size();
     st.spuEnd = kSpuStart;
     for (const std::vector<uint8_t>& d : audioData) st.spuEnd = ((st.spuEnd + 15) & ~size_t(15)) + ((d.size() + 15) & ~size_t(15));
     for (const ExpObject& e : exporters) st.triangles += int(e.tris.size());
@@ -3615,7 +3626,7 @@ ExportResult exportLoaderPack(const Scene& scene, const fs::path& root, const fs
     for (const FontSheet& sh : sheets) {
         w.align4();
         fontOffsets.push_back(uint32_t(w.pos()));
-        std::vector<uint8_t> px = sh.packed4bpp();
+        std::vector<uint8_t> px = sh.vramBytes();
         w.bytes(px.data(), px.size());
     }
     writeUi(w, tableOffsetPos, canvases, uiTextures, sheets, fontVram, fontIndex, options.vram, uiSheets, fontScene.spriteSheets, {},
