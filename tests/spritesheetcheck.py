@@ -5,6 +5,7 @@
 # section's scripted "scene: sprite" lines; each of those edits goes back in
 # one Ctrl+Z; the preview steps through the animation's cells; a cell size
 # that does not divide the texture is reported; a sheet's trash deletes it.
+# With more images than fit, the Add sheet list stays on screen and scrolls (#285).
 # Controls are clicked by name (--click @scene.spriteadd): the editor aims at
 # where the frame before drew them, so no pixel positions live here.
 # usage: python3 spritesheetcheck.py <splashedit> [screenshot.png]   (needs a display: xvfb-run -a)
@@ -54,14 +55,17 @@ SAVE_MID = ['--key', 'ctrl+s', '--wait', '10', '--copy-file', '{scene}@{snap}', 
 ADD = click('scene.spriteadd') + click('scene.spriteadd/textures/hero.png') + SCROLL
 
 
-def run(args, onscreen=(), shot=None):
+def run(args, onscreen=(), shot=None, many=False):
     """Runs `args` on a fresh courtyard copy after scrolling to the section,
     then Ctrl+S; returns the saved scene's spriteSheets (None when the key is
-    absent) and the editor's output without its list of controls."""
+    absent) and the editor's output without its list of controls (those are in
+    run.controls). With `many`, 60 more images (textures/pick_NN.png)."""
     global mid
     project = os.path.join(tempfile.mkdtemp(), 'courtyard')
     shutil.copytree(example, project)
     shutil.copy(os.path.join(here, 'sprite', 'hero.png'), os.path.join(project, 'textures', 'hero.png'))
+    for k in range(60 if many else 0):
+        shutil.copy(os.path.join(here, 'sprite', 'hero.png'), os.path.join(project, 'textures', 'pick_%02d.png' % k))
     scene = os.path.join(project, 'courtyard.scene')
     snap = os.path.join(os.path.dirname(project), 'mid.scene')
     args = [a.replace('{scene}', scene).replace('{snap}', snap) for a in args]
@@ -80,6 +84,8 @@ def run(args, onscreen=(), shot=None):
             if m: rect = tuple(int(v) for v in m.groups())
         check(name + ' is on screen', rect is not None and rect[1] > 80 and rect[3] < H - 40, rect)
     mid = json.load(open(snap, encoding='utf-8')).get('spriteSheets') if os.path.exists(snap) else None
+    run.controls = {m.group(1): tuple(map(int, m.groups()[1:]))
+                    for m in (re.match(r'control (.+?) at (-?\d+),(-?\d+) (-?\d+),(-?\d+)$', l) for l in lines) if m}
     out = '\n'.join(l for l in lines if not l.startswith('control '))
     return json.load(open(scene, encoding='utf-8')).get('spriteSheets'), out
 
@@ -147,6 +153,30 @@ check('export fails and lists it in Problems', re.findall(r'^problems: (.*)$', o
 # The trash deletes the sheet.
 s, out = run(ADD + click('scene.sprite.0.delete'))
 check('the trash deletes the sheet', s is None, f'{summary(s)} | ' + out[-200:])
+
+# ---- #285: with more images than fit, the Add sheet list stays inside the
+# display and scrolls with the wheel; its last image can be scrolled to and added.
+def lastItem(ctl):
+    items = [(r[1], k) for k, r in ctl.items() if k.startswith('scene.spriteadd/')]
+    return max(items)[1] if items else None
+
+
+s, out = run(click('scene.spriteadd'), many=True)
+box, last = run.controls.get('scene.spriteadd#menu'), lastItem(run.controls)
+n = len([k for k in run.controls if k.startswith('scene.spriteadd/')])
+check('the long Add sheet list, every image in it, stays inside the display', n == 64 and box is not None and 0 <= box[1] and
+      box[3] <= H and box[1] < box[3], (n, box))
+# The wheel over the list (where this build has it; else above the Add sheet field).
+add = run.controls.get('scene.spriteadd') or (1264, 595, 1484, 619)
+over = ((box[0] + box[2]) // 2, (box[1] + box[3]) // 2) if box else ((add[0] + add[2]) // 2, add[1] - 200)
+WHEEL = ['--wheel', '%d,%d,-40' % over, '--wait', '3']
+s, out = run(click('scene.spriteadd') + WHEEL, many=True)
+box2, r = run.controls.get('scene.spriteadd#menu'), run.controls.get(last or '')
+check('the wheel scrolls the list to its last image', box2 is not None and r is not None and box2[1] <= r[1] and r[3] <= box2[3],
+      (box2, r))
+s, out = run(click('scene.spriteadd') + WHEEL + ['--click', '@' + (last or 'scene.spriteadd/none'), '--wait', '3'], many=True)
+check('the last image, scrolled to, adds a sheet', s is not None and [x['texture'] for x in s] == [(last or '/').split('/', 1)[1]],
+      f'{summary(s)} | ' + out[-200:])
 
 print(f'{fails} failures')
 sys.exit(1 if fails else 0)

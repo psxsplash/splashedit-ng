@@ -62,6 +62,15 @@ public:
         int canvas = -1, element = -1;
     } textureField;
 
+    // Each Scene fonts Source field the inspector drew this frame (clipped to
+    // what shows): main_screen makes them drop targets for a font or bitmap
+    // font image dragged from the Project panel (#285).
+    struct FontField {
+        ImRect rect;
+        int font = -1;
+    };
+    std::vector<FontField> fontFields;
+
     // A refusal the app shows in the status bar (main_screen takes and clears it).
     std::string status;
     bool statusBad = false;
@@ -193,6 +202,7 @@ private:
     std::array<FontSample, editor::uic::kMaxFonts> m_samples;
     std::vector<std::string> m_fontsReported;
     std::string m_fontsCountReported;
+    std::string m_fontMenuReported;  // scripted tests: the open Source menu's rect and scroll
     // Scripted tests: the canvas's Default font and the element's Font field, last reported.
     std::string m_cvFontReported, m_elFontReported;
 };

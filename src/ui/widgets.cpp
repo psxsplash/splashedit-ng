@@ -698,10 +698,14 @@ int dropdownMenu(const char* id, ImRect r, const char* ic, const char* value, co
     if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) ImGui::OpenPopup(popupId.c_str());
 
     const float pad = space::xs, rowH = size::field + 4;
-    ImVec2 size(r.GetWidth(), pad * 2 + rowH * static_cast<float>(items.size()));
-    // A long list that would run off the bottom opens above the field instead.
+    const float full = pad * 2 + rowH * static_cast<float>(items.size());
+    ImVec2 size(r.GetWidth(), full);
+    // A long list that would run off the bottom opens above the field instead; one that fits neither way takes
+    // the larger room, a margin off the screen's edge, and scrolls (#285).
     float top = r.Max.y + space::xs;
-    if (top + size.y > ImGui::GetIO().DisplaySize.y && r.Min.y - space::xs - size.y >= 0) top = r.Min.y - space::xs - size.y;
+    const float below = ImGui::GetIO().DisplaySize.y - top, above = r.Min.y - space::xs;
+    if (size.y > below && size.y > above) size.y = std::max(below, above) - space::xs;
+    if (size.y > below && above > below) top = r.Min.y - space::xs - size.y;
     ImGui::SetNextWindowPos(ImVec2(r.Min.x, top));
     ImGui::SetNextWindowSize(size);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
@@ -712,13 +716,20 @@ int dropdownMenu(const char* id, ImRect r, const char* ic, const char* value, co
         // Drawn like the tooltip card: a raised surface with a soft shadow.
         ImDrawList* dl = ImGui::GetWindowDrawList();
         ImRect box(ImGui::GetWindowPos(), ImGui::GetWindowPos() + size);
+        nameRect(popupId, box);  // scripted tests: where the open menu is
         dl->AddRectFilled(box.Min + ImVec2(0, 2), box.Max + ImVec2(0, 6), rgb(0x000000, 80), radius::card);
         dl->AddRectFilled(box.Min, box.Max, color::raised, radius::card);
         dl->AddRect(box.Min, box.Max, color::borderStrong, radius::card);
+        // Taller than the box, the rows scroll with the wheel (the popup's own scroll); the current one shows on open.
+        const float scroll = ImGui::GetScrollY();
+        if (full > size.y && ImGui::IsWindowAppearing()) {
+            const float mid = pad + rowH * (static_cast<float>(current) + 0.5f) - size.y * 0.5f;
+            ImGui::SetScrollY(current < 0 ? 0.0f : std::clamp(mid, 0.0f, full - size.y));
+        }
         int i = 0;
         for (const char* item : items) {
-            ImRect ir(ImVec2(box.Min.x + pad, box.Min.y + pad + rowH * static_cast<float>(i)),
-                      ImVec2(box.Max.x - pad, box.Min.y + pad + rowH * static_cast<float>(i + 1)));
+            ImRect ir(ImVec2(box.Min.x + pad, box.Min.y + pad + rowH * static_cast<float>(i) - scroll),
+                      ImVec2(box.Max.x - pad, box.Min.y + pad + rowH * static_cast<float>(i + 1) - scroll));
             ImGui::PushID(i);
             Hit h = interact("item", ir);
             ImGui::PopID();
@@ -736,6 +747,13 @@ int dropdownMenu(const char* id, ImRect r, const char* ic, const char* value, co
                 ImGui::CloseCurrentPopup();
             }
             ++i;
+        }
+        if (full > size.y) {
+            // The bottom padding as content, then a thin thumb where the rows are.
+            ImGui::SetCursorScreenPos(ImVec2(box.Min.x, box.Min.y + full - pad - scroll));
+            ImGui::Dummy(ImVec2(0, pad));
+            const float th = std::max(24.0f, size.y * size.y / full), ty = box.Min.y + (size.y - th) * scroll / (full - size.y);
+            dl->AddRectFilled(ImVec2(box.Max.x - 5, ty + 2), ImVec2(box.Max.x - 2, ty + th - 2), color::active, 2);
         }
         if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) ImGui::CloseCurrentPopup();
         ImGui::EndPopup();
