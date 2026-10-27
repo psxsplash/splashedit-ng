@@ -99,6 +99,7 @@ add_library(splasheditdoc STATIC
     src/editor/meter_fixes.cpp
     src/editor/lua_editor.cpp
     src/editor/play.cpp
+    src/editor/luadebug.cpp
     src/editor/linkplay.cpp
     src/editor/relay.cpp
     src/editor/model_import.cpp
@@ -222,6 +223,7 @@ add_executable(splashedit
     src/editor/blocks_view.cpp
     src/editor/timeline_view.cpp
     src/editor/frame_view.cpp
+    src/editor/debugger_view.cpp
     src/editor/asset_browser_view.cpp
     src/editor/ui_canvas_view.cpp
     src/editor/texture_preview_view.cpp

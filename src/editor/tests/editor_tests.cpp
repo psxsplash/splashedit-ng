@@ -39,6 +39,7 @@
 #include "editor/hardware.hh"
 #include "editor/gizmo.hh"
 #include "editor/live_export.hh"
+#include "editor/luadebug.hh"
 #include "editor/meter_fixes.hh"
 #include "editor/log_view.hh"
 #include "editor/lua_editor.hh"
@@ -17244,6 +17245,128 @@ static void testTvPreview() {
     CHECK(tv::lookFromName("bogus") == tv::Look::RGB);
 }
 
+
+// Lua breakpoints while playing (editor/luadebug.hh): the project's
+// breakpoints, the files Play writes for the engine, the engine's stop
+// report, and Play builds keeping the line numbers the engine needs.
+static void testLuaDebug() {
+    namespace fs = std::filesystem;
+    editor::Breakpoints b;
+    CHECK(b.empty() && b.count() == 0);
+    CHECK(b.toggle("scripts/a.lua", 9) && b.has("scripts/a.lua", 9));
+    CHECK(b.toggle("scripts/a.lua", 12) && b.toggle("scripts/b.lua", 3) && b.count() == 3);
+    CHECK(!b.toggle("scripts/a.lua", 9) && !b.has("scripts/a.lua", 9) && b.count() == 2);
+    CHECK(!b.toggle("scripts/b.lua", 3) && !b.lines.count("scripts/b.lua"));  // an emptied file drops out
+
+    // Saved with the project, hidden; none left removes the file.
+    const fs::path project = g_outDir / "luadebug-project";
+    fs::remove_all(project);
+    fs::create_directories(project / "scripts");
+    std::string err;
+    b.toggle("scripts/b.lua", 3);
+    CHECK(editor::saveBreakpoints(project, b, &err));
+    CHECK(editor::breakpointsFile(project).filename() == ".breakpoints.json" && fs::exists(editor::breakpointsFile(project)));
+    CHECK(editor::loadBreakpoints(project) == b);
+    CHECK(editor::saveBreakpoints(project, editor::Breakpoints(), &err) && !fs::exists(editor::breakpointsFile(project)));
+    CHECK(editor::loadBreakpoints(project).empty());
+    {
+        std::ofstream(editor::breakpointsFile(project), std::ios::binary) << "{\"breakpoints\": {\"x.lua\": [0, -2, \"7\", 5]}}";
+    }
+    const editor::Breakpoints junk = editor::loadBreakpoints(project);  // only the positive line survives
+    CHECK(junk.count() == 1 && junk.has("x.lua", 5));
+    {
+        std::ofstream(editor::breakpointsFile(project), std::ios::binary) << "not json";
+    }
+    CHECK(editor::loadBreakpoints(project).empty());
+
+    CHECK(editor::chunkOf(project, project / "scripts" / "a.lua") == "scripts/a.lua");
+    CHECK(editor::chunkOf(project, project / "scripts" / ".." / "top.lua") == "top.lua");
+    CHECK(editor::chunkOf(project, g_outDir / "elsewhere.lua").empty());
+
+    // What the engine reads: the generation, then a breakpoint per line.
+    editor::Breakpoints two;
+    two.toggle("scripts/a.lua", 12);
+    two.toggle("scripts/a.lua", 9);
+    CHECK(editor::breakpointsText(two, 4) == "4\n9 scripts/a.lua\n12 scripts/a.lua\n");
+    CHECK(editor::breakpointsText(editor::Breakpoints(), 1) == "1\n");
+    const fs::path dir = g_outDir / "luadebug-play";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    CHECK(editor::writeBreakpointsFile(dir, two, 7) && fileBytes(dir / "luabp.txt") == "7\n9 scripts/a.lua\n12 scripts/a.lua\n");
+    CHECK(!fs::exists(dir / "luabp.txt.tmp"));
+    CHECK(editor::writeDebugCommand(dir, 3, true) && fileBytes(dir / "luabp.cmd") == "3 step\n");
+    CHECK(editor::writeDebugCommand(dir, 4, false) && fileBytes(dir / "luabp.cmd") == "4 continue\n");
+    editor::removeDebugFiles(dir);
+    CHECK(!fs::exists(dir / "luabp.txt") && !fs::exists(dir / "luabp.cmd"));
+
+    // The engine's stop report, as psxsplash prints it on the TTY.
+    editor::DebugSession d;
+    CHECK(!d.feed("psxsplash: render peak depth 258 of 988, bump 11808 of 51656") && !d.on());
+    CHECK(!d.feed("Lua error: [string \"x\"]:3: boom"));
+    CHECK(d.feed("psxsplash: lua debugger on, 1 breakpoints") && d.on() && !d.stopped());
+    CHECK(d.feed("psxsplash: lua break 1 9 scripts/game logic.lua"));
+    CHECK(d.feed("psxsplash: lua local self table {__actor_id=3, __cpp_ptr=userdata}"));
+    CHECK(d.feed("psxsplash: lua local answer number 42"));
+    CHECK(d.feed("psxsplash: lua upvalue frames number 30\r"));
+    CHECK(d.feed("psxsplash: lua global label string \"frame 30\""));
+    CHECK(!d.stopped() && d.stops() == 0);  // not until the report is whole
+    CHECK(d.feed("psxsplash: lua break end 1") && d.stopped() && d.stops() == 1);
+    const editor::DebugStop& s = d.stop();
+    CHECK(s.id == 1 && s.line == 9 && s.chunk == "scripts/game logic.lua");
+    CHECK(s.locals.size() == 3 && s.globals.size() == 1);
+    CHECK(s.locals[0].name == "self" && s.locals[0].type == "table" && s.locals[0].value == "{__actor_id=3, __cpp_ptr=userdata}");
+    CHECK(s.locals[1].kind == "local" && s.locals[1].value == "42");
+    CHECK(s.locals[2].kind == "upvalue" && s.locals[2].name == "frames" && s.locals[2].value == "30");
+    CHECK(s.globals[0].kind == "global" && s.globals[0].value == "\"frame 30\"");
+    CHECK(d.feed("psxsplash: lua resume 7 step") && d.stopped());  // another stop's
+    CHECK(d.feed("psxsplash: lua resume 1 step") && !d.stopped());
+    // A report cut short (the game gone mid-way) never counts as a stop.
+    CHECK(d.feed("psxsplash: lua break 2 10 scripts/game logic.lua") && d.feed("psxsplash: lua local a number 1"));
+    CHECK(d.feed("psxsplash: lua break end 3") && !d.stopped() && d.stops() == 1);
+    CHECK(d.feed("psxsplash: lua break 4 11 x.lua") && d.feed("psxsplash: lua break end 4") && d.stopped() && d.stops() == 2);
+    CHECK(d.stop().locals.empty() && d.stop().line == 11);
+    d.resumed();
+    CHECK(!d.stopped());
+    d.reset();
+    CHECK(!d.on() && d.stops() == 0);
+
+    // Compiled for Play, a chunk keeps its name and line numbers; stripped
+    // (disc builds) it does not depend on the name at all.
+    const std::string src = "local x = 1\nfunction onUpdate(self)\n  x = x + 1\nend\n";
+    const std::vector<uint8_t> stripped = splash::compileLua(src, "scripts/a.lua");
+    const std::vector<uint8_t> debug = splash::compileLua(src, "scripts/a.lua", true);
+    auto contains = [](const std::vector<uint8_t>& v, const std::string& needle) {
+        return std::search(v.begin(), v.end(), needle.begin(), needle.end()) != v.end();
+    };
+    CHECK(stripped == splash::compileLua(src, "other.lua"));
+    CHECK(!contains(stripped, "scripts/a.lua") && contains(debug, "scripts/a.lua") && contains(debug, "onUpdate"));
+    CHECK(debug.size() > stripped.size());
+    std::printf("luadebug: chunk %zu bytes stripped, %zu with debug info\n", stripped.size(), debug.size());
+
+    // Play's export carries them while the project has a breakpoint, and
+    // only then (they cost RAM); a disc build never.
+    const fs::path courtyard = g_outDir / "luadebug-courtyard";
+    fs::remove_all(courtyard);
+    fs::copy(fs::path(SPLASHEDIT_SOURCE_DIR) / "examples" / "courtyard", courtyard, fs::copy_options::recursive);
+    const splash::Scene scene = splash::loadScene(courtyard / "courtyard.scene");
+    const fs::path pdir = g_outDir / "luadebug-pack";
+    fs::remove_all(pdir);
+    CHECK(editor::exportForPlay(scene, courtyard, pdir).ok());
+    const std::string plain = fileBytes(pdir / "scene_0.splashpack");
+    CHECK(!plain.empty() && plain.find("scripts/game_logic.lua") == std::string::npos);
+    editor::Breakpoints one;
+    one.toggle("scripts/game_logic.lua", 3);
+    CHECK(editor::saveBreakpoints(courtyard, one, &err));
+    CHECK(editor::exportForPlay(scene, courtyard, pdir).ok());
+    const std::string pack = fileBytes(pdir / "scene_0.splashpack");
+    CHECK(pack.find("scripts/game_logic.lua") != std::string::npos && pack.size() > plain.size());
+    splash::ExportOptions disc;
+    disc.luaBytecode = true;
+    CHECK(splash::exportSplashpack(scene, courtyard, pdir / "disc.splashpack", disc).ok());
+    CHECK(fileBytes(pdir / "disc.splashpack").find("scripts/game_logic.lua") == std::string::npos);
+    std::printf("luadebug: courtyard pack %zu bytes for Play with breakpoints, %zu without\n", pack.size(), plain.size());
+}
+
 int main(int argc, char** argv) {
     std::error_code ec;
     std::filesystem::path exe = argc > 0 ? std::filesystem::absolute(argv[0], ec) : std::filesystem::path();
@@ -17478,6 +17601,7 @@ int main(int argc, char** argv) {
     testPaletteGroup();
     testMeterFixSimplify();
     testTvPreview();
+    testLuaDebug();
     if (g_failures) {
         std::fprintf(stderr, "editor_tests: %d of %d checks failed\n", g_failures, g_checks);
         return 1;

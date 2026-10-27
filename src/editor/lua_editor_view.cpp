@@ -67,6 +67,10 @@ struct ScriptTabs::Tab {
     std::unique_ptr<BlocksView> blocks;
     uint64_t blocksRev = 0;     // the buffer revision the block editor shows
     bool blocksSynced = false;  // false: the next sync starts its undo over
+    // The chunk name breakpoints use for this file, for `chunkFor` in `chunkProject`.
+    std::string chunk;
+    std::filesystem::path chunkFor, chunkProject;
+    bool gutterPress = false;  // the left button went down in the gutter
 };
 
 ScriptTabs::ScriptTabs() = default;
@@ -163,6 +167,16 @@ bool ScriptTabs::open(const std::filesystem::path& file, std::string* error) {
     for (auto& o : m_tabs) o->focused = false;
     m_tabs.push_back(std::move(t));
     m_active = (int)m_tabs.size() - 1;
+    return true;
+}
+
+bool ScriptTabs::showLine(const std::filesystem::path& file, int line, std::string* error) {
+    if (!open(file, error)) return false;
+    Tab& t = *m_tabs[size_t(m_active)];
+    lua::Buffer& b = t.script.buffer;
+    const int l = std::clamp(line - 1, 0, std::max(0, b.lineCount() - 1));
+    b.moveTo(lua::Pos{l, 0});
+    t.reveal = t.revealCenter = true;
     return true;
 }
 
@@ -846,6 +860,11 @@ void ScriptTabs::draw(ImDrawList* dl, ImRect r) {
     lua::Buffer& b = s.buffer;
     Fonts& f = fonts();
     ImFont* mono = f.mono ? f.mono : f.regular;
+    if (t.chunkFor != s.path() || t.chunkProject != m_project) {
+        t.chunkFor = s.path();
+        t.chunkProject = m_project;
+        t.chunk = m_project.empty() ? std::string() : editor::chunkOf(m_project, s.path());
+    }
     ImGuiIO& io = ImGui::GetIO();
     const double now = ImGui::GetTime();
     const float fs = type::code, lineH = std::floor(fs * 1.5f);
@@ -957,7 +976,20 @@ void ScriptTabs::draw(ImDrawList* dl, ImRect r) {
     const bool overPopup = (t.compOpen && t.compRect.Contains(mouse)) || (t.findOpen && t.findRect.Contains(mouse));
     if (hovered && !overPopup && mouse.x >= body.Min.x)
         ImGui::SetMouseCursor(io.KeyCtrl ? ImGuiMouseCursor_Hand : ImGuiMouseCursor_TextInput);
-    if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+    else if (hovered && !overPopup && m_bps && !t.chunk.empty())
+        ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+    // Breakpoints: a click in the gutter of a Lua tab inside the project.
+    const bool bpGutter = m_bps && !t.chunk.empty() && hovered && !overPopup && mouse.x < body.Min.x;
+    if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) t.gutterPress = bpGutter;
+    if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && bpGutter) {
+        const int line = posAt(mouse).line + 1;
+        const bool on = m_bps->toggle(t.chunk, line);
+        m_bpChanged = true;
+        if (namedRectsOn()) {
+            std::printf("luaeditor: breakpoint %s:%d %s, %d set\n", t.chunk.c_str(), line, on ? "on" : "off", m_bps->count());
+            std::fflush(stdout);
+        }
+    } else if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
         if (hovered && !overPopup) {
             t.focused = true;
             t.lastInput = now;
@@ -976,7 +1008,7 @@ void ScriptTabs::draw(ImDrawList* dl, ImRect r) {
             t.focused = false;
         }
     }
-    if (held && ImGui::IsMouseDragging(ImGuiMouseButton_Left) && !io.KeyCtrl && !overPopup) {
+    if (held && ImGui::IsMouseDragging(ImGuiMouseButton_Left) && !io.KeyCtrl && !overPopup && !t.gutterPress) {
         b.moveTo(posAt(mouse), true);
         t.reveal = true;
     }
@@ -1163,6 +1195,10 @@ void ScriptTabs::draw(ImDrawList* dl, ImRect r) {
     // Current line, find matches, selection, the line go-to-definition landed on.
     if (!b.hasSelection())
         dl->AddRectFilled(ImVec2(body.Min.x, yOf(cur.line)), ImVec2(body.Max.x, yOf(cur.line) + lineH), code::currentLine);
+    // The line the game is stopped at.
+    const int stopLine = !t.chunk.empty() && t.chunk == m_stopChunk ? m_stopLine - 1 : -1;
+    if (stopLine >= 0 && stopLine < b.lineCount())
+        dl->AddRectFilled(ImVec2(body.Min.x, yOf(stopLine)), ImVec2(body.Max.x, yOf(stopLine) + lineH), rgb(0xf0a43a, 44));
     if (t.flashLine >= 0 && now - t.flashAt < 1.0) {
         int a = (int)(90 * (1.0 - (now - t.flashAt)));
         dl->AddRectFilled(ImVec2(body.Min.x, yOf(t.flashLine)), ImVec2(body.Max.x, yOf(t.flashLine) + lineH), rgb(0x8b7bff, a));
@@ -1280,6 +1316,35 @@ void ScriptTabs::draw(ImDrawList* dl, ImRect r) {
         std::snprintf(num, sizeof num, "%d", l + 1);
         float w = mono->CalcTextSizeA(fs, FLT_MAX, 0, num).x;
         dl->AddText(mono, fs, ImVec2(body.Min.x - 12 - w, yOf(l) + textOff), l == cur.line ? color::textDim : code::lineNumber, num);
+    }
+    // Breakpoints, a faint one under the pointer, and the stopped line's arrow.
+    if (m_bps && !t.chunk.empty()) {
+        if (namedRectsOn()) {
+            // Scripted runs: where to click for a line (line 1's top, the line height).
+            static std::string last;
+            char g[160];
+            std::snprintf(g, sizeof g, "luaeditor: gutter %s x %.0f-%.0f line1 %.0f step %.0f", t.chunk.c_str(), area.Min.x,
+                          body.Min.x, yOf(0), lineH);
+            if (last != g) {
+                last = g;
+                std::printf("%s\n", g);
+                std::fflush(stdout);
+            }
+        }
+        auto it = m_bps->lines.find(t.chunk);
+        if (it != m_bps->lines.end())
+            for (int line : it->second)
+                if (line - 1 >= first && line - 1 <= last)
+                    dl->AddCircleFilled(ImVec2(area.Min.x + 11, yOf(line - 1) + lineH * 0.5f), 5.0f, rgb(0xe5484d));
+        if (hovered && !overPopup && mouse.x < body.Min.x) {
+            const int hl = posAt(mouse).line;
+            if (!m_bps->has(t.chunk, hl + 1))
+                dl->AddCircleFilled(ImVec2(area.Min.x + 11, yOf(hl) + lineH * 0.5f), 5.0f, rgb(0xe5484d, 90));
+        }
+    }
+    if (stopLine >= first && stopLine <= last) {
+        const float cy = yOf(stopLine) + lineH * 0.5f, x0 = area.Min.x + 5;
+        dl->AddTriangleFilled(ImVec2(x0, cy - 5), ImVec2(x0 + 11, cy), ImVec2(x0, cy + 5), color::warn);
     }
     if (!diag.ok() && diag.line >= first && diag.line <= last) {
         ImVec2 c(area.Min.x + 11, yOf(diag.line) + lineH * 0.5f);

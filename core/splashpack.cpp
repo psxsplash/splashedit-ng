@@ -2480,7 +2480,10 @@ static ExportResult exportSplashpackBaked(const Scene& scene, const fs::path& ro
             if (!runtime.empty()) res.warnings.push_back(std::move(runtime));
             luaSources.push_back(src);
             if (options.luaBytecode) {
-                std::vector<uint8_t> bc = compileLua(src, p);
+                // A path's host runs its own script first, on the same lines,
+                // so its breakpoints are set on that file's name.
+                const std::string chunk = gen && p == gen->host && !gen->hostUser.empty() ? gen->hostUser : p;
+                std::vector<uint8_t> bc = compileLua(src, chunk, options.luaDebugInfo);
                 src.assign(bc.begin(), bc.end());
             }
             luaData.push_back(std::move(src));

@@ -33,7 +33,9 @@
 #include "editor/play.hh"
 #include "editor/relay.hh"
 #include "editor/project.hh"
+#include "editor/debugger_view.hh"
 #include "editor/frame_view.hh"
+#include "editor/luadebug.hh"
 #include "editor/timeline_view.hh"
 #include "emulator.h"
 #include "game_view.h"
@@ -209,6 +211,15 @@ struct State {
         // build list Play exported (-1 when it is not in it: no live edits).
         std::future<splash::ExportResult> reload;
         unsigned sentRev = 0, seenRev = 0, reloadGeneration = 0;
+        // Lua breakpoints: whether this Play wrote luabp.txt (1 player only:
+        // linked consoles share the PCdrv directory), the count written to
+        // it, what console 1 reports, and the stop the editor last showed.
+        bool debugOn = false;
+        bool debugBuilt = false;   // the running build kept line numbers (there were breakpoints)
+        bool reloadDebug = false;  // send a live edit now, to rebuild with them
+        unsigned bpGeneration = 0;
+        editor::DebugSession debug;
+        int debugShown = 0;
         int reloadIndex = 0;
         double seenAt = 0;
     } play;
@@ -460,13 +471,21 @@ struct State {
     // The bottom dock under the middle panel holds the Project panel and,
     // while they are open, the Timeline and the Frame debugger as tabs; one
     // shows at a time.
-    enum class BottomTab { Project, Timeline, Frame } bottomTab = BottomTab::Project;
+    enum class BottomTab { Project, Timeline, Frame, Debugger } bottomTab = BottomTab::Project;
     bool timelineWasOpen = false;  // to raise the Timeline tab when something opens it
     unsigned timelineShows = 0;
     // The Frame tab: a captured GPU frame, replayed and inspected.
     ui::FramePanel frame;
     bool frameWasOpen = false;
     unsigned frameShows = 0;
+    // The Debugger tab: shown while a Play's engine runs its Lua debugger,
+    // raised at each stop. The project's breakpoints (editor/luadebug.hh),
+    // loaded with the project and saved on each gutter click.
+    ui::DebuggerPanel debugger;
+    bool debuggerWasOpen = false;
+    unsigned debuggerShows = 0;
+    editor::Breakpoints breakpoints;
+    std::filesystem::path breakpointsProject;
     // The Project panel under the middle panel, and the inspector's asset
     // fields drawn this frame, clipped to what shows: an asset dragged from
     // the panel and released on one of them is assigned to it.

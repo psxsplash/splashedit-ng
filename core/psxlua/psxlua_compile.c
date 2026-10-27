@@ -1,4 +1,4 @@
-/* Compile Lua source to a stripped chunk, as tools/luac_psx does on the PS1. */
+/* Compile Lua source to a chunk, stripped as tools/luac_psx does on the PS1 or with debug info. */
 #define LUA_CORE
 
 #include <stdlib.h>
@@ -45,7 +45,7 @@ static int sink_write(lua_State *L, const void *p, size_t size, void *ud) {
   return sink->writer(p, size, sink->ud);
 }
 
-int psxlua_compile(const char *source, size_t len, const char *chunkname, psxlua_writer writer, void *ud,
+int psxlua_compile(const char *source, size_t len, const char *chunkname, int strip, psxlua_writer writer, void *ud,
                    char *err, size_t errsize) {
   Source src;
   Sink sink;
@@ -69,7 +69,7 @@ int psxlua_compile(const char *source, size_t len, const char *chunkname, psxlua
   }
   sink.writer = writer;
   sink.ud = ud;
-  status = luaU_dump(L, getproto(L->top - 1), sink_write, &sink, 1);
+  status = luaU_dump(L, getproto(L->top - 1), sink_write, &sink, strip);
   lua_close(L);
   if (status != 0) {
     strncpy(err, "bytecode dump failed", errsize - 1);
