@@ -1197,6 +1197,7 @@ void CanvasView::inspector(ImDrawList* dl, ImRect r, float y, editor::Document& 
         }
     }
     textureField = {};
+    fontFields.clear();
     ImGui::PushID("uicanvasinspector");
     ImGui::PushClipRect(ImVec2(r.Min.x, y), ImVec2(r.Max.x, r.Max.y - 1), true);
     if (sel.canvas >= 0 && uic::selectedElements(doc).size() > 1) multiInspector(dl, r, y, doc);
@@ -1922,9 +1923,29 @@ void CanvasView::fontsSection(ImDrawList* dl, float x0, float x1, float* yp, edi
         ImRect sf = rows.row("lfsrc", "Source",
                              "A project .ttf or .otf, rasterised at Size, or a 256-wide .png of glyph cells (characters 32 to 127 in rows).");
         nameRect(id + ".source", sf);
+        {
+            // A drop target for main_screen (#285).
+            ImRect drop = sf;
+            drop.ClipWith(ImRect(dl->GetClipRectMin(), dl->GetClipRectMax()));
+            fontFields.push_back({drop, i});
+        }
         const std::string shown = bitmap ? uf.bitmap : uf.source.empty() ? std::string("pick a source") : uf.source;
         if (pickField("fsrc", sf, bitmap ? icon::image : icon::type, rgb(0xf2c25c), shown.c_str())) ImGui::OpenPopup("##fontsrcmenu");
-        ImGui::SetNextWindowPos(ImVec2(sf.Min.x, sf.Max.y + space::xs));
+        // The menu opens below the field, or above it when the list needs more room than there is below and
+        // there is more above; capped to that room, it scrolls (#285).
+        {
+            const float margin = space::xs;
+            const float below = ImGui::GetIO().DisplaySize.y - (sf.Max.y + space::xs) - margin, above = sf.Min.y - space::xs - margin;
+            float need = 0;
+            if (ImGui::IsPopupOpen("##fontsrcmenu")) {
+                const float rowsN = float(std::max<size_t>(1, list().size()));
+                need = space::sm * 2 + 2 + 22 * rowsN + space::xs * (rowsN - 1);  // menuItem rows, pushMenuStyle's padding
+            }
+            const bool up = need > below && above > below;
+            if (up) ImGui::SetNextWindowPos(ImVec2(sf.Min.x, sf.Min.y - space::xs), ImGuiCond_Always, ImVec2(0, 1));
+            else ImGui::SetNextWindowPos(ImVec2(sf.Min.x, sf.Max.y + space::xs));
+            ImGui::SetNextWindowSizeConstraints(ImVec2(0, 0), ImVec2(FLT_MAX, std::max(up ? above : below, 60.0f)));
+        }
         pushMenuStyle();
         if (ImGui::BeginPopup("##fontsrcmenu")) {
             const std::vector<std::string>& fs = list();
@@ -1932,8 +1953,19 @@ void CanvasView::fontsSection(ImDrawList* dl, float x0, float x1, float* yp, edi
             for (const std::string& p : fs) {
                 const bool png = uic::isBitmapFontFile(p);
                 const bool cur = png ? p == uf.bitmap : p == uf.source;
-                if (menuItem(cur ? icon::chevronRight : png ? icon::image : icon::type, color::accent, p.c_str(), png ? "bitmap" : "TTF/OTF"))
-                    uic::editFont(doc, i, [&](splash::UIFont& x) { uic::setFontFile(x, p); });
+                const bool picked =
+                    menuItem(cur ? icon::chevronRight : png ? icon::image : icon::type, color::accent, p.c_str(), png ? "bitmap" : "TTF/OTF");
+                if (cur && ImGui::IsWindowAppearing()) ImGui::SetScrollHereY(0.5f);
+                nameRect(id + ".source/" + p, ImRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax()));  // --click @cvfont.N.source/<file>
+                if (picked) uic::editFont(doc, i, [&](splash::UIFont& x) { uic::setFontFile(x, p); });
+            }
+            if (reportLayout) {
+                // Scripted tests: where the open menu is and how far it scrolls.
+                const ImVec2 mp = ImGui::GetWindowPos(), ms = ImGui::GetWindowSize();
+                char line[160];
+                std::snprintf(line, sizeof line, "fonts: source menu %d at %.0f,%.0f %.0f,%.0f scroll %.0f of %.0f files %zu", i, mp.x, mp.y,
+                              mp.x + ms.x, mp.y + ms.y, ImGui::GetScrollY(), ImGui::GetScrollMaxY(), fs.size());
+                if (m_fontMenuReported != line) say(m_fontMenuReported = line);
             }
             ImGui::EndPopup();
         }

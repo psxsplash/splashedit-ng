@@ -2,6 +2,9 @@
 # fonts with what each builds to (cells, sheet, VRAM) and a sample line, and
 # edits them: size, rename (the text elements that use the font follow; a
 # name another font has is refused), add (at most three), delete and undo.
+# A font's Source menu stays on screen and scrolls when the project has more
+# files than fit (#285); Source takes a .ttf or a bitmap .png dragged from the
+# Project panel and refuses other files.
 # Opens a copy of tests/ui/ui.scene with --ui and reads the editor's scripted
 # lines ("uicanvas: fonts: ...") and the saved scene. Needs a display (xvfb-run -a).
 # usage: python3 uifontscheck.py <splashedit>
@@ -19,8 +22,11 @@ def check(name, ok, detail=''):
     fails += not ok
 
 
-def project():
-    """tests/ui/ui.scene as a project of its own, its fonts and texture copied in."""
+def project(many=False):
+    """tests/ui/ui.scene as a project of its own, its fonts and texture copied
+    in. With `many`: 30 more .ttf and 20 more .png, more than a Source menu
+    shows at 960 px, and a file of each kind to drag (dragme.ttf,
+    dragsheet.png, dragsound.wav, dragphoto.jpg)."""
     d = os.path.join(tempfile.mkdtemp(), 'ui')
     os.makedirs(os.path.join(d, 'fonts'))
     os.makedirs(os.path.join(d, 'textures'))
@@ -32,15 +38,24 @@ def project():
         if 'texture' in e:
             shutil.copy(os.path.join(here, 'ui', e['texture']), os.path.join(d, 'textures'))
             e['texture'] = 'textures/' + os.path.basename(e['texture'])
+    if many:
+        ttf, png = os.path.join(d, s['fonts'][0]['source']), os.path.join(d, 'textures', 'crate.png')
+        for k in range(30): shutil.copy(ttf, os.path.join(d, 'fonts', 'extra_%02d.ttf' % k))
+        for k in range(20): shutil.copy(png, os.path.join(d, 'textures', 'sheet_%02d.png' % k))
+        os.makedirs(os.path.join(d, 'audio'))
+        shutil.copy(ttf, os.path.join(d, 'fonts', 'dragme.ttf'))
+        shutil.copy(png, os.path.join(d, 'textures', 'dragsheet.png'))
+        shutil.copy(png, os.path.join(d, 'textures', 'dragphoto.jpg'))
+        shutil.copy(os.path.join(here, 'audio', 'short11.wav'), os.path.join(d, 'audio', 'dragsound.wav'))
     json.dump(s, open(os.path.join(d, 'ui.scene'), 'w'), indent=1)
     return d
 
 
-def run(args, shot=None):
+def run(args, shot=None, many=False):
     """Runs the editor on a fresh project with the UI tab open (the canvas
     inspector, as nothing is selected), then Ctrl+S. Returns the saved scene,
     the scripted font lines in order, the named controls and the screenshot."""
-    d = project()
+    d = project(many)
     shot = shot or os.path.join(d, 'shot.png')
     cmd = [editor, '--size', '1600x960', '--project', d, '--ui', '--wait', '5'] + args + [
         '--key', 'ctrl+s', '--wait', '5', '--screenshot', shot]
@@ -191,6 +206,62 @@ after = lines[lines.index('fonts: count 1 add enabled') + 1:] if 'fonts: count 1
 check('Ctrl+Z brings the font back', [f['name'] for f in scene['fonts']] == ['title', 'body'] and
       'fonts: count 2 add enabled' in after and parsed(after, 0) is not None and parsed(after, 0)[0] == 'title', lines)
 check('and its text element', font_of(scene, 'title') == 'title', font_of(scene, 'title'))
+
+# ---- #285: with more files than fit, the Source menu stays on screen and
+# scrolls; its last file can be scrolled to and picked.
+MENU = re.compile(r'fonts: source menu 0 at (-?\d+),(-?\d+) (-?\d+),(-?\d+) scroll (\d+) of (\d+) files (\d+)$')
+LAST = 'cvfont.0.source/textures/sheet_19.png'
+
+
+def menu(lines):
+    """The last report of font 0's open Source menu: (x0, y0, x1, y1, scroll, max, files)."""
+    ms = [MENU.match(l) for l in lines]
+    ms = [tuple(map(int, m.groups())) for m in ms if m]
+    return ms[-1] if ms else None
+
+
+scene, lines, ctl, _ = run(['--click', '@cvfont.0.source', '--wait', '5'], many=True)
+m = menu(lines)
+check('the Source menu lists every font file and image', m is not None and m[6] == 55, m)
+check('the long Source menu stays inside the display', m is not None and 0 <= m[1] and m[3] <= 960 and m[1] < m[3], m)
+check('it scrolls, opened on the current file', m is not None and m[5] > 0 and m[4] > 0 and
+      'cvfont.0.source/fonts/Inter-SemiBold.ttf' in ctl and m[1] <= ctl['cvfont.0.source/fonts/Inter-SemiBold.ttf'][1] and
+      ctl['cvfont.0.source/fonts/Inter-SemiBold.ttf'][3] <= m[3], (m, ctl.get('cvfont.0.source/fonts/Inter-SemiBold.ttf')))
+# The wheel over the menu (where this build has it; else where it opens at 1600x960).
+WHEEL = ['--wheel', '%d,%d,-40' % (((m[0] + m[2]) // 2, (m[1] + m[3]) // 2) if m else (1466, 700)), '--wait', '5']
+scene, lines, ctl, _ = run(['--click', '@cvfont.0.source', '--wait', '5'] + WHEEL, many=True)
+m2, last = menu(lines), ctl.get(LAST)
+check('the wheel scrolls the menu to its end, the last file inside it', m2 is not None and m2[5] > 0 and m2[4] == m2[5] and
+      last is not None and m2[1] <= last[1] and last[3] <= m2[3], (m2, last))
+scene, lines, ctl, _ = run(['--click', '@cvfont.0.source', '--wait', '5'] + WHEEL + ['--click', '@' + LAST, '--wait', '5'], many=True)
+check('the last file, scrolled to, can be picked', 'textures/sheet_19.png' in scene['fonts'][0].values() and
+      scene['fonts'][0].get('source') != 'fonts/Inter-SemiBold.ttf', scene['fonts'][0])
+
+# ---- #285: Source takes a .ttf or a bitmap font .png dragged from the Project
+# panel (as a UI image's Texture takes an image, #160); a .wav or .jpg is refused.
+SEARCH = '880,731'  # the Project panel's search field, under the UI tab at 1600x960
+TILE = '530,812'    # the first file the search shows
+src = ctl.get('cvfont.0.source') or (1356, 388, 1576, 412)  # where it is at 1600x960
+AT = '%d,%d' % ((src[0] + src[2]) // 2, (src[1] + src[3]) // 2)
+
+
+def dragged(name):
+    return run(['--click', SEARCH + ',0', '--text', name, '--wait', '5', '--drag', TILE + ',' + AT + ',0', '--wait', '10'], many=True)
+
+
+scene, lines, ctl, _ = dragged('dragme')
+f0 = scene['fonts'][0]
+check('a .ttf dragged onto Source becomes the font\'s source', f0.get('source') == 'fonts/dragme.ttf' and not f0.get('bitmap') and
+      parsed(lines, 0) is not None and parsed(lines, 0)[2] == 'fonts/dragme.ttf', (f0, lines[-3:], run.out[-300:]))
+scene, lines, ctl, _ = dragged('dragsheet')
+f0 = scene['fonts'][0]
+check('a .png dragged onto Source makes it a bitmap font', 'textures/dragsheet.png' in f0.values() and not f0.get('source'),
+      (f0, run.out[-300:]))
+for name, kind in (('dragsound', '.wav'), ('dragphoto', '.jpg')):
+    scene, lines, ctl, _ = dragged(name)
+    f0 = scene['fonts'][0]
+    check('a %s (%s) dropped on Source is refused and leaves it' % (kind, name), f0.get('source') == 'fonts/Inter-SemiBold.ttf' and
+          not f0.get('bitmap') and 'That field does not take' in run.out, (f0, run.out[-300:]))
 
 print(f'{fails} failures')
 sys.exit(1 if fails else 0)

@@ -1433,7 +1433,8 @@ static void pasteClipboard(State& st, editor::Document& doc, const std::optional
 // SceneLua and MemCardIcon: no target object. MemCardIcon replaces icon frame
 // `index`, or with index -1 adds the picked files as new frames.
 // UiTexture: a UI image's Texture; the target is {canvas, element}.
-enum class AssetSlot { Texture, Lua, TriggerLua, Clip, SkinClips, SceneLua, MemCardIcon, UiTexture, ClipModels };
+// UiFont: a Scene fonts Source; `index` is the font.
+enum class AssetSlot { Texture, Lua, TriggerLua, Clip, SkinClips, SceneLua, MemCardIcon, UiTexture, ClipModels, UiFont };
 static AssetSlot g_assetSlot = AssetSlot::Texture;
 static editor::ObjectPath g_assetTarget;
 // Lua and Clip from the multi-object inspector: every selected object.
@@ -1505,7 +1506,8 @@ static void addClipModels(State& st, editor::Document& doc, const editor::Object
 static void applyAssetFiles(State& st, editor::Document& doc, AssetSlot slot, const editor::ObjectPath& target,
                             const std::vector<std::string>& files, bool append = false, int index = -1,
                             const std::vector<editor::ObjectPath>& many = {}) {
-    const bool sceneWide = slot == AssetSlot::SceneLua || slot == AssetSlot::MemCardIcon || slot == AssetSlot::UiTexture;
+    const bool sceneWide =
+        slot == AssetSlot::SceneLua || slot == AssetSlot::MemCardIcon || slot == AssetSlot::UiTexture || slot == AssetSlot::UiFont;
     if (files.empty() || (!sceneWide && !doc.object(target))) return;
     if (slot == AssetSlot::ClipModels) {
         addClipModels(st, doc, target, files);
@@ -1514,6 +1516,7 @@ static void applyAssetFiles(State& st, editor::Document& doc, AssetSlot slot, co
     const char* folder = slot == AssetSlot::Texture || slot == AssetSlot::MemCardIcon || slot == AssetSlot::UiTexture ? "textures"
                          : slot == AssetSlot::Clip      ? "audio"
                          : slot == AssetSlot::SkinClips ? "anims"
+                         : slot == AssetSlot::UiFont    ? "fonts"
                                                         : "scripts";
     std::vector<std::string> paths;
     for (const std::string& file : files) {
@@ -1538,6 +1541,11 @@ static void applyAssetFiles(State& st, editor::Document& doc, AssetSlot slot, co
     if (slot == AssetSlot::UiTexture) {
         if (target.size() == 2)
             editor::uic::editElement(doc, target[0], target[1], [&](splash::UIElement& el) { el.texture = first; });
+        doc.refreshAssets(paths);
+        return;
+    }
+    if (slot == AssetSlot::UiFont) {
+        editor::uic::editFont(doc, index, [&](splash::UIFont& x) { editor::uic::setFontFile(x, first); });
         doc.refreshAssets(paths);
         return;
     }
@@ -1599,6 +1607,7 @@ static void applyAssetFiles(State& st, editor::Document& doc, AssetSlot slot, co
             case AssetSlot::MemCardIcon:
             case AssetSlot::UiTexture:
             case AssetSlot::ClipModels:
+            case AssetSlot::UiFont:
                 break;
         }
     });
@@ -1625,8 +1634,9 @@ static void applyPickedAssets(State& st, editor::Document& doc) {
 }
 
 // Whether the asset field `slot` (an AssetSlot, or -1 for the Model field)
-// takes a file of type `t` from the Project panel.
-static bool slotTakes(int slot, editor::AssetType t) {
+// takes a file of type `t` from the Project panel; `path` tells a bitmap
+// font's .png from other images.
+static bool slotTakes(int slot, editor::AssetType t, const std::string& path = {}) {
     using T = editor::AssetType;
     if (slot < 0) return t == T::Model || t == T::Mesh;
     switch (static_cast<AssetSlot>(slot)) {
@@ -1639,6 +1649,7 @@ static bool slotTakes(int slot, editor::AssetType t) {
         case AssetSlot::ClipModels: return t == T::Model;
         case AssetSlot::MemCardIcon:
         case AssetSlot::UiTexture: return t == T::Texture;
+        case AssetSlot::UiFont: return t == T::Font || (t == T::Texture && editor::uic::isBitmapFontFile(path));
     }
     return false;
 }
@@ -1650,7 +1661,7 @@ static void slotTarget(State& st, int slot, const editor::ObjectPath& path, ImRe
                        const std::vector<editor::ObjectPath>& many = {}) {
     if (shown.GetWidth() <= 0 || shown.GetHeight() <= 0) return;
     st.assetSlots.push_back({shown, slot, path, index, many});
-    if (const editor::AssetEntry* e = st.assets.dragging(); e && slotTakes(slot, e->type)) {
+    if (const editor::AssetEntry* e = st.assets.dragging(); e && slotTakes(slot, e->type, e->path)) {
         const bool over = shown.Contains(ImGui::GetIO().MousePos);
         ImGui::GetWindowDrawList()->AddRect(r.Min - ImVec2(1, 1), r.Max + ImVec2(1, 1), over ? color::accent : color::accentSoft,
                                             radius::field + 1, 0, over ? 2.0f : 1.5f);
@@ -3333,7 +3344,7 @@ static void assetRequests(State& st, editor::Document& doc, const viewport::Ps1V
                 for (const State::AssetSlotTarget& t : st.assetSlots)
                     if (t.rect.Contains(r.pos)) slot = &t;
                 if (slot && slot->slot >= 0) {
-                    if (slotTakes(slot->slot, r.type))
+                    if (slotTakes(slot->slot, r.type, r.path))
                         applyAssetFiles(st, doc, static_cast<AssetSlot>(slot->slot), slot->path, {utf8(abs)}, true, slot->index,
                                         slot->many);
                     else {
@@ -10071,6 +10082,9 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
         const ui::CanvasView::TextureField& tf = st.canvasView.textureField;
         if (tf.canvas >= 0)
             slotTarget(st, static_cast<int>(AssetSlot::UiTexture), {tf.canvas, tf.element}, tf.rect, tf.rect);
+        // So does each Scene fonts Source: a .ttf, .otf or bitmap font .png (#285).
+        for (const ui::CanvasView::FontField& ff : st.canvasView.fontFields)
+            slotTarget(st, static_cast<int>(AssetSlot::UiFont), {}, ff.rect, ff.rect, ff.font);
         return;
     }
     // The lock pins what the inspector shows; selecting other objects leaves it there.
