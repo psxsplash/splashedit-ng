@@ -134,6 +134,19 @@ out = editor_run(project, ['--click', NEW_SCENE_SCRIPT, '--wait', '5', '--click'
 check('undo after scene New script clears the scene script', not scene_script(project),
       str(scene_script(project)) + ' | ' + out[-200:])
 
+# Remove takes the scene script off (the file stays), and undo puts it back.
+REMOVE_SCENE_SCRIPT = '@removescenelua'  # the scene inspector's "Remove", once it has a script
+project = project_copy()
+out = editor_run(project, ['--click', NEW_SCENE_SCRIPT, '--wait', '5', '--click', OUTLINER, '--click', REMOVE_SCENE_SCRIPT,
+                           '--key', 'ctrl+s', '--wait', '5'])
+check('scene Remove clears the scene script', not scene_script(project), str(scene_script(project)) + ' | ' + out[-200:])
+check('scene Remove leaves the file', read(os.path.join(project, 'scripts', 'courtyard.lua')) is not None)
+project = project_copy()
+out = editor_run(project, ['--click', NEW_SCENE_SCRIPT, '--wait', '5', '--click', OUTLINER, '--click', REMOVE_SCENE_SCRIPT,
+                           '--key', 'ctrl+z', '--key', 'ctrl+s', '--wait', '5'])
+check('undo after scene Remove puts the script back', scene_script(project) == 'scripts/courtyard.lua',
+      str(scene_script(project)) + ' | ' + out[-200:])
+
 # New script for an object whose Script component has no file: game_logic.lua
 # is taken, so the new file is numbered, and typing goes into it.
 project = project_copy()

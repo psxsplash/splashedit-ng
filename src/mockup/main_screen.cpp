@@ -7736,9 +7736,14 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
                                              "Writes scripts/<scene name>.blocks with a when-the-scene-starts stack, and opens it.",
                                              "Writes scripts/<scene name>.lua with onSceneCreationStart and onSceneCreationEnd, and opens it."))
                 newScript(st, doc, nullptr, *lang);
-        } else if (button("editscenelua", at, icon::fileCode, found ? "Edit script" : "Create script", ButtonKind::Secondary, nullptr,
-                          "Opens the file in the script editor, beside the Scene.")) {
-            openScript(st, doc, lua);
+        } else {
+            float ew = 0;
+            if (button("editscenelua", at, icon::fileCode, found ? "Edit script" : "Create script", ButtonKind::Secondary, &ew,
+                       "Opens the file in the script editor, beside the Scene."))
+                openScript(st, doc, lua);
+            if (button("removescenelua", ImVec2(at.x + ew + space::sm, at.y), icon::trash, "Remove", ButtonKind::Ghost, nullptr,
+                       "The scene runs no script; the file stays on disk (Ctrl+Z brings it back)"))
+                doc.editSettings([](splash::SceneSettings& s) { s.script.clear(); });
         }
         y += size::field + space::sm;
         if (!open) {
