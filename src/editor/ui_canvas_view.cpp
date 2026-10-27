@@ -99,7 +99,9 @@ bool menuItem(const char* ic, ImU32 icol, const char* label, const char* meta = 
     Fonts& f = fonts();
     ImGui::PushID(label);
     const ImVec2 p = ImGui::GetCursorScreenPos();
-    const float w = std::max(200.0f, ImGui::GetContentRegionAvail().x);
+    // Wide enough for the label and its meta side by side.
+    const float need = 26 + measure(f.regular, type::body, label).x + (meta ? measure(f.regular, type::caption, meta).x + 16 : 0);
+    const float w = std::max({200.0f, ImGui::GetContentRegionAvail().x, need});
     const bool picked = ImGui::Selectable("##item", false, enabled ? 0 : ImGuiSelectableFlags_Disabled, ImVec2(w, 22));
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const ImU32 tc = enabled ? color::text : color::textFaint;
