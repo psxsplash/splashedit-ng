@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Regenerates the application icons in assets/brand:
 
-  icon-16.png, icon-24.png    hand-pixelled, from tools/small_icons.py.
+  icon-16.png, icon-24.png    reductions of icon-48.png, from tools/small_icons.py.
   icon-64.png, icon-128.png,  icon.svg with the plate's corners rounded the
   icon-256.png                way Windows 11 rounds app icons (a radius of
                               3/32 of the size, where icon.svg has 22%).
