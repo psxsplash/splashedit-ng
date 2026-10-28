@@ -25,8 +25,8 @@
 // floor the rim is clamped into the X/Z footprint of the object the caster
 // stands on (the first support box whose top is within a tolerance of the
 // bounds bottom and whose footprint holds the centre), so it does not hang
-// over that object's edge. The console fades the blob into fog, and the scene
-// view with the same fade as its scene.
+// over that object's edge. The console fades the blob into fog; the scene
+// view applies the same fade as its scene.
 
 #include <algorithm>
 #include <array>
