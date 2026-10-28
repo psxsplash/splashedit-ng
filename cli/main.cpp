@@ -97,7 +97,7 @@ static int usage() {
                  "  with --project, the volume, licence and music tracks come from <dir>/disc.json; the options\n"
                  "    override it\n"
                  "  --licence writes sectors 0-15 from a licence file (12 or 16 sectors of 2336, 2352 or\n"
-                 "    2048 bytes), the built-in psxsplash one, or none (the default); in disc.json a\n"
+                 "    2048 bytes), the built-in psxsplash one (the default), or none; in disc.json a\n"
                  "    relative licence path is relative to the project\n"
                  "  --volume names the volume (A-Z, 0-9 and _ kept, upper-cased, 31 at most); the default\n"
                  "    is the first scene's file name\n"
@@ -611,7 +611,7 @@ static int discCmd(int argc, char** argv) {
         if (!project.empty()) disc = splash::readDiscSettings(root / "disc.json");
         // On the command line a licence file is relative to the working directory.
         if (hasLicence && (licence == "none" || licence == "psxsplash")) {
-            disc.licence = licence == "none" ? "" : licence;
+            disc.licence = licence;
         } else if (hasLicence) {
             std::u8string u = fs::absolute(fs::path(licence)).u8string();
             disc.licence = std::string(u.begin(), u.end());

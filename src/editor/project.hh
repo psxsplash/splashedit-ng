@@ -45,7 +45,7 @@ bool saveVramSettings(const std::filesystem::path& project, const splash::VramSe
 // The project's disc settings: `project`/disc.json (see splash::DiscSettings:
 // the volume name, the licence, the music and the boot logo). loadDiscSettings
 // reads it; a missing or unreadable file, or an empty `project`, reads as the
-// defaults (volume from the title, no licence, boot logo on). saveDiscSettings writes it whole; false when it
+// defaults (volume from the title, the psxsplash licence, boot logo on). saveDiscSettings writes it whole; false when it
 // cannot be written. Export passes it to the disc writer.
 splash::DiscSettings loadDiscSettings(const std::filesystem::path& project);
 bool saveDiscSettings(const std::filesystem::path& project, const splash::DiscSettings& s);

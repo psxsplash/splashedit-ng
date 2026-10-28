@@ -47,8 +47,9 @@ const std::vector<uint8_t>& psxsplashLicence();
 
 // A project's disc settings file (disc.json): {"volume": "...", "licence":
 // "...", "tracks": ["...", ...]}. `volume` empty = the volume name comes from
-// the title. `licence` "" = none, "psxsplash" = psxsplashLicence(), else a
-// licence file (relative paths against the project root). `tracks` are the
+// the title. `licence` "" (the default) or "psxsplash" = psxsplashLicence(),
+// "none" = no licence data, else a licence file (relative paths against the
+// project root). `tracks` are the
 // CD-DA music tracks in disc order, audio files (isAudioFile), relative paths
 // against the project root with '/' separators: the first is disc track 2
 // (track 1 is the data), which psxsplash's Audio.PlayCDDA(2) plays. A missing
@@ -75,7 +76,7 @@ std::string volumeName(const std::string& from);
 std::string discVolume(const std::string& volume, const std::string& title);
 
 // The licence sectors `licence` names (as DiscSettings::licence): none for
-// "", else parseLicence of the file or the built-in bytes. Sets `error` (and
+// "none", else parseLicence of the file or the built-in bytes. Sets `error` (and
 // returns none) when the file cannot be read or has a bad size.
 std::vector<LicenceSector> resolveLicence(const std::string& licence, const std::filesystem::path& projectRoot,
                                           std::string& error);
