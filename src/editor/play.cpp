@@ -223,6 +223,22 @@ fs::path discEngineFor(const fs::path& disc, bool bootLogo, std::string* note) {
     return logoFallback(logo, discEngine(disc, true), "The psxsplash disc build", note);
 }
 
+std::string engineLoaderNote(const fs::path& exe, bool disc) {
+    std::ifstream in(exe, std::ios::binary);
+    if (!in) return {};
+    const std::string bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    const bool pcdrv = bytes.find("scene_%d.splashpack") != std::string::npos;
+    const bool cdrom = bytes.find("CDRomDevice") != std::string::npos;
+    if (pcdrv == cdrom) return {};
+    if (!disc && cdrom)
+        return utf8(exe.filename()) + " is the CD-ROM build of psxsplash (LOADER=cdrom). Play and Run on hardware "
+               "load the scene over PCdrv, so it stops on the boot logo: use a build made without LOADER=cdrom.";
+    if (disc && pcdrv)
+        return utf8(exe.filename()) + " is the PCdrv build of psxsplash. A disc image needs the CD-ROM build "
+               "(make LOADER=cdrom), or it stops on the boot logo.";
+    return {};
+}
+
 // "The psxsplash build", naming the overlays it is asked to have.
 static std::string engineWhat(const PlayTools& t) {
     std::string s = "The psxsplash build";
@@ -241,7 +257,14 @@ std::vector<std::string> missingTools(const PlayTools& t) {
     };
     need(t.redux, "pcsx-redux");
     if (t.psxsplash.empty()) need(t.psxsplash, "The psxsplash build (.ps-exe)");
-    else need(engineFor(t), engineWhat(t).c_str());
+    else {
+        const size_t before = out.size();
+        need(engineFor(t), engineWhat(t).c_str());
+        // A psxsplash built by hand: the overlay build is a separate file beside it.
+        if (out.size() > before && (t.overlayPerf || t.overlayRooms))
+            out.back() += std::string(". Build psxsplash with") + (t.overlayPerf ? " FPSOVERLAY=1 MEMOVERLAY=1" : "") +
+                          (t.overlayRooms ? " ROOMDEBUG=1" : "") + " and save it under that name, or turn the overlay off in the Build menu.";
+    }
     if (!t.bios.empty() && !fs::is_regular_file(t.bios, ec)) out.push_back("BIOS not found: " + utf8(t.bios));
     return out;
 }

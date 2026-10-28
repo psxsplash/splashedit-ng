@@ -436,6 +436,7 @@ static void updatePlay(State& st, const editor::Document& doc) {
         std::string logoNote;
         const std::filesystem::path engine = editor::engineFor(eff, &logoNote);
         if (r.ok() && !logoNote.empty()) r.warnings.push_back(logoNote);
+        if (const std::string n = editor::engineLoaderNote(engine, false); r.ok() && !n.empty()) r.warnings.push_back(n);
         reportBuild(st, "Run on hardware", p.hwLaunch, r);
         if (!r.ok()) p.message = editor::buildFailure("Run on hardware", r);
         else {
@@ -536,6 +537,7 @@ static void updatePlay(State& st, const editor::Document& doc) {
     std::string logoNote;
     const std::filesystem::path engine = editor::engineFor(eff, &logoNote);
     if (r.ok() && !logoNote.empty()) r.warnings.push_back(logoNote);
+    if (const std::string n = editor::engineLoaderNote(engine, false); r.ok() && !n.empty()) r.warnings.push_back(n);
     reportBuild(st, "Play", p.playLaunch, r);
     if (!r.ok()) {
         p.message = editor::buildFailure("Play", r);
@@ -1900,6 +1902,8 @@ static void buildDisc(State& st, const editor::Document& doc, std::filesystem::p
         const std::filesystem::path exe = editor::discEngineFor(engine, ds.bootLogo, &logoNote);
         splash::DiscResult r = splash::exportDisc(b.pointers(), root, exe, bin, title, b.names, editor::loadVramSettings(root), ds);
         if (r.exported.ok() && !logoNote.empty()) r.exported.warnings.push_back(logoNote);
+        if (const std::string n = editor::engineLoaderNote(exe, true); r.exported.ok() && !n.empty())
+            r.exported.warnings.push_back(n);
         return r;
     });
 }
