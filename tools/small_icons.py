@@ -4,7 +4,10 @@ and icon-24.png, from the grids below (one character per pixel).
 
 At these sizes the yellow plate is left off, as on icon-32.png and icon-48.png:
 the outlined red S stands on its own on any taskbar or Explorer background.
-icon-16.png drops "PSX", which cannot be read at 16 pixels.
+Both are reductions of icon-48.png: the same rounded S with its shadow on the
+right and bottom, the upper bar opening right and the lower one left.
+icon-24.png keeps "PSX" in 3x5 letters; icon-16.png drops it, which cannot be
+read at 16 pixels, and is the S of icon-48.png at half size.
 
     python3 tools/small_icons.py [output directory]
 
@@ -28,47 +31,47 @@ PALETTE = {
 
 ICON_16 = [
     "................",
-    "...##########...",
-    "..#RRRRRRRRRR#..",
-    ".#RRRRRRRRRRR##.",
-    ".#RRRR#########.",
-    ".#RRRR#########.",
-    ".#RRRRRRRRRR###.",
-    ".##RRRRRRRRRRR#.",
-    ".###RRRRRRRRRR#.",
-    ".#########RRRR#.",
-    ".#########RRRR#.",
-    ".#RRRRRRRRRRRR#.",
-    ".#RRRRRRRRRRR##.",
-    ".##RRRRRRRRR##..",
-    "..###########...",
+    "....#########...",
+    "...#RRRRRRRR##..",
+    "..#RRRRRRRRR##..",
+    "..#RRRR#######..",
+    "..#RRRRRRRRR#...",
+    "..##RRRRRRRRR#..",
+    "...##RRRRRRRR##.",
+    "..##R###RRRRR##.",
+    "..#RRRRRRRRRR##.",
+    "..#RRRRRRRRR###.",
+    "..#RRRRRRRR###..",
+    "...#RRRRRR###...",
+    "...#########....",
+    ".....#####......",
     "................",
 ]
 
 ICON_24 = [
     "........................",
-    "........................",
-    "......###########.......",
+    ".....#############......",
     ".....#WWW#WWW#W#W#......",
     ".....#W#W#W###W#W#......",
     ".....#WWW#WWW##W##......",
     ".....#W#####W#W#W#......",
     ".....#W###WWW#W#W#......",
     ".....#############......",
-    ".....#RRRRRRRRRRR##.....",
-    ".....#RRRRRRRRRRR##.....",
-    ".....#RRRR#########.....",
-    ".....#RRRR#########.....",
-    ".....#RRRRRRRRRRR##.....",
-    ".....##RRRRRRRRRRR#.....",
-    ".....###RRRRRRRRRR#.....",
-    ".....#########RRRR#.....",
-    ".....#########RRRR#.....",
-    ".....#RRRRRRRRRRRR#.....",
-    ".....#RRRRRRRRRRR##.....",
-    ".....##RRRRRRRRR###.....",
-    "......############......",
-    "........................",
+    "......#RRRRRRRRR##......",
+    ".....#RRRRRRRRRR##......",
+    ".....#RRRRRRRRRR##......",
+    ".....#RRRRR#######......",
+    ".....#RRRRRRRRRR#.......",
+    ".....##RRRRRRRRRR#......",
+    "......#RRRRRRRRRR##.....",
+    ".......##RRRRRRRR##.....",
+    "......##R###RRRRR##.....",
+    "......#RRRRRRRRRR##.....",
+    "......#RRRRRRRRR###.....",
+    "......#RRRRRRRR###......",
+    ".......#RRRRRR###.......",
+    ".......#########........",
+    ".........#####..........",
     "........................",
 ]
 
