@@ -663,11 +663,13 @@ static void playSetup(State& st, const editor::Document& doc, ImVec2 size) {
     const ImVec2 o = ImGui::GetCursorScreenPos();
     const float inner = w - space::lg * 2;
     float y = o.y;
-    const int mode = std::clamp(p.setupFor, 0, 2);
-    const char* titles[3] = {"Set up Play", "Set up Export", "Set up Run on hardware"};
-    const char* blurbs[3] = {"Play exports the scene and boots it in pcsx-redux on your psxsplash build.",
+    // 3: Build > Tools, every path, opened whether or not anything is missing.
+    const int mode = std::clamp(p.setupFor, 0, 3);
+    const char* titles[4] = {"Set up Play", "Set up Export", "Set up Run on hardware", "Tools"};
+    const char* blurbs[4] = {"Play exports the scene and boots it in pcsx-redux on your psxsplash build.",
                              "Export puts the scene on a disc image with the CD-ROM build of psxsplash.",
-                             "Uploads psxsplash to a console at the Unirom shell, then serves it the scene over the cable."};
+                             "Uploads psxsplash to a console at the Unirom shell, then serves it the scene over the cable.",
+                             "The programs Play, Export and Run on hardware use. Locate picks another file."};
     text(dl, ImVec2(o.x, y), f.semibold, type::title, color::text, titles[mode]);
     y += 24;
     text(dl, ImVec2(o.x, y), f.regular, type::label, color::textDim, blurbs[mode]);
@@ -682,6 +684,7 @@ static void playSetup(State& st, const editor::Document& doc, ImVec2 size) {
     const std::filesystem::path discExe =
         editor::discEngineFor(eff.disc, editor::loadDiscSettings(doc.projectRoot()).bootLogo, &discNote);
     if (mode == 1) logoNote = discNote;
+    if (mode == 3 && !discNote.empty()) logoNote += (logoNote.empty() ? "" : "\n") + discNote;
     const char* engineLabel = eff.overlayPerf && eff.overlayRooms ? "psxsplash build (perf + rooms overlays)"
                               : eff.overlayPerf                   ? "psxsplash build (performance overlay)"
                               : eff.overlayRooms                  ? "psxsplash build (room debug overlay)"
@@ -698,7 +701,7 @@ static void playSetup(State& st, const editor::Document& doc, ImVec2 size) {
     static const SDL_DialogFileFilter exeFilter[] = {{"PlayStation executable", "ps-exe;exe"}};
     static const SDL_DialogFileFilter biosFilter[] = {{"BIOS image", "bin;rom"}};
     // Each popup lists what its own action runs.
-    const int shown[3][3] = {{0, 1, 2}, {3, -1, -1}, {1, -1, -1}};
+    const int shown[4][4] = {{0, 1, 2, -1}, {3, -1, -1, -1}, {1, -1, -1, -1}, {0, 1, 2, 3}};
     for (int i : shown[mode]) {
         if (i < 0) continue;
         const Row& r = rows[i];
@@ -722,7 +725,8 @@ static void playSetup(State& st, const editor::Document& doc, ImVec2 size) {
         text(dl, ImVec2(o.x + space::md, y + 24), f.regular, type::caption, tone, sub.c_str());
         ImGui::PopClipRect();
         const float bw = buttonWidth(icon::folderOpen, "Locate");
-        if (button("locate", ImVec2(o.x + inner - bw - space::sm, y + (rowH - size::field - 6) * 0.5f), icon::folderOpen, "Locate",
+        static const char* const locateIds[] = {"locate.redux", "locate.psxsplash", "locate.bios", "locate.disc"};
+        if (button(locateIds[i], ImVec2(o.x + inner - bw - space::sm, y + (rowH - size::field - 6) * 0.5f), icon::folderOpen, "Locate",
                    ButtonKind::Secondary)) {
             const SDL_DialogFileFilter* flt = i == 1 || i == 3 ? exeFilter : i == 2 ? biosFilter : nullptr;
             ui::showOpenFileDialog("tool", onToolPicked, reinterpret_cast<void*>(static_cast<intptr_t>(i)), flt, flt ? 1 : 0, nullptr,
@@ -784,12 +788,12 @@ static void playSetup(State& st, const editor::Document& doc, ImVec2 size) {
     }
     y += space::sm;
     const editor::PlayTools effNow = editor::withDefaults(p.tools, p.bundleDir);
-    const bool ready = (mode == 1   ? editor::missingDiscTools(effNow)
-                        : mode == 2 ? editor::missingHardwareTools(effNow)
-                                    : editor::missingTools(effNow))
-                           .empty();
-    const char* goIcons[3] = {icon::play, icon::package, icon::cpu};
-    const char* goLabels[3] = {"Play", "Export", "Run"};
+    const bool ready = mode == 3 || (mode == 1   ? editor::missingDiscTools(effNow)
+                                     : mode == 2 ? editor::missingHardwareTools(effNow)
+                                                 : editor::missingTools(effNow))
+                                        .empty();
+    const char* goIcons[4] = {icon::play, icon::package, icon::cpu, icon::check};
+    const char* goLabels[4] = {"Play", "Export", "Run", "Done"};
     const char* goIcon = goIcons[mode];
     const char* goLabel = goLabels[mode];
     const float pw = buttonWidth(goIcon, goLabel), cw = buttonWidth(icon::x, "Cancel");
@@ -799,7 +803,7 @@ static void playSetup(State& st, const editor::Document& doc, ImVec2 size) {
             ImGui::CloseCurrentPopup();
             if (mode == 1) startExport(st, doc);
             else if (mode == 2) toggleRun(st, doc);
-            else togglePlay(st, doc);
+            else if (mode == 0) togglePlay(st, doc);
         }
     }
     if (button("cancel", ImVec2(bx - cw - space::sm, y), icon::x, "Cancel", ButtonKind::Ghost)) ImGui::CloseCurrentPopup();
@@ -2899,6 +2903,10 @@ static std::vector<MenuEntry> menuEntries(int which, State& st, editor::Document
             m.push_back(item("Boot Logo in Test Runs", "", true, [&] { setBootLogo(st, !st.play.tools.bootLogo); },
                              st.play.tools.bootLogo));
             m.push_back(separator());
+            m.push_back(item("Tools...", "", true, [&] {
+                st.play.setupFor = 3;
+                st.play.openSetup = true;
+            }));
             m.push_back(item("Players: " + playersLabel(st.play.tools) + "...", "", true, [&] { st.menuOpen = 6; }));
             break;
         case 6:  // the Players button's list
