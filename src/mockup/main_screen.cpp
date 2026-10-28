@@ -8524,7 +8524,7 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
         }
 
         // Licence: none, the built-in psxsplash one, or a file.
-        const int cur = ds.licence.empty() ? 0 : ds.licence == "psxsplash" ? 1 : 2;
+        const int cur = ds.licence == "none" ? 0 : ds.licence.empty() || ds.licence == "psxsplash" ? 1 : 2;
         const std::string shown = cur == 0 ? "None" : cur == 1 ? "psxsplash" : licenceFile;
         const ImRect lr = row("ldisclicence", "Licence",
                               "The licence data in the disc's first 16 sectors. A retail console's BIOS checks it before booting; "
@@ -8534,7 +8534,7 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
         if (pick == 0 || pick == 1) {
             if (pick != cur) {
                 splash::DiscSettings next = ds;
-                next.licence = pick == 0 ? "" : "psxsplash";
+                next.licence = pick == 0 ? "none" : "psxsplash";
                 save(std::move(next));
             }
         } else if (pick == 2) {
@@ -8543,7 +8543,7 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
         }
         // One dim line, then room for the error, there from the first frame
         // so nothing below moves when one shows.
-        const std::string about = cur == 0   ? "No licence data: boots in emulators and on modded consoles"
+        const std::string about = cur == 0   ? "No licence data: with a Sony BIOS some emulators then glitch"
                                   : cur == 1 ? "psxsplash licence: the boot logo reads Created with psxsplash"
                                              : licenceFile;
         {

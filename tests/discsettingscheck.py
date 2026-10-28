@@ -1,7 +1,8 @@
 # The scene inspector's Disc section, driven through the GUI on copies of the
 # courtyard: type a volume label (typed letters are upper-cased and anything
-# but A-Z 0-9 _ dropped as they are typed), pick the built-in psxsplash
-# licence from the Licence dropdown, and open projects whose disc.json names
+# but A-Z 0-9 _ dropped as they are typed), switch the Licence dropdown
+# between None and the built-in psxsplash licence (the default, also for an
+# older disc.json's empty licence), and open projects whose disc.json names
 # a licence file of the wrong size or one that is not there, which show a
 # warning line under the dropdown. Every change is saved to disc.json at once
 # and is not a scene edit. The editor prints the settings ("disc: volume
@@ -107,23 +108,36 @@ def warn_pixels(shot, rect):
 
 # Untouched: the defaults, nothing written, no warning.
 discs, lines, data, controls, _ = run([])
-check('the defaults are printed once', discs == ['disc: volume default', 'disc: licence none'], discs)
+check('the defaults are printed once', discs == ['disc: volume default', 'disc: licence psxsplash'], discs)
 check('nothing touched writes no disc.json', data is None, data)
 check('the section shows its controls', all(n in controls for n in ('s_disc', 'disc.volume', 'disc.licence')), sorted(controls))
-check('no warning line without a licence', 'disc.error' not in controls, controls.get('disc.error'))
+check('no warning line on the default licence', 'disc.error' not in controls, controls.get('disc.error'))
 
 # Typing: "my game" lands as MYGAME (upper-cased, the space dropped as typed).
 discs, lines, data, controls, _ = run(click('disc.volume') + ['--text', 'my game', '--key', 'enter', '--wait', '3'])
 check('the typed volume is upper-cased and filtered in disc.json', (data or {}).get('volume') == 'MYGAME', data)
-check('the volume change is printed', discs[:2] == ['disc: volume default', 'disc: licence none'] and
+check('the volume change is printed', discs[:2] == ['disc: volume default', 'disc: licence psxsplash'] and
       'disc: volume MYGAME' in discs, discs)
 check('disc.json is no scene edit', 'unsaved changes: no' in lines, [l for l in lines if l.startswith('unsaved')])
 
-# The psxsplash licence from the dropdown.
-discs, lines, data, controls, _ = run(click('disc.licence') + click('disc.licence/psxsplash'))
+# None from the dropdown is saved as "none".
+discs, lines, data, controls, _ = run(click('disc.licence') + click('disc.licence/None'))
+check('None is saved in disc.json', data == {'volume': '', 'licence': 'none'}, data)
+check('the licence change is printed', discs == ['disc: volume default', 'disc: licence psxsplash', 'disc: licence none'], discs)
+check('no licence shows no warning line', 'disc.error' not in controls, controls.get('disc.error'))
+
+# Back to psxsplash from a disc.json that says none.
+nolic = {'disc.json': json.dumps({'volume': '', 'licence': 'none'}).encode()}
+discs, lines, data, controls, _ = run(click('disc.licence') + click('disc.licence/psxsplash'), nolic)
 check('psxsplash is saved in disc.json', data == {'volume': '', 'licence': 'psxsplash'}, data)
-check('the licence change is printed', discs == ['disc: volume default', 'disc: licence none', 'disc: licence psxsplash'], discs)
+check('the change from none is printed', discs == ['disc: volume default', 'disc: licence none', 'disc: licence psxsplash'], discs)
 check('the built-in licence shows no warning', 'disc.error' not in controls, controls.get('disc.error'))
+
+# An older disc.json with an empty licence reads as the psxsplash licence.
+legacy = {'disc.json': json.dumps({'volume': '', 'licence': ''}).encode()}
+discs, lines, data, controls, _ = run([], legacy)
+check('an empty licence reads as psxsplash', discs == ['disc: volume default', 'disc: licence psxsplash'], discs)
+check('opening it leaves the empty licence as it was', data == {'volume': '', 'licence': ''}, data)
 
 # A licence file of 1000 bytes, named in disc.json before the editor starts.
 bad = {'bad.dat': bytes(1000), 'disc.json': json.dumps({'volume': '', 'licence': 'bad.dat'}).encode()}

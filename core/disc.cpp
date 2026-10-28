@@ -334,10 +334,10 @@ std::string discVolume(const std::string& volume, const std::string& title) {
 }
 
 std::vector<LicenceSector> resolveLicence(const std::string& licence, const fs::path& projectRoot, std::string& error) {
-    if (licence.empty()) return {};
+    if (licence == "none") return {};
     std::vector<uint8_t> bytes;
-    std::string name = licence;
-    if (licence == "psxsplash") {
+    std::string name = licence.empty() ? "psxsplash" : licence;
+    if (licence.empty() || licence == "psxsplash") {
         bytes = psxsplashLicence();
     } else {
         fs::path p = fs::path(std::u8string(licence.begin(), licence.end()));

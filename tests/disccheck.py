@@ -47,6 +47,8 @@ raw = open(binpath, 'rb').read()
 check('whole raw sectors', len(raw) % 2352 == 0, len(raw))
 n = len(raw) // 2352
 cue = open(os.path.join(tmp, 'game.cue')).read()
+check('no --licence writes the psxsplash licence', b'Created wit' in raw[4 * 2352 + 24:4 * 2352 + 88],
+      raw[4 * 2352 + 24:4 * 2352 + 88])
 check('cue names the bin as MODE2/2352', 'FILE "game.bin" BINARY' in cue and 'TRACK 01 MODE2/2352' in cue and
       'INDEX 01 00:00:00' in cue, cue)
 
@@ -121,6 +123,13 @@ def bcd(v):
     return (v // 10) * 16 + v % 10
 
 
+# EDC sits after the data: at 0x818 over 16..0x817 in a Form 1 sector, at
+# 2348 over 16..2347 in a Form 2 one (submode bit 0x20; the licence's LBA 12-15).
+def edc_ok(s):
+    at = 2348 if s[18] & 0x20 else 0x818
+    return struct.unpack_from('<I', s, at)[0] == edc(s[16:at])
+
+
 bad_sync = bad_addr = bad_sub = bad_edc = bad_ecc = 0
 for lba in range(n):
     s = raw[lba * 2352:(lba + 1) * 2352]
@@ -128,7 +137,7 @@ for lba in range(n):
     bad_sync += s[0:12] != b'\0' + b'\xff' * 10 + b'\0'
     bad_addr += s[12:16] != bytes([bcd(a // 4500), bcd(a // 75 % 60), bcd(a % 75), 2])
     bad_sub += s[16:20] != s[20:24]
-    bad_edc += struct.unpack_from('<I', s, 0x818)[0] != edc(s[16:0x818])
+    bad_edc += not edc_ok(s)
     if lba in (0, 16, 17, 18, 20, 21, 22, n // 2, n - 1):  # the pure-Python ECC is slow
         bad_ecc += s[0x81C:] != ecc(s)
 check('sync', bad_sync == 0, bad_sync)
@@ -246,8 +255,7 @@ if r4.returncode == 0:
     raw = open(two, 'rb').read()
     n = len(raw) // 2352
     check('two-scene disc: whole raw sectors, EDC on every sector',
-          len(raw) % 2352 == 0 and all(struct.unpack_from('<I', raw, i * 2352 + 0x818)[0] ==
-                                       edc(raw[i * 2352 + 16:i * 2352 + 0x818]) for i in range(n)))
+          len(raw) % 2352 == 0 and all(edc_ok(raw[i * 2352:(i + 1) * 2352]) for i in range(n)))
     user = b''.join(raw[i * 2352 + 24:i * 2352 + 24 + 2048] for i in range(n))
     pvd = sector(16)
     root_lba = struct.unpack_from('<I', pvd, 158)[0]
@@ -337,7 +345,7 @@ if r8.returncode == 0:
     raw = open(pj, 'rb').read()
     check('--licence none and --volume override disc.json',
           raw[16 * 2352 + 24 + 40:16 * 2352 + 24 + 72] == b'OTHER'.ljust(32) and
-          raw[:16 * 2352] == open(binpath, 'rb').read()[:16 * 2352], raw[16 * 2352 + 64:16 * 2352 + 96])
+          all(raw[i * 2352 + 24:i * 2352 + 24 + 2048] == bytes(2048) for i in range(16)), raw[16 * 2352 + 64:16 * 2352 + 96])
 else:
     check('--licence none and --volume override disc.json', False, r8.stderr)
 

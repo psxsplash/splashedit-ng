@@ -11696,7 +11696,9 @@ void testDiscSettings() {
     CHECK(splash::readDiscSettings(dir / "junk.json").licence.empty());
 
     std::string error;
-    CHECK(splash::resolveLicence("", dir, error).empty() && error.empty());
+    // "" (the default, and what older disc.json files hold) is the psxsplash licence.
+    CHECK(splash::resolveLicence("", dir, error).size() == 12 && error.empty());
+    CHECK(splash::resolveLicence("none", dir, error).empty() && error.empty());
     CHECK(splash::resolveLicence("psxsplash", dir, error).size() == 12 && error.empty());
     writeBytes(dir / "lic" / "system.sys", fixtures()[5]);
     CHECK(splash::resolveLicence("lic/system.sys", dir, error).size() == 16 && error.empty());
@@ -11828,11 +11830,20 @@ void testDiscExportSettings() {
     auto volumeOf = [](const std::vector<uint8_t>& b) {
         return b.size() < 17 * 2352 ? std::string() : std::string(reinterpret_cast<const char*>(rawSector(b, 16) + 24 + 40), 32);
     };
-    splash::DiscResult plain = splash::exportDisc(scene, project, dir / "cd.ps-exe", dir / "plain.bin", "courtyard");
+    splash::DiscSettings none;
+    none.licence = "none";
+    splash::DiscResult plain = splash::exportDisc(scene, project, dir / "cd.ps-exe", dir / "plain.bin", "courtyard", {}, none);
     CHECK(plain.exported.ok());
     std::vector<uint8_t> pb = bytesOf(dir / "plain.bin");
     CHECK(volumeOf(pb).rfind("COURTYARD ", 0) == 0);
     CHECK(pb.size() >= 16 * 2352 && fnv(pb.data(), 16 * 2352) == 0x618f843db4644257ull);
+
+    // The default settings write the psxsplash licence.
+    splash::DiscResult def = splash::exportDisc(scene, project, dir / "cd.ps-exe", dir / "default.bin", "courtyard");
+    CHECK(def.exported.ok());
+    std::vector<uint8_t> db = bytesOf(dir / "default.bin");
+    CHECK(db.size() == pb.size() && db.size() >= 16 * 2352 &&
+          std::string(reinterpret_cast<const char*>(rawSector(db, 4) + 24), 64).find("Created wit") != std::string::npos);
 
     splash::DiscSettings ds;
     ds.volume = "my game!";
