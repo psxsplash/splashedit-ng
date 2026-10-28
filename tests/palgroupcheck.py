@@ -3,12 +3,16 @@
 # The inspector draws a Palette group field (obj.palgroup.<i>) under a 4 or 8
 # bpp material's texture; typing "walls" into it on both objects saves
 # "paletteGroup": "walls" on each, and each then prints "palgroup: 0 walls
-# members 1 colours <n>" (it sees the other). splashpack-cli exports the saved
-# scene with one CLUT for the two (two without the group), in the splashpack
-# header and in the .vram. One Ctrl+Z takes the group off again.
+# members 1 colours <n> crc <palette CRC-32>" (it sees the other).
+# splashpack-cli exports the saved scene with one CLUT for the two (two without
+# the group), in the splashpack header and in the .vram. One Ctrl+Z takes the
+# group off again. stone.png rewritten mid-run with its colours inverted (same
+# size, same colour count) and dragged from the Project panel onto Floor's
+# Texture field again shows the new shared palette, the one a fresh run on the
+# edited project shows.
 # usage: python3 palgroupcheck.py <splashedit> [keep dir for screenshots]   (needs a display: xvfb-run -a)
 # splashpack-cli is taken from beside the editor (build/cli/splashpack-cli).
-import json, os, re, shutil, struct, subprocess, sys, tempfile
+import json, os, re, shutil, struct, subprocess, sys, tempfile, zlib
 
 editor = os.path.abspath(sys.argv[1])
 keep = sys.argv[2] if len(sys.argv) > 2 else None
@@ -49,12 +53,15 @@ def two_textured(d):
 rects = {}  # the last run's named controls
 
 
-def run(args, shot=None):
-    """Runs the editor on a fresh fixture with Floor selected, then `args`
-    and Ctrl+S; returns the project, the saved scene and the output lines."""
+def run(args, shot=None, prep=None):
+    """Runs the editor on a fresh fixture with Floor selected (after
+    prep(project) when given), then `args` (@PROJECT is the project) and Ctrl+S;
+    returns the project, the saved scene and the output lines."""
     global rects
     project = os.path.join(tempfile.mkdtemp(), 'courtyard')
     shutil.copytree(example, project)
+    if prep: prep(project)
+    args = [a.replace('@PROJECT', project) for a in args]
     scene = os.path.join(project, 'courtyard.scene')
     d = json.load(open(scene, encoding='utf-8'))
     two_textured(d)
@@ -103,14 +110,86 @@ check('its caption is drawn under it', inside('obj.palgroupinfo.0') and rects['o
       rects.get('obj.palgroupinfo.0'))
 check('"walls" is saved on both materials', groups(d) == {'Floor': ['walls'], 'Back Wall': ['walls']}, groups(d))
 said = [l for l in lines if l.startswith('palgroup: ')]
-first = re.compile(r'palgroup: 0 walls members 0 colours \d+$')
-shared = re.compile(r'palgroup: 0 walls members 1 colours (\d+)$')
+first = re.compile(r'palgroup: 0 walls members 0 colours \d+ crc [0-9a-f]{8}$')
+shared = re.compile(r'palgroup: 0 walls members 1 colours (\d+) crc ([0-9a-f]{8})$')
 check('Floor alone in the group first reports members 0', said[:1] and first.match(said[0]), said)
 check('each object then reports members 1 (it sees the other)', sum(bool(shared.match(l)) for l in said) == 2 and
       said[-1:] and shared.match(said[-1]), said)
 colours = [int(shared.match(l).group(1)) for l in said if shared.match(l)]
 check('the shared palette has colours, the same for both', colours and 0 < colours[0] <= 256 and len(set(colours)) == 1, said)
 check('the export has one CLUT for the two', cluts(project) == (1, 1), cluts(project))
+crc_a = shared.match(said[-1]).group(2) if said and shared.match(said[-1]) else None
+field = rects.get('obj.texture')
+
+# --- stone.png rewritten in place, then dragged onto Floor's Texture field again ---
+def png_rgba(path):
+    """(width, height, RGBA bytes) of an 8-bit RGBA PNG."""
+    data = open(path, 'rb').read()
+    pos, idat = 8, b''
+    while pos < len(data):
+        n, kind = struct.unpack('>I4s', data[pos:pos + 8])
+        body = data[pos + 8:pos + 8 + n]
+        if kind == b'IHDR':
+            w, h, depth, ctype = struct.unpack('>IIBB', body[:10])
+            assert depth == 8 and ctype == 6, path
+        elif kind == b'IDAT':
+            idat += body
+        pos += 12 + n
+    raw, stride, out, prev = zlib.decompress(idat), w * 4, bytearray(), bytearray(w * 4)
+    for y in range(h):
+        f, line = raw[y * (stride + 1)], bytearray(raw[y * (stride + 1) + 1:(y + 1) * (stride + 1)])
+        for i in range(stride):
+            a = line[i - 4] if i >= 4 else 0
+            b, c = prev[i], prev[i - 4] if i >= 4 else 0
+            if f == 1: line[i] = (line[i] + a) & 255
+            elif f == 2: line[i] = (line[i] + b) & 255
+            elif f == 3: line[i] = (line[i] + (a + b) // 2) & 255
+            elif f == 4:
+                p = a + b - c
+                pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
+                line[i] = (line[i] + (a if pa <= pb and pa <= pc else b if pb <= pc else c)) & 255
+        out += line
+        prev = line
+    return w, h, bytes(out)
+
+
+def write_png_rgba(path, w, h, px):
+    chunk = lambda kind, body: struct.pack('>I', len(body)) + kind + body + struct.pack('>I', zlib.crc32(kind + body))
+    rows = b''.join(b'\0' + px[y * w * 4:(y + 1) * w * 4] for y in range(h))
+    open(path, 'wb').write(b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, 8, 6, 0, 0, 0)) +
+                           chunk(b'IDAT', zlib.compress(rows)) + chunk(b'IEND', b''))
+
+
+def c15(px):
+    return len({(px[i] >> 3, px[i + 1] >> 3, px[i + 2] >> 3) for i in range(0, len(px), 4) if px[i + 3]})
+
+
+STONE = os.path.join(example, 'textures', 'stone.png')
+inverted = os.path.join(tempfile.mkdtemp(), 'stone-inverted.png')
+sw, sh, spx = png_rgba(STONE)
+write_png_rgba(inverted, sw, sh, bytes(v if i % 4 == 3 else 255 - v for i, v in enumerate(spx)))
+iw, ih, ipx = png_rgba(inverted)
+check('the inverted stone.png has the same size and colour count, other colours',
+      (iw, ih) == (sw, sh) and c15(ipx) == c15(spx) and ipx != spx, (iw, ih, sw, sh, c15(ipx), c15(spx)))
+SEARCH, TILE = '880,731', '530,812'  # the Project panel's search field and first tile at 1600x960
+to = '%d,%d' % ((field[0] + field[2]) // 2, (field[1] + field[3]) // 2) if field else '0,0'
+REPICK = ['--copy-file', inverted + '@@PROJECT/textures/stone.png'] + W(5) + ['--click', SEARCH + ',0', '--text', 'stone'] + W(5) + \
+    ['--drag', TILE + ',' + to + ',0'] + W(10)
+project, d, lines = run(GROUP + ['--click', '@tree.Back Wall'] + W(5) + GROUP + ['--click', '@tree.Floor'] + W(8) + REPICK)
+said = [l for l in lines if l.startswith('palgroup: ')]
+check('the file was rewritten mid-run', open(os.path.join(project, 'textures', 'stone.png'), 'rb').read() ==
+      open(inverted, 'rb').read() and not [l for l in lines if l.startswith('--copy-file')], lines[-5:])
+floor = [m.get('texture') for m in meshes(d)['Floor']['materials']]
+check('Floor keeps textures/stone.png after the drag', floor == ['textures/stone.png'], floor)
+crcs = [shared.match(l).group(2) for l in said if shared.match(l)]
+check('before the rewrite Floor reports the first palette', crc_a and crc_a in crcs[:-1], (crc_a, said))
+crc_b = crcs[-1] if crcs else None
+check('after the drag the shared palette is a new one', crc_b and crc_b != crc_a, (crc_a, crc_b, said))
+project, d, lines = run(GROUP + ['--click', '@tree.Back Wall'] + W(5) + GROUP + ['--click', '@tree.Floor'] + W(8),
+                        prep=lambda p: shutil.copyfile(inverted, os.path.join(p, 'textures', 'stone.png')))
+fresh = [shared.match(l).group(2) for l in lines if shared.match(l)]
+check('it is the palette a fresh run on the edited project shows', fresh and crc_b == fresh[-1], (crc_b, fresh))
+print('palgroup crc: before %s after %s fresh %s' % (crc_a, crc_b, fresh[-1] if fresh else None))
 
 # --- Without the group: one CLUT each; one Ctrl+Z takes it off ---
 project, d, lines = run([])

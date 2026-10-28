@@ -6551,7 +6551,7 @@ static std::string fmtShort(float v, int decimals = 2) {
 // A material's palette group as the export builds it, for the mesh inspector:
 // the members (splash::paletteGroupMembers, cutout from the texture info) and
 // their shared CLUT (splash::paletteGroup, the exporter's), built once per
-// member set.
+// member set and again after an asset refresh or in another project.
 struct PalGroupInfo {
     std::vector<std::string> members;
     std::vector<uint16_t> palette;  // empty when the members cannot be loaded
@@ -6575,6 +6575,13 @@ static PalGroupInfo palGroupInfo(const editor::Document& doc, const std::string&
         key += "\n" + m + " " + std::to_string(t->width) + "x" + std::to_string(t->height) + " " + std::to_string(t->colors15);
     }
     static std::map<std::string, std::vector<uint16_t>> built;
+    static unsigned builtAssets = ~0u;
+    static std::filesystem::path builtRoot;
+    if (builtAssets != doc.assetsId() || builtRoot != doc.projectRoot()) {
+        built.clear();
+        builtAssets = doc.assetsId();
+        builtRoot = doc.projectRoot();
+    }
     auto it = built.find(key);
     if (it == built.end()) {
         std::map<std::string, splash::Image> images;
@@ -6595,6 +6602,17 @@ static PalGroupInfo palGroupInfo(const editor::Document& doc, const std::string&
     while (end > size_t(cutout) && g.palette[end - 1] == 0) end--;
     g.colours = int(end) - int(cutout && end > 0);
     return g;
+}
+
+// CRC-32 (zlib's) of a palette's words as little-endian bytes, for scripted runs.
+static uint32_t paletteCrc(const std::vector<uint16_t>& pal) {
+    uint32_t c = 0xffffffffu;
+    for (uint16_t w : pal)
+        for (uint8_t b : {uint8_t(w & 0xff), uint8_t(w >> 8)}) {
+            c ^= b;
+            for (int k = 0; k < 8; k++) c = (c >> 1) ^ (0xedb88320u & (0u - (c & 1)));
+        }
+    return c ^ 0xffffffffu;
 }
 
 static std::string fmtKB(int bytes) { return fmtShort(static_cast<float>(bytes) / 1024.0f) + " KB"; }
@@ -10796,8 +10814,11 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
             text(dl, at, f.regular, type::caption, color::textDim, cap.c_str());
             nameRect("obj.palgroupinfo." + is, ImRect(at, at + measure(f.regular, type::caption, cap.c_str())));
             y += 16 + space::xs;
+            char crc[9];
+            std::snprintf(crc, sizeof crc, "%08x", unsigned(paletteCrc(g.palette)));
             scriptLine(("palgroup." + o->name + "." + is).c_str(), "palgroup: " + is + " " + mat.paletteGroup + " members " +
-                                                                   std::to_string(others) + " colours " + std::to_string(g.colours));
+                                                                   std::to_string(others) + " colours " + std::to_string(g.colours) +
+                                                                   " crc " + crc);
         };
         if (nMat <= 1) {
             const ImRect texRow = row("ltex", "Texture", "Image painted on the model. Click to pick an image. Converted to PS1 colours on export.");
