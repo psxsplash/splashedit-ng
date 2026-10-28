@@ -21,8 +21,12 @@
 // edge fades a blob whose centre is within radius of where its floor ends (a
 // nav region's walk-off edge: its other edges are a player radius in from a
 // wall or a drop, so the floor goes on past them) linearly to 0 at that edge. The rim
-// lies on the floor's plane, so the blob tilts with a ramp. The console also
-// fades it into fog, which the scene view does not show.
+// lies on the floor's plane, so the blob tilts with a ramp. On the bounds
+// floor the rim is clamped into the X/Z footprint of the object the caster
+// stands on (the first support box whose top is within a tolerance of the
+// bounds bottom and whose footprint holds the centre), so it does not hang
+// over that object's edge. The console fades the blob into fog, and the scene
+// view with the same fade as its scene.
 
 #include <algorithm>
 #include <array>
@@ -108,12 +112,24 @@ inline float walkoffEdgeDistance(const std::vector<Vec3>& outline, const ExportS
     return best;
 }
 
+// The world bounds of an object a blob on the bounds floor can stand on.
+struct SupportBox {
+    float minX = 0, maxX = 0, minZ = 0, maxZ = 0;
+    float topY = 0;
+};
+
+// How far a support box's top may be from the caster's bounds bottom: two
+// fixed-point units of the splashpack's world bounds (metres / gteScaling).
+inline float supportTolerance(float gteScaling) { return 2 * gteScaling / 4096.f; }
+
 // The blob under an object at `position` whose world bounds span bottom..top
 // in Y, over the exported nav (outlines and info as in ExportStats; empty =
-// no nav).
+// no nav). `supports`: the world bounds of the other objects the blob may
+// stand on when there is no nav floor under it, in the splashpack's order.
 inline Blob blobFor(Vec3 position, float bottom, float top, float size, float darknessPercent,
                     const std::vector<std::vector<Vec3>>& outlines,
-                    const std::vector<ExportStats::NavRegionInfo>& info) {
+                    const std::vector<ExportStats::NavRegionInfo>& info,
+                    const std::vector<SupportBox>& supports = {}, float tolerance = 0) {
     Blob b;
     const float middle = (bottom + top) / 2;
     float floorY = bottom;
@@ -139,9 +155,18 @@ inline Blob blobFor(Vec3 position, float bottom, float top, float size, float da
     }
     b.darkness = darknessByte(darknessPercent) / 255.f * fade * edge;
     b.centre = {position.x, floorY, position.z};
+    const SupportBox* on = nullptr;
+    if (b.region < 0)
+        for (const SupportBox& s : supports)
+            if (std::fabs(s.topY - floorY) <= tolerance && position.x >= s.minX && position.x <= s.maxX &&
+                position.z >= s.minZ && position.z <= s.maxZ) {
+                on = &s;
+                break;
+            }
     for (int i = 0; i < kRimVerts; i++) {
         float a = float(i) * 0.78539816f;  // 45 degrees
         float x = position.x + b.radius * std::cos(a), z = position.z + b.radius * std::sin(a);
+        if (on) x = std::clamp(x, on->minX, on->maxX), z = std::clamp(z, on->minZ, on->maxZ);
         float y = b.region >= 0 ? detail::planeY(info[size_t(b.region)], x, z) : floorY;
         b.rim[size_t(i)] = {x, y, z};
     }

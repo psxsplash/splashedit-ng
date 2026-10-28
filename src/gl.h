@@ -38,7 +38,9 @@
     X(PFNGLFRAMEBUFFERRENDERBUFFERPROC, glFramebufferRenderbuffer)           \
     X(PFNGLGENERATEMIPMAPPROC, glGenerateMipmap)                             \
     X(PFNGLBINDSAMPLERPROC, glBindSampler)                                   \
-    X(PFNGLACTIVETEXTUREPROC, glActiveTexture_)
+    X(PFNGLACTIVETEXTUREPROC, glActiveTexture_)                             \
+    X(PFNGLBLENDEQUATIONSEPARATEPROC, glBlendEquationSeparate_)              \
+    X(PFNGLBLENDFUNCSEPARATEPROC, glBlendFuncSeparate_)
 
 namespace gl {
 #define SPLASH_GL_DECLARE(type, name) extern type name;

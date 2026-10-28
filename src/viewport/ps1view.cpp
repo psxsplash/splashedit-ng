@@ -107,6 +107,28 @@ void main() {
 }
 )";
 
+// How far a fragment at view depth `depth` is faded into the background:
+// the scene's fog, else the view's haze, and the edge fade.
+static const char* kFade = R"(#version 330 core
+uniform float uFogScale;  // grows with the orbit distance, so a big world is not all fog
+uniform float uFogFar;    // > 0: the scene's fog wall, in view depth
+uniform float uEdgeFar;   // > 0: the edge fade's edge, in view depth
+float fogFade(float depth) {
+    float fade;
+    if (uFogFar > 0.0) {
+        float fogNear = uFogFar * 0.125;
+        fade = clamp((depth - fogNear) / (uFogFar - fogNear), 0.0, 1.0);
+    } else {
+        fade = clamp((depth - 10.0 * uFogScale) / (22.0 * uFogScale), 0.0, 1.0) * 0.85;
+    }
+    if (uEdgeFar > 0.0) {
+        float edgeNear = uEdgeFar * 0.875;
+        fade = max(fade, clamp((depth - edgeNear) / (uEdgeFar - edgeNear), 0.0, 1.0));
+    }
+    return fade;
+}
+)";
+
 static const char* kFrag = R"(#version 330 core
 noperspective in vec2 vUvAffine;
 in vec2 vUvPersp;
@@ -115,9 +137,7 @@ in float vDepth;
 uniform sampler2D uTex;
 uniform int uClean;
 uniform vec3 uFog;
-uniform float uFogScale;  // grows with the orbit distance, so a big world is not all fog
-uniform float uFogFar;    // > 0: the scene's fog wall, in view depth
-uniform float uEdgeFar;   // > 0: the edge fade's edge, in view depth
+float fogFade(float depth);
 out vec4 oColor;
 const float kDither[16] = float[16](-4, 0, -3, 1, 2, -2, 3, -1, -3, 1, -4, 0, 3, -1, 2, -2);
 void main() {
@@ -126,18 +146,7 @@ void main() {
     vec4 t = texture(uTex, fract(uv));
     if (t.a < 0.5) discard;
     vec3 c = t.rgb * vCol * 2.0;
-    float fade;
-    if (uFogFar > 0.0) {
-        float fogNear = uFogFar * 0.125;
-        fade = clamp((vDepth - fogNear) / (uFogFar - fogNear), 0.0, 1.0);
-    } else {
-        fade = clamp((vDepth - 10.0 * uFogScale) / (22.0 * uFogScale), 0.0, 1.0) * 0.85;
-    }
-    if (uEdgeFar > 0.0) {
-        float edgeNear = uEdgeFar * 0.875;
-        fade = max(fade, clamp((vDepth - edgeNear) / (uEdgeFar - edgeNear), 0.0, 1.0));
-    }
-    c = mix(c, uFog, fade);
+    c = mix(c, uFog, fogFade(vDepth));
     if (uClean == 0) {
         ivec2 p = ivec2(gl_FragCoord.xy) & 3;
         vec3 v = floor(clamp(c * 255.0 + kDither[p.y * 4 + p.x], 0.0, 255.0));
@@ -146,6 +155,21 @@ void main() {
     oColor = vec4(c, 1.0);
 }
 )";
+
+// A blob shadow, drawn with reverse-subtract blending: the amount taken off
+// the scene under it, its Gouraud darkness fading into the fog as the scene
+// does (psxsplash fades the blob's colour with the same depth).
+static const char* kBlobFrag = R"(#version 330 core
+in vec3 vCol;
+in float vDepth;
+float fogFade(float depth);
+out vec4 oColor;
+void main() {
+    oColor = vec4(vCol * (1.0 - fogFade(vDepth)), 0.0);
+}
+)";
+// glPolygonOffset for the blob fan: towards the eye, past the floor it lies on.
+static constexpr float kBlobOffsetFactor = -1.0f, kBlobOffsetUnits = -4.0f;
 
 // Screen-space sky: a fullscreen triangle whose colour is a vertical gradient
 // driven by the camera's view ray, so it fills the whole background and tilts
@@ -421,12 +445,24 @@ void Ps1View::rebuild() {
 
 bool Ps1View::init() {
     unsigned vs = compile(GL_VERTEX_SHADER, kVert), fs = compile(GL_FRAGMENT_SHADER, kFrag);
+    unsigned fade = compile(GL_FRAGMENT_SHADER, kFade);
     m_prog = glCreateProgram();
     glAttachShader(m_prog, vs);
     glAttachShader(m_prog, fs);
+    glAttachShader(m_prog, fade);
     glLinkProgram(m_prog);
     int ok = 0;
     glGetProgramiv(m_prog, GL_LINK_STATUS, &ok);
+    if (!ok) return false;
+
+    // Blob shadows: the scene's vertex shader (the same vertex snapping).
+    unsigned bfs = compile(GL_FRAGMENT_SHADER, kBlobFrag);
+    m_blobProg = glCreateProgram();
+    glAttachShader(m_blobProg, vs);
+    glAttachShader(m_blobProg, bfs);
+    glAttachShader(m_blobProg, fade);
+    glLinkProgram(m_blobProg);
+    glGetProgramiv(m_blobProg, GL_LINK_STATUS, &ok);
     if (!ok) return false;
 
     unsigned svs = compile(GL_VERTEX_SHADER, kSkyVert), sfs = compile(GL_FRAGMENT_SHADER, kSkyFrag);
@@ -441,6 +477,14 @@ bool Ps1View::init() {
     glBindVertexArray(m_vao);
     glGenBuffers(1, &m_vbo);
     glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, px));
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, u));
+    glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, r));
+    for (int i = 0; i < 3; ++i) glEnableVertexAttribArray(i);
+    glGenVertexArrays(1, &m_blobVao);
+    glBindVertexArray(m_blobVao);
+    glGenBuffers(1, &m_blobVbo);
+    glBindBuffer(GL_ARRAY_BUFFER, m_blobVbo);
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, px));
     glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, u));
     glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, r));
@@ -468,7 +512,7 @@ bool Ps1View::init() {
     return true;
 }
 
-unsigned Ps1View::render(int panelW, int panelH, int lines) {
+void Ps1View::sync() {
     if (!m_built || m_previewDirty || (m_doc && m_doc->revision() != m_builtRevision)) {
         if (m_doc) m_builtRevision = m_doc->revision();
         m_previewDirty = false;
@@ -477,6 +521,10 @@ unsigned Ps1View::render(int panelW, int panelH, int lines) {
         glBufferData(GL_ARRAY_BUFFER, m_verts.size() * sizeof(Vertex), m_verts.data(), GL_STATIC_DRAW);
         m_vboCap = m_verts.size();
     }
+}
+
+unsigned Ps1View::render(int panelW, int panelH, int lines) {
+    sync();
 
     int h = clean ? panelH : lines;
     int w = clean ? panelW : std::max(1, (int)std::round((float)lines * panelW / panelH));
@@ -564,6 +612,70 @@ unsigned Ps1View::render(int panelW, int panelH, int lines) {
     for (const Batch& b : m_batches) {
         glBindTexture(GL_TEXTURE_2D, b.tex);
         glDrawArrays(GL_TRIANGLES, b.start, b.count);
+    }
+
+    // Blob shadows over the finished scene: each a fan of eight triangles,
+    // depth tested (not written) so whatever stands in front of the floor,
+    // the caster included, stays as it is, and subtracted from the colour
+    // as the console's blend does. A small negative offset keeps the fan in
+    // front of the floor it lies on.
+    if (!m_blobs.empty()) {
+        std::vector<Vertex> bv;
+        bv.reserve(m_blobs.size() * 24);
+        for (const Blob& b : m_blobs) {
+            const float d = std::clamp(b.darkness, 0.0f, 1.0f);
+            for (int k = 0; k < 8; ++k) {
+                const Vec3& r0 = b.rim[k];
+                const Vec3& r1 = b.rim[(k + 1) % 8];
+                bv.push_back({b.centre.x, b.centre.y, b.centre.z, 0, 0, d, d, d});
+                bv.push_back({r0.x, r0.y, r0.z, 0, 0, 0, 0, 0});
+                bv.push_back({r1.x, r1.y, r1.z, 0, 0, 0, 0, 0});
+            }
+        }
+        GLint program = 0, depthFunc = GL_LESS, eqRgb = GL_FUNC_ADD, eqAlpha = GL_FUNC_ADD;
+        GLint srcRgb = GL_ONE, dstRgb = GL_ZERO, srcAlpha = GL_ONE, dstAlpha = GL_ZERO;
+        GLboolean depthMask = GL_TRUE;
+        GLfloat offFactor = 0, offUnits = 0;
+        glGetIntegerv(GL_CURRENT_PROGRAM, &program);
+        glGetIntegerv(GL_DEPTH_FUNC, &depthFunc);
+        glGetBooleanv(GL_DEPTH_WRITEMASK, &depthMask);
+        glGetIntegerv(GL_BLEND_EQUATION_RGB, &eqRgb);
+        glGetIntegerv(GL_BLEND_EQUATION_ALPHA, &eqAlpha);
+        glGetIntegerv(GL_BLEND_SRC_RGB, &srcRgb);
+        glGetIntegerv(GL_BLEND_DST_RGB, &dstRgb);
+        glGetIntegerv(GL_BLEND_SRC_ALPHA, &srcAlpha);
+        glGetIntegerv(GL_BLEND_DST_ALPHA, &dstAlpha);
+        glGetFloatv(GL_POLYGON_OFFSET_FACTOR, &offFactor);
+        glGetFloatv(GL_POLYGON_OFFSET_UNITS, &offUnits);
+        const GLboolean blend = glIsEnabled(GL_BLEND), offset = glIsEnabled(GL_POLYGON_OFFSET_FILL);
+
+        glBindVertexArray(m_blobVao);
+        glBindBuffer(GL_ARRAY_BUFFER, m_blobVbo);
+        glBufferData(GL_ARRAY_BUFFER, bv.size() * sizeof(Vertex), bv.data(), GL_DYNAMIC_DRAW);
+        glUseProgram(m_blobProg);
+        glUniformMatrix4fv(glGetUniformLocation(m_blobProg, "uViewProj"), 1, GL_FALSE, m_viewProj.m);
+        glUniform2f(glGetUniformLocation(m_blobProg, "uRes"), (float)w, (float)h);
+        glUniform1i(glGetUniformLocation(m_blobProg, "uClean"), clean ? 1 : 0);
+        glUniform1f(glGetUniformLocation(m_blobProg, "uFogScale"), viewScale());
+        glUniform1f(glGetUniformLocation(m_blobProg, "uFogFar"), fogFar);
+        glUniform1f(glGetUniformLocation(m_blobProg, "uEdgeFar"), edgeFar);
+        glDepthMask(GL_FALSE);
+        glDepthFunc(GL_LEQUAL);
+        glEnable(GL_POLYGON_OFFSET_FILL);
+        glPolygonOffset(kBlobOffsetFactor, kBlobOffsetUnits);
+        glEnable(GL_BLEND);
+        glBlendEquationSeparate_(GL_FUNC_REVERSE_SUBTRACT, GL_FUNC_REVERSE_SUBTRACT);
+        glBlendFuncSeparate_(GL_ONE, GL_ONE, GL_ONE, GL_ONE);
+        glDrawArrays(GL_TRIANGLES, 0, (GLsizei)bv.size());
+
+        glBlendEquationSeparate_((GLenum)eqRgb, (GLenum)eqAlpha);
+        glBlendFuncSeparate_((GLenum)srcRgb, (GLenum)dstRgb, (GLenum)srcAlpha, (GLenum)dstAlpha);
+        if (!blend) glDisable(GL_BLEND);
+        glPolygonOffset(offFactor, offUnits);
+        if (!offset) glDisable(GL_POLYGON_OFFSET_FILL);
+        glDepthFunc((GLenum)depthFunc);
+        glDepthMask(depthMask);
+        glUseProgram((GLuint)program);
     }
     glBindVertexArray(0);
     glDisable(GL_DEPTH_TEST);

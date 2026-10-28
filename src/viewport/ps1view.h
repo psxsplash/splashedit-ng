@@ -54,6 +54,19 @@ class Ps1View {
     // The scene as drawn by the last render(): the posed copy while a preview
     // is on, else the document's. Null without a document.
     const splash::Scene* drawnScene() const;
+    // Rebuilds the drawn scene if the document or the preview changed, so
+    // drawnScene() is the one the next render() draws. render() does it too.
+    void sync();
+    // A blob shadow to draw (GL space): a fan from the centre to eight rim
+    // points, subtracting `darkness` (0..1) at the centre and nothing at the
+    // rim, depth tested against the scene and fading into its fog.
+    struct Blob {
+        Vec3 centre;
+        Vec3 rim[8];
+        float darkness = 0;
+    };
+    // The blobs the next render() draws, until set again.
+    void setBlobs(std::vector<Blob> blobs) { m_blobs = std::move(blobs); }
     // Renders at an internal height of `lines` and returns the colour texture.
     unsigned render(int panelW, int panelH, int lines);
     // Projects a world point into a screen rect matching the panel. Returns false behind the camera.
@@ -149,6 +162,8 @@ class Ps1View {
     splash::Bounds m_sceneBounds;  // GL space, geometry only
 
     unsigned m_prog = 0, m_skyProg = 0, m_vao = 0, m_vbo = 0, m_fbo = 0, m_color = 0, m_depth = 0;
+    unsigned m_blobProg = 0, m_blobVao = 0, m_blobVbo = 0;
+    std::vector<Blob> m_blobs;
     unsigned m_white = 0, m_fallback = 0;
     size_t m_vboCap = 0;
     int m_fboW = 0, m_fboH = 0;
