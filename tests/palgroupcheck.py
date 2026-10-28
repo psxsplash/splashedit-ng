@@ -12,7 +12,7 @@
 # edited project shows.
 # usage: python3 palgroupcheck.py <splashedit> [keep dir for screenshots]   (needs a display: xvfb-run -a)
 # splashpack-cli is taken from beside the editor (build/cli/splashpack-cli).
-import json, os, re, shutil, struct, subprocess, sys, tempfile
+import json, os, re, shutil, struct, subprocess, sys, tempfile, zlib
 
 editor = os.path.abspath(sys.argv[1])
 keep = sys.argv[2] if len(sys.argv) > 2 else None
@@ -122,24 +122,55 @@ crc_a = shared.match(said[-1]).group(2) if said and shared.match(said[-1]) else 
 field = rects.get('obj.texture')
 
 # --- stone.png rewritten in place, then dragged onto Floor's Texture field again ---
-from PIL import Image
-STONE = os.path.join(example, 'textures', 'stone.png')
-inverted = os.path.join(tempfile.mkdtemp(), 'stone-inverted.png')
-im = Image.open(STONE).convert('RGBA')
-px = bytearray(im.tobytes())
-for i in range(len(px)):
-    if i % 4 != 3: px[i] = 255 - px[i]
-Image.frombytes('RGBA', im.size, bytes(px)).save(inverted)
+def png_rgba(path):
+    """(width, height, RGBA bytes) of an 8-bit RGBA PNG."""
+    data = open(path, 'rb').read()
+    pos, idat = 8, b''
+    while pos < len(data):
+        n, kind = struct.unpack('>I4s', data[pos:pos + 8])
+        body = data[pos + 8:pos + 8 + n]
+        if kind == b'IHDR':
+            w, h, depth, ctype = struct.unpack('>IIBB', body[:10])
+            assert depth == 8 and ctype == 6, path
+        elif kind == b'IDAT':
+            idat += body
+        pos += 12 + n
+    raw, stride, out, prev = zlib.decompress(idat), w * 4, bytearray(), bytearray(w * 4)
+    for y in range(h):
+        f, line = raw[y * (stride + 1)], bytearray(raw[y * (stride + 1) + 1:(y + 1) * (stride + 1)])
+        for i in range(stride):
+            a = line[i - 4] if i >= 4 else 0
+            b, c = prev[i], prev[i - 4] if i >= 4 else 0
+            if f == 1: line[i] = (line[i] + a) & 255
+            elif f == 2: line[i] = (line[i] + b) & 255
+            elif f == 3: line[i] = (line[i] + (a + b) // 2) & 255
+            elif f == 4:
+                p = a + b - c
+                pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
+                line[i] = (line[i] + (a if pa <= pb and pa <= pc else b if pb <= pc else c)) & 255
+        out += line
+        prev = line
+    return w, h, bytes(out)
 
 
-def c15(path):
-    px = Image.open(path).convert('RGBA').tobytes()
+def write_png_rgba(path, w, h, px):
+    chunk = lambda kind, body: struct.pack('>I', len(body)) + kind + body + struct.pack('>I', zlib.crc32(kind + body))
+    rows = b''.join(b'\0' + px[y * w * 4:(y + 1) * w * 4] for y in range(h))
+    open(path, 'wb').write(b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, 8, 6, 0, 0, 0)) +
+                           chunk(b'IDAT', zlib.compress(rows)) + chunk(b'IEND', b''))
+
+
+def c15(px):
     return len({(px[i] >> 3, px[i + 1] >> 3, px[i + 2] >> 3) for i in range(0, len(px), 4) if px[i + 3]})
 
 
+STONE = os.path.join(example, 'textures', 'stone.png')
+inverted = os.path.join(tempfile.mkdtemp(), 'stone-inverted.png')
+sw, sh, spx = png_rgba(STONE)
+write_png_rgba(inverted, sw, sh, bytes(v if i % 4 == 3 else 255 - v for i, v in enumerate(spx)))
+iw, ih, ipx = png_rgba(inverted)
 check('the inverted stone.png has the same size and colour count, other colours',
-      Image.open(inverted).size == Image.open(STONE).size and c15(inverted) == c15(STONE) and
-      open(inverted, 'rb').read() != open(STONE, 'rb').read(), (c15(inverted), c15(STONE)))
+      (iw, ih) == (sw, sh) and c15(ipx) == c15(spx) and ipx != spx, (iw, ih, sw, sh, c15(ipx), c15(spx)))
 SEARCH, TILE = '880,731', '530,812'  # the Project panel's search field and first tile at 1600x960
 to = '%d,%d' % ((field[0] + field[2]) // 2, (field[1] + field[3]) // 2) if field else '0,0'
 REPICK = ['--copy-file', inverted + '@@PROJECT/textures/stone.png'] + W(5) + ['--click', SEARCH + ',0', '--text', 'stone'] + W(5) + \
