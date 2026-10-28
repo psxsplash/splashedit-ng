@@ -85,6 +85,15 @@ std::filesystem::path engineFor(const PlayTools& effective, std::string* note = 
 // project's DiscSettings::bootLogo, falling back to `disc` the same way.
 std::filesystem::path discEngineFor(const std::filesystem::path& disc, bool bootLogo, std::string* note = nullptr);
 
+// A warning when `exe` is the wrong psxsplash loader for its use, else empty:
+// Play and Run on hardware load scenes over PCdrv (`disc` false), a disc
+// image reads them from the CD (`disc` true). The two builds differ only in
+// LOADER=cdrom and both boot to the logo, so a swapped file stops there with
+// no other sign. Told apart by the PCdrv scene name ("scene_%d.splashpack")
+// and psyqo's CDRomDevice strings in the exe; a file with neither or both
+// says nothing.
+std::string engineLoaderNote(const std::filesystem::path& exe, bool disc);
+
 // One line per thing Play still needs; empty when it can run.
 std::vector<std::string> missingTools(const PlayTools& tools);
 

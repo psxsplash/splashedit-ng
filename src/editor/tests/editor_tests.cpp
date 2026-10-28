@@ -2415,6 +2415,33 @@ void testRelaySocket() {
 #endif
 }
 
+// A CD-ROM psxsplash build booted by Play (or a PCdrv one put on a disc)
+// stops on the boot logo: the build report says which build it is.
+void testEngineLoaderNote() {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    const fs::path dir = g_outDir / "engine-loader";
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir, ec);
+    auto exe = [&](const char* name, const std::string& body) {
+        const fs::path p = dir / name;
+        std::ofstream(p, std::ios::binary) << std::string("PS-X EXE") + std::string(8, '\0') + body;
+        return p;
+    };
+    const fs::path pcdrv = exe("pcdrv.ps-exe", "x scene_%d.splashpack x scene_%d.vram");
+    const fs::path cdrom = exe("cdrom.ps-exe", "x CDRomDevice::readSectors called with pending action");
+    const fs::path neither = exe("neither.ps-exe", "nothing to tell");
+    CHECK(editor::engineLoaderNote(pcdrv, false).empty());
+    CHECK(editor::engineLoaderNote(cdrom, true).empty());
+    const std::string play = editor::engineLoaderNote(cdrom, false);
+    CHECK(play.find("cdrom.ps-exe is the CD-ROM build") == 0);
+    CHECK(play.find("boot logo") != std::string::npos);
+    CHECK(editor::engineLoaderNote(pcdrv, true).find("pcdrv.ps-exe is the PCdrv build") == 0);
+    CHECK(editor::engineLoaderNote(neither, false).empty());
+    CHECK(editor::engineLoaderNote(neither, true).empty());
+    CHECK(editor::engineLoaderNote(dir / "missing.ps-exe", false).empty());
+}
+
 // Build > Performance / Room Debug Overlay: Play and Run on hardware boot the
 // psxsplash build beside the chosen one that has them; the disc never does.
 void testPlayOverlays() {
@@ -2482,6 +2509,9 @@ void testPlayOverlays() {
     const std::vector<std::string> miss = editor::missingTools(eff), hwMiss = editor::missingHardwareTools(eff);
     CHECK(miss.size() == 1 && miss[0].find("room debug overlay") != std::string::npos &&
           miss[0].find("psxsplash-rooms.ps-exe") != std::string::npos);
+    // It says how to make one, naming only the flag that overlay needs.
+    CHECK(miss.size() == 1 && miss[0].find("with ROOMDEBUG=1 and save it under that name") != std::string::npos &&
+          miss[0].find("FPSOVERLAY") == std::string::npos);
     CHECK(hwMiss.size() == 1 && hwMiss[0].find("psxsplash-rooms.ps-exe") != std::string::npos);
     CHECK(editor::missingDiscTools(eff).empty());
 }
@@ -17333,6 +17363,7 @@ int main(int argc, char** argv) {
     testBlendCancel();
     testPlay();
     testPlayOverlays();
+    testEngineLoaderNote();
     testLinkPlay();
     testRelayFrames();
     testRelayProtobuf();
