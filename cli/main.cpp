@@ -105,10 +105,12 @@ static int usage() {
                  "    working directory), tracks 2 and up in the order given (Audio.PlayCDDA(2) plays the\n"
                  "    first); any --track replaces disc.json's list\n"
                  "usage: splashpack-cli licence --out <file> [--tmd <file>] [--top <text>] [--bottom <text>]\n"
-                 "    [--from <file|psxsplash>]\n"
+                 "    [--from <file|psxsplash>] [--region japan|america|europe]\n"
                  "  builds a 12-sector licence file (28032 bytes, for --licence) from a TMD logo (flat\n"
                  "    triangles, at most 14336 bytes) and two text lines (at most 32 printable ASCII\n"
-                 "    bytes each); what is not given comes from the --from licence (default psxsplash)\n"
+                 "    bytes each; the bottom one 38 for america and europe); what is not given comes\n"
+                 "    from the --from licence (default psxsplash); --region picks the sector layout\n"
+                 "    (default japan)\n"
                  "usage: splashpack-cli font <font.ttf> --size <px> -o <sheet.png>\n"
                  "       splashpack-cli font <bitmap.png> --cell <w>x<h> -o <sheet.png>\n"
                  "  builds one UI font sheet the way export does and prints its cell size and height\n"
@@ -569,7 +571,7 @@ static int buildCmd(int argc, char** argv) {
 }
 
 static int licenceCmd(int argc, char** argv) {
-    std::string out, tmdPath, from = "psxsplash", top, bottom;
+    std::string out, tmdPath, from = "psxsplash", top, bottom, regionName = "japan";
     bool hasTop = false, hasBottom = false;
     for (int i = 2; i < argc; i++) {
         std::string a = argv[i];
@@ -582,9 +584,16 @@ static int licenceCmd(int argc, char** argv) {
         } else if (a == "--bottom" && i + 1 < argc) {
             bottom = argv[++i];
             hasBottom = true;
+        } else if (a == "--region" && i + 1 < argc) {
+            regionName = argv[++i];
         } else return usage();
     }
     if (out.empty()) return usage();
+    splash::LicenceRegion region = splash::LicenceRegion::Japan;
+    if (!splash::parseLicenceRegion(regionName, region)) {
+        std::fprintf(stderr, "error: --region %s is not japan, america or europe\n", regionName.c_str());
+        return 1;
+    }
     auto read = [](const std::string& path, std::vector<uint8_t>& bytes) {
         std::ifstream f(fs::path(path), std::ios::binary);
         if (!f) return false;
@@ -615,7 +624,7 @@ static int licenceCmd(int argc, char** argv) {
     }
     std::vector<uint8_t> bytes;
     std::string error;
-    if (!splash::buildLicence(tmd, top, bottom, bytes, error)) {
+    if (!splash::buildLicence(tmd, top, bottom, bytes, error, region)) {
         std::fprintf(stderr, "error: %s\n", error.c_str());
         return 1;
     }
@@ -626,8 +635,9 @@ static int licenceCmd(int argc, char** argv) {
         std::fprintf(stderr, "error: cannot write %s\n", out.c_str());
         return 1;
     }
-    std::printf("licence %zu bytes, %d triangles: \"%s\" / \"%s\"\n", bytes.size(),
-                splash::checkLicenceTmd(tmd).triangles, top.c_str(), bottom.c_str());
+    std::printf("licence %zu bytes, %d triangles, %s: \"%s\" / \"%s\"\n", bytes.size(),
+                splash::checkLicenceTmd(tmd).triangles, splash::licenceRegionName(region), top.c_str(),
+                bottom.c_str());
     return 0;
 }
 

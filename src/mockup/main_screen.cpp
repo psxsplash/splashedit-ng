@@ -8716,6 +8716,7 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
         static bool buildOpen = false;
         static std::string buildTop, buildBottom, buildTmdName, buildTmdError;
         static std::vector<uint8_t> buildTmd;  // the picked file, or the current licence's logo
+        static splash::LicenceRegion buildRegion = splash::LicenceRegion::Japan;
         if (pick == 3) {
             // The current licence's logo and text, or psxsplash's when it has none.
             std::string why;
@@ -8723,6 +8724,7 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
             if (from.size() < 12) from = splash::parseLicence(splash::psxsplashLicence(), why);
             buildTmd = splash::licenceTmd(from);
             std::tie(buildTop, buildBottom) = splash::licenceText(from);
+            buildRegion = splash::licenceRegionOf(from);
             buildTmdName.clear();
             buildTmdError.clear();
             buildOpen = true;
@@ -8811,14 +8813,34 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
             dl->AddText(f.regular, type::caption, ImVec2(nameX, centerY(f.regular, type::caption, mr.Min.y, mr.Max.y)),
                         buildTmdName.empty() ? color::textFaint : color::text, tmdShown.c_str(), nullptr, 0.0f, &nclip);
 
+            static const char* const regionItems[3] = {"Japan", "America", "Europe"};
+            const int curRegion = int(buildRegion);
+            const ImRect rr = row("ldisclicregion", "Region",
+                                  "The console region whose sector layout the licence takes. America and Europe allow a "
+                                  "38-byte bottom line.");
+            nameRect("disc.licence.region", rr);
+            const int rp = dropdownMenu("disc.licence.region", rr, nullptr, regionItems[curRegion],
+                                        {regionItems[0], regionItems[1], regionItems[2]}, curRegion);
+            if (rp >= 0) buildRegion = splash::LicenceRegion(rp);
+            {
+                const char* note = "The Japanese BIOS (SCPH-5500) shows its menu for a licence whose text is not Sony's, "
+                                   "and stops at the intro for a logo that is not Sony's (measured in pcsx-redux).";
+                const float nh = f.regular->CalcTextSizeA(type::caption, FLT_MAX, tw, note).y;
+                dl->AddText(f.regular, type::caption, ImVec2(tx, y - 2), color::textFaint, note, nullptr, tw);
+                y += nh + space::xs;
+            }
+            const size_t bottomMax = buildRegion == splash::LicenceRegion::Japan ? 32 : 38;
+            const std::string bottomTip = "The second line of text under the logo: printable ASCII, at most " +
+                                          std::to_string(bottomMax) + " bytes.";
+
             const ImRect topR = row("ldisclictop", "Top line", "The first line of text under the logo: printable ASCII, at most 32 bytes.");
             nameRect("disc.licence.top", topR);
             std::string typed;
             if (textField("disclictop", topR, buildTop, &typed, nullptr, 32)) buildTop = typed;
             const ImRect botR =
-                row("ldisclicbottom", "Bottom line", "The second line of text under the logo: printable ASCII, at most 32 bytes.");
+                row("ldisclicbottom", "Bottom line", bottomTip.c_str());
             nameRect("disc.licence.bottom", botR);
-            if (textField("disclicbottom", botR, buildBottom, &typed, nullptr, 32)) buildBottom = typed;
+            if (textField("disclicbottom", botR, buildBottom, &typed, nullptr, bottomMax)) buildBottom = typed;
 
             // What a Build now would do: the first check that fails, or the logo's size.
             std::string status;
@@ -8828,7 +8850,7 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
                 status = c.error;
             } else if (std::string e = splash::licenceLineError(buildTop); !e.empty()) {
                 status = "Top line: " + e;
-            } else if (std::string e2 = splash::licenceLineError(buildBottom); !e2.empty()) {
+            } else if (std::string e2 = splash::licenceLineError(buildBottom, bottomMax); !e2.empty()) {
                 status = "Bottom line: " + e2;
             } else {
                 status = "TMD ok, " + std::to_string(c.triangles) + (c.triangles == 1 ? " triangle" : " triangles");
@@ -8852,13 +8874,14 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
             const bool doCancel = button("disc.licence.cancel", ImVec2(tx + buttonWidth(nullptr, "Build") + space::sm, y), nullptr,
                                          "Cancel", ButtonKind::Ghost);
             y += bh + space::sm;
-            scriptLine("disclicbuild", "disc: licence build \"" + buildTop + "\" \"" + buildBottom + "\" " + status);
+            scriptLine("disclicbuild", std::string("disc: licence build ") + splash::licenceRegionName(buildRegion) + " \"" +
+                                           buildTop + "\" \"" + buildBottom + "\" " + status);
             if (doBuild && canBuild) {
                 std::vector<uint8_t> bytes;
                 std::string err;
                 const fs::path out = root / "custom-licence.dat";
                 bool wrote = false;
-                if (splash::buildLicence(buildTmd, buildTop, buildBottom, bytes, err)) {
+                if (splash::buildLicence(buildTmd, buildTop, buildBottom, bytes, err, buildRegion)) {
                     std::ofstream o(out, std::ios::binary | std::ios::trunc);
                     o.write(reinterpret_cast<const char*>(bytes.data()), std::streamsize(bytes.size()));
                     o.close();
