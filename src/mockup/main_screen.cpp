@@ -1865,6 +1865,18 @@ static void SDLCALL onLicencePicked(void*, const char* const* files, int) {
 
 static const SDL_DialogFileFilter kLicenceFilter[] = {{"Disc licence", "dat"}, {"All files", "*"}};
 
+// The logo the licence builder's Choose file... picked, until the frame reads it.
+static std::mutex g_licenceTmdMutex;
+static std::optional<std::string> g_licenceTmdPicked;
+
+static void SDLCALL onLicenceTmdPicked(void*, const char* const* files, int) {
+    if (!files || !files[0]) return;
+    std::lock_guard<std::mutex> lock(g_licenceTmdMutex);
+    g_licenceTmdPicked = files[0];
+}
+
+static const SDL_DialogFileFilter kTmdFilter[] = {{"TMD model", "tmd"}, {"All files", "*"}};
+
 static std::mutex g_trackMutex;
 static std::optional<std::string> g_trackPicked;
 static void SDLCALL onTrackPicked(void*, const char* const* files, int) {
@@ -8580,7 +8592,23 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
                               "The licence data in the disc's first 16 sectors. A retail console's BIOS checks it before booting; "
                               "emulators and modded consoles do not need it.");
         nameRect("disc.licence", lr);
-        const int pick = dropdownMenu("disc.licence", lr, nullptr, shown.c_str(), {"None", "psxsplash", "Choose file..."}, cur);
+        const int pick =
+            dropdownMenu("disc.licence", lr, nullptr, shown.c_str(), {"None", "psxsplash", "Choose file...", "Build..."}, cur);
+        // The builder: rows under the licence's lines, drawn only while open.
+        static bool buildOpen = false;
+        static std::string buildTop, buildBottom, buildTmdName, buildTmdError;
+        static std::vector<uint8_t> buildTmd;  // the picked file, or the current licence's logo
+        if (pick == 3) {
+            // The current licence's logo and text, or psxsplash's when it has none.
+            std::string why;
+            std::vector<splash::LicenceSector> from = splash::resolveLicence(ds.licence, root, why);
+            if (from.size() < 12) from = splash::parseLicence(splash::psxsplashLicence(), why);
+            buildTmd = splash::licenceTmd(from);
+            std::tie(buildTop, buildBottom) = splash::licenceText(from);
+            buildTmdName.clear();
+            buildTmdError.clear();
+            buildOpen = true;
+        }
         if (pick == 0 || pick == 1) {
             if (pick != cur) {
                 splash::DiscSettings next = ds;
@@ -8620,6 +8648,116 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
                 tooltip(licenceError.c_str());
             }
             y += errH + space::xs;
+        }
+        if (pick >= 0 && pick <= 2) buildOpen = false;
+
+        // Licence builder: a TMD logo and two text lines into
+        // <project>/custom-licence.dat (splash::buildLicence), which then is
+        // the licence.
+        if (buildOpen) {
+            {
+                std::optional<std::string> picked;
+                {
+                    std::lock_guard<std::mutex> lock(g_licenceTmdMutex);
+                    picked.swap(g_licenceTmdPicked);
+                }
+                if (picked) {
+                    const fs::path p(std::u8string(picked->begin(), picked->end()));
+                    buildTmdName = utf8(p.filename());
+                    buildTmdError.clear();
+                    std::ifstream in(p, std::ios::binary);
+                    if (in)
+                        buildTmd.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+                    else
+                        buildTmdError = "Cannot read " + buildTmdName;
+                }
+            }
+            const float tx = x0 + space::sm, tw = x1 - space::sm - tx;
+            const float lineH = f.regular->CalcTextSizeA(type::caption, FLT_MAX, 0, "A").y;
+            dl->AddText(f.regular, type::caption, ImVec2(tx, y - 2), color::textFaint,
+                        "Build a licence from a TMD logo and two lines of text.", nullptr, tw);
+            y += lineH + space::xs;
+
+            const ImRect mr = row("ldisclictmd", "Logo (.tmd)",
+                                  "The logo the BIOS shows: a TMD model of flat triangles, at most 14336 bytes.");
+            const float bh = size::field + 6;
+            const ImVec2 bp(mr.Min.x, mr.GetCenter().y - bh / 2);
+            if (button("disc.licence.tmd", bp, nullptr, "Choose file...", ButtonKind::Secondary)) {
+                const std::string loc = utf8(root);
+                ui::showOpenFileDialog("licencetmd", onLicenceTmdPicked, nullptr, kTmdFilter, 2,
+                                       root.empty() ? nullptr : loc.c_str(), false);
+            }
+            const float nameX = bp.x + buttonWidth(nullptr, "Choose file...") + space::xs;
+            const std::string tmdShown = buildTmdName.empty() ? "from current licence" : buildTmdName;
+            const ImVec4 nclip(nameX, mr.Min.y, x1 - space::xs, mr.Max.y);
+            dl->AddText(f.regular, type::caption, ImVec2(nameX, centerY(f.regular, type::caption, mr.Min.y, mr.Max.y)),
+                        buildTmdName.empty() ? color::textFaint : color::text, tmdShown.c_str(), nullptr, 0.0f, &nclip);
+
+            const ImRect topR = row("ldisclictop", "Top line", "The first line of text under the logo: printable ASCII, at most 32 bytes.");
+            nameRect("disc.licence.top", topR);
+            std::string typed;
+            if (textField("disclictop", topR, buildTop, &typed, nullptr, 32)) buildTop = typed;
+            const ImRect botR =
+                row("ldisclicbottom", "Bottom line", "The second line of text under the logo: printable ASCII, at most 32 bytes.");
+            nameRect("disc.licence.bottom", botR);
+            if (textField("disclicbottom", botR, buildBottom, &typed, nullptr, 32)) buildBottom = typed;
+
+            // What a Build now would do: the first check that fails, or the logo's size.
+            std::string status;
+            if (!buildTmdError.empty()) {
+                status = buildTmdError;
+            } else if (const splash::TmdCheck c = splash::checkLicenceTmd(buildTmd); !c.ok) {
+                status = c.error;
+            } else if (std::string e = splash::licenceLineError(buildTop); !e.empty()) {
+                status = "Top line: " + e;
+            } else if (std::string e2 = splash::licenceLineError(buildBottom); !e2.empty()) {
+                status = "Bottom line: " + e2;
+            } else {
+                status = "TMD ok, " + std::to_string(c.triangles) + (c.triangles == 1 ? " triangle" : " triangles");
+            }
+            const bool good = status.rfind("TMD ok", 0) == 0;
+            {
+                // Two lines, whatever the message wraps to, so the buttons stay put.
+                const ImRect sr(ImVec2(tx, y + space::xs - 2), ImVec2(tx + tw, y + space::xs - 2 + 2 * lineH));
+                const ImVec4 sclip(sr.Min.x, sr.Min.y, sr.Max.x, sr.Max.y);
+                dl->AddText(f.regular, type::caption, sr.Min, good ? color::textDim : color::warn, status.c_str(), nullptr, tw,
+                            &sclip);
+                nameRect("disc.licence.status", sr);
+                y += space::xs + 2 * lineH + space::xs;
+            }
+
+            const bool canBuild = good && !root.empty();
+            ImGui::BeginDisabled(!canBuild);
+            const bool doBuild = button("disc.licence.build", ImVec2(tx, y), nullptr, "Build", ButtonKind::Primary, nullptr,
+                                        root.empty() ? "Open a project first" : "Writes custom-licence.dat in the project and uses it");
+            ImGui::EndDisabled();
+            const bool doCancel = button("disc.licence.cancel", ImVec2(tx + buttonWidth(nullptr, "Build") + space::sm, y), nullptr,
+                                         "Cancel", ButtonKind::Ghost);
+            y += bh + space::sm;
+            scriptLine("disclicbuild", "disc: licence build \"" + buildTop + "\" \"" + buildBottom + "\" " + status);
+            if (doBuild && canBuild) {
+                std::vector<uint8_t> bytes;
+                std::string err;
+                const fs::path out = root / "custom-licence.dat";
+                bool wrote = false;
+                if (splash::buildLicence(buildTmd, buildTop, buildBottom, bytes, err)) {
+                    std::ofstream o(out, std::ios::binary | std::ios::trunc);
+                    o.write(reinterpret_cast<const char*>(bytes.data()), std::streamsize(bytes.size()));
+                    o.close();
+                    wrote = !o.fail();
+                    if (!wrote) err = "Cannot write " + utf8(out);
+                }
+                if (wrote) {
+                    splash::DiscSettings next = ds;
+                    next.licence = "custom-licence.dat";
+                    save(std::move(next));
+                    buildOpen = false;
+                } else {
+                    notify(st, err, true);
+                }
+            } else if (doCancel) {
+                buildOpen = false;
+            }
         }
 
         // Music (CD-DA): the audio tracks Export writes as disc tracks 2 and
