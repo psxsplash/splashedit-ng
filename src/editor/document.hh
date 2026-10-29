@@ -48,6 +48,8 @@ struct TextureInfo {
     // Distinct colours after reduction to the PS1's 15-bit colour, counting
     // fully transparent texels once.
     int colors15 = 0;
+    // Those colours as sorted keys (transparent = 0x10000), only when colors15 <= 16.
+    std::vector<uint32_t> colorSet;
     // VRAM taken by image + CLUT, in bytes, from splash::convertTexture.
     int vramBytes4 = 0, vramBytes8 = 0, vramBytes16 = 0;
     int vramBytesAt(splash::BitDepth d) const {

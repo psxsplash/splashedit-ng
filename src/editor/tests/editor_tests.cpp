@@ -12698,6 +12698,84 @@ void testMaterials4bpp() {
     CHECK(d.meshTextureBytes(g) == two->vramBytes8 + many->vramBytes8 - two->clutBytes8);
 }
 
+// A palette group at 4 bpp shares one 16-colour CLUT, so couldBe4bpp counts
+// the union of the group's colours: this mesh's members and the textures
+// already in that group at 4 bpp.
+void testMaterials4bppGroup() {
+    const fs::path dir = g_outDir / "materials4bppgroup";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    // Ten reds on exact 5-bit steps, from `first`; `holes` adds transparent texels.
+    auto png = [&](const char* name, int first, bool holes) {
+        splash::Image img;
+        img.width = img.height = 32;
+        img.pixels.resize(32 * 32);
+        for (size_t i = 0; i < img.pixels.size(); i++)
+            img.pixels[i] = splash::Image::Px{float(first + int(i % 10)) / 31.f, 8 / 31.f, 16 / 31.f, 1};
+        if (holes)
+            for (size_t i = 0; i < img.pixels.size(); i += 7) img.pixels[i].a = 0;
+        splash::savePng(img, dir / name);
+    };
+    png("lo.png", 0, false);      // reds 0..9
+    png("hi.png", 20, false);     // reds 20..29, disjoint from lo
+    png("mid.png", 4, false);     // reds 4..13, shares 6 with lo
+    png("hiholes.png", 20, true); // reds 20..29 plus transparent
+    splash::Mesh quad;
+    quad.positions = {{0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {1, 1, 0}};
+    quad.normals.assign(4, {0, 0, 1});
+    quad.submeshes = {{0, 1, 2}, {1, 3, 2}};
+    splash::saveMesh(quad, dir / "quad.mesh");
+
+    using BD = splash::BitDepth;
+    auto mesh = [](BD depth, std::vector<std::pair<std::string, std::string>> mats) {
+        splash::Object o = named("M");
+        o.mesh.emplace();
+        o.mesh->mesh = "quad.mesh";
+        o.mesh->bitDepth = depth;
+        for (const auto& [tex, group] : mats) {
+            o.mesh->materials.push_back({tex, {1, 1, 1, 1}, {}});
+            o.mesh->materials.back().paletteGroup = group;
+        }
+        return o;
+    };
+
+    // One mesh, its materials in one group or none.
+    {
+        splash::Scene s;
+        s.objects.push_back(mesh(BD::Bpp16, {{"lo.png", "G"}, {"hi.png", "G"}}));   // 0: 20 colours in G
+        s.objects.push_back(mesh(BD::Bpp16, {{"lo.png", ""}, {"hi.png", ""}}));     // 1: no group
+        s.objects.push_back(mesh(BD::Bpp16, {{"lo.png", "G"}, {"mid.png", "G"}}));  // 2: 14 colours in G
+        editor::Document d;
+        d.reset(s, dir);
+        for (const char* t : {"lo.png", "hi.png", "mid.png"})
+            CHECK(d.texture(t) && d.texture(t)->colors15 == 10 && d.texture(t)->colorSet.size() == 10 && !d.texture(t)->holes);
+        CHECK(!d.couldBe4bpp(*d.object({0})->mesh));  // (a)
+        CHECK(d.couldBe4bpp(*d.object({1})->mesh));   // (b)
+        CHECK(d.couldBe4bpp(*d.object({2})->mesh));   // (c)
+    }
+    // Another mesh already holds the group at 4 bpp: converting joins it.
+    auto crossMesh = [&](const char* tex, const char* group) {
+        splash::Scene s;
+        s.objects.push_back(mesh(BD::Bpp4, {{"lo.png", "G"}}));
+        s.objects.push_back(mesh(BD::Bpp16, {{tex, group}}));
+        editor::Document d;
+        d.reset(s, dir);
+        CHECK(d.texture("lo.png") && d.texture("lo.png")->colorSet.size() == 10);
+        return d.couldBe4bpp(*d.object({1})->mesh);
+    };
+    CHECK(!crossMesh("hi.png", "G"));  // (d)
+    CHECK(crossMesh("hi.png", "H"));   // (e)
+    CHECK(crossMesh("hiholes.png", "G"));  // (f): another cutout, another group
+    {
+        splash::Scene s;
+        s.objects.push_back(mesh(BD::Bpp16, {{"hiholes.png", "G"}}));
+        editor::Document d;
+        d.reset(s, dir);
+        const editor::TextureInfo* h = d.texture("hiholes.png");
+        CHECK(h && h->holes && h->colors15 == 11 && h->colorSet.size() == 11);
+    }
+}
+
 // hashSceneId matches Unity's HashSceneId: FNV-1a over the low byte of each
 // UTF-16 unit. Expected values from a Python run of that formula on
 // str.encode('utf-16-le').
@@ -17590,6 +17668,7 @@ int main(int argc, char** argv) {
     testVertexPaintMulti();
     testVertexPaintMismatch();
     testMaterials4bpp();
+    testMaterials4bppGroup();
     testUvOffsetSlots();
     testSceneNetworkId();
     testSpriteSheets();

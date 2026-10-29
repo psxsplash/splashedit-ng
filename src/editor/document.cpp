@@ -61,6 +61,10 @@ TextureInfo analyseTexture(const fs::path& file) {
             colors.insert(c5(p.r) | c5(p.g) << 5 | c5(p.b) << 10);
         }
         info.colors15 = static_cast<int>(colors.size());
+        if (info.colors15 <= 16) {
+            info.colorSet.assign(colors.begin(), colors.end());
+            std::sort(info.colorSet.begin(), info.colorSet.end());
+        }
         info.holes = splash::hasCutoutTexels(img);
         const splash::PsxTexture t4 = splash::convertTexture(img, splash::BitDepth::Bpp4, info.holes);
         const splash::PsxTexture t8 = splash::convertTexture(img, splash::BitDepth::Bpp8, info.holes);
@@ -1332,6 +1336,28 @@ bool Document::couldBe4bpp(const splash::MeshComponent& m) const {
         if (!t || t->status != AssetStatus::Ok || t->colors15 > 16) return false;
         textured++;
     }
+    // A palette group shares one CLUT at 4 bpp: its colours together must fit
+    // 16, the mesh's members and those already in the group at 4 bpp.
+    auto cutoutOf = [this](const std::string& p) -> std::optional<bool> {
+        const TextureInfo* t = texture(p);
+        if (!t || t->status != AssetStatus::Ok) return std::nullopt;
+        return t->holes;
+    };
+    std::map<std::pair<std::string, bool>, std::set<uint32_t>> groups;
+    for (const splash::Material& mat : m.materials) {
+        if (mat.texture.empty() || mat.paletteGroup.empty()) continue;
+        const TextureInfo* t = texture(mat.texture);
+        auto [it, fresh] = groups.try_emplace({mat.paletteGroup, t->holes});
+        it->second.insert(t->colorSet.begin(), t->colorSet.end());
+        if (!fresh) continue;
+        for (const std::string& p : splash::paletteGroupMembers(scene(), mat.paletteGroup, splash::BitDepth::Bpp4, t->holes, cutoutOf)) {
+            const TextureInfo* member = texture(p);
+            if (member->colorSet.empty()) return false;
+            it->second.insert(member->colorSet.begin(), member->colorSet.end());
+        }
+    }
+    for (const auto& [key, colors] : groups)
+        if (colors.size() > 16) return false;
     return textured > 0 && meshTextureBytes(m, splash::BitDepth::Bpp4) < meshTextureBytes(m);
 }
 
