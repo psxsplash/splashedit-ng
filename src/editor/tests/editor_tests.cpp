@@ -1768,6 +1768,14 @@ void testLinkPlay() {
                              "/a/framecapture.lua"});
     CHECK(editor::reduxCommand(t, "/b", "/a/framecapture.lua", "/b/console2") == want);
 
+    // The boot screen preview: no window, default settings, the BIOS's own
+    // screens, the licence disc, the output directory and its script.
+    t.bios = "/s/scph5501.bin";
+    const std::vector<std::string> preview = {"/r/pcsx-redux", "-no-ui",       "-testmode", "-safe", "-no-fastboot",
+                                              "-bios",         "/s/scph5501.bin", "-iso",   "/p/licence.cue",
+                                              "-pcdrvbase",    "/p",            "-run",      "-dofile", "/a/licencepreview.lua"};
+    CHECK(editor::licencePreviewCommand(t, "/p/licence.cue", "/p", "/a/licencepreview.lua") == preview);
+
     // Ports: a free one is not taken; one held by a listener is.
     const uint16_t port = editor::pickLinkPort();
     CHECK(port != 0);
@@ -11904,6 +11912,66 @@ void testDiscLicenceImage() {
     // Form 2: no ECC, so the EDC sits at 2348 and Form 1's EDC slot is data.
     CHECK(std::all_of(rawSector(b16, 13) + 24 + 2048, rawSector(b16, 13) + 2348, [](uint8_t v) { return v == 0; }));
     CHECK(rawSector(b16, 13)[2348] | rawSector(b16, 13)[2349] | rawSector(b16, 13)[2350] | rawSector(b16, 13)[2351]);
+
+    // The boot screen preview's disc: the licence as an exported disc has it,
+    // and an empty root (no SYSTEM.CNF), volume LICENCE.
+    splash::writeLicenceImage(lic, dir / "preview.bin");
+    std::vector<uint8_t> pv = bytesOf(dir / "preview.bin");
+    CHECK(fs::exists(dir / "preview.cue"));
+    if (pv.size() < 19 * 2352) return;
+    CHECK(std::memcmp(pv.data(), bin.data(), 12 * 2352) == 0);
+    CHECK(std::string(reinterpret_cast<const char*>(rawSector(pv, 16) + 24 + 1), 5) == "CD001");
+    CHECK(std::string(reinterpret_cast<const char*>(rawSector(pv, 16) + 24 + 40), 8) == "LICENCE ");
+    const uint8_t* rootRec = rawSector(pv, 16) + 24 + 156;
+    const uint32_t rootLba = rootRec[2] | rootRec[3] << 8 | rootRec[4] << 16 | uint32_t(rootRec[5]) << 24;
+    CHECK(rootLba < pv.size() / 2352);
+    if (rootLba >= pv.size() / 2352) return;
+    // The root holds "." and ".." only.
+    const uint8_t* rd = rawSector(pv, rootLba) + 24;
+    int records = 0;
+    for (size_t at = 0; at < 2048 && rd[at];) records++, at += rd[at];
+    CHECK(records == 2);
+    const std::string all(pv.begin(), pv.end());
+    CHECK(all.find("SYSTEM.CNF") == std::string::npos && all.find("PSX.EXE") == std::string::npos);
+}
+
+// The boot screen preview's BIOS check, screenshot decoding and capture files.
+void testLicencePreview() {
+    using namespace disctest;
+    const fs::path dir = g_outDir / "licencepreview";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    CHECK(editor::licencePreviewBiosError({}) == "no BIOS is set");
+    CHECK(editor::licencePreviewBiosError(dir / "gone.bin") == "gone.bin is not there");
+    std::vector<uint8_t> bios(512 * 1024, 0);
+    const char* sony = "Sony Computer Entertainment Inc.";
+    std::memcpy(bios.data() + 0x108, sony, std::strlen(sony));
+    writeBytes(dir / "sony.bin", bios);
+    CHECK(editor::licencePreviewBiosError(dir / "sony.bin").empty());
+    const char open[] = "PS-X Realtime Kernel OpenBios - build id %s.\0OpenBIOS";
+    std::memcpy(bios.data() + 0x7f000, open, sizeof open);
+    writeBytes(dir / "openbios.bin", bios);
+    CHECK(editor::licencePreviewBiosError(dir / "openbios.bin") == "openbios.bin is OpenBIOS");
+
+    // 16-bit 1555: red in the low bits; 24-bit: bytes as they are.
+    const std::vector<uint8_t> w16 = {0x1f, 0x00, 0xe0, 0x03, 0x00, 0x7c, 0x10, 0x84};
+    const std::vector<uint8_t> want16 = {255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 131, 0, 8, 255};
+    CHECK(editor::decodeScreenshot(w16, 2, 2) == want16);
+    CHECK(editor::decodeScreenshot(w16, 4, 1) == want16);
+    const std::vector<uint8_t> w24 = {1, 2, 3, 4, 5, 6};
+    CHECK(editor::decodeScreenshot(w24, 2, 1) == std::vector<uint8_t>({1, 2, 3, 255, 4, 5, 6, 255}));
+    CHECK(editor::decodeScreenshot(w24, 2, 2).empty() && editor::decodeScreenshot({}, 0, 0).empty());
+
+    editor::LicencePreview p;
+    std::string error;
+    CHECK(!editor::readLicencePreview(dir, p, error) && error == "no screenshot was written");
+    writeBytes(dir / "preview.err", {'n', 'o', ' ', 'g', 'p', 'u'});
+    CHECK(!editor::readLicencePreview(dir, p, error) && error == "no gpu");
+    std::ofstream(dir / "preview.txt", std::ios::binary) << "2 2 16\n";
+    writeBytes(dir / "preview.raw", w16);
+    CHECK(editor::readLicencePreview(dir, p, error) && p.width == 2 && p.height == 2 && p.rgba == want16);
+    std::ofstream(dir / "preview.txt", std::ios::binary) << "3 3 16\n";
+    CHECK(!editor::readLicencePreview(dir, p, error) && error == "preview.raw is 8 bytes, not 3 x 3 pixels");
 }
 
 // exportDisc with disc settings: volume override, licence, a bad licence.
@@ -17655,6 +17723,7 @@ int main(int argc, char** argv) {
     testDiscLicenceBuild();
     testDiscSettings();
     testDiscLicenceImage();
+    testLicencePreview();
     testDiscExportSettings();
     testAudioSizes();
     testWavInfo();

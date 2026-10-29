@@ -509,6 +509,82 @@ std::vector<std::string> reduxCommand(const PlayTools& t, const fs::path& dir, c
     return a;
 }
 
+std::vector<std::string> licencePreviewCommand(const PlayTools& t, const fs::path& cue, const fs::path& dir,
+                                               const fs::path& script) {
+    return {utf8(t.redux), "-no-ui",       "-testmode",  "-safe",     "-no-fastboot", "-bios",   utf8(t.bios),
+            "-iso",        utf8(cue),      "-pcdrvbase", utf8(dir),   "-run",         "-dofile", utf8(script)};
+}
+
+std::string licencePreviewBiosError(const fs::path& bios) {
+    if (bios.empty()) return "no BIOS is set";
+    std::error_code ec;
+    if (!fs::is_regular_file(bios, ec)) return utf8(bios.filename()) + " is not there";
+    std::ifstream in(bios, std::ios::binary);
+    const std::string bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    if (!in.eof() && in.fail()) return "cannot read " + utf8(bios.filename());
+    if (bytes.find("OpenBIOS") != std::string::npos) return utf8(bios.filename()) + " is OpenBIOS";
+    return {};
+}
+
+std::vector<uint8_t> decodeScreenshot(const std::vector<uint8_t>& raw, int w, int h) {
+    if (w <= 0 || h <= 0) return {};
+    const size_t n = size_t(w) * size_t(h);
+    std::vector<uint8_t> out;
+    if (raw.size() == n * 2) {
+        out.resize(n * 4);
+        for (size_t i = 0; i < n; i++) {
+            const unsigned d = raw[2 * i] | raw[2 * i + 1] << 8;
+            out[4 * i + 0] = uint8_t((d & 31) * 255 / 31);
+            out[4 * i + 1] = uint8_t(((d >> 5) & 31) * 255 / 31);
+            out[4 * i + 2] = uint8_t(((d >> 10) & 31) * 255 / 31);
+            out[4 * i + 3] = 255;
+        }
+    } else if (raw.size() == n * 3) {
+        out.resize(n * 4);
+        for (size_t i = 0; i < n; i++) {
+            out[4 * i + 0] = raw[3 * i];
+            out[4 * i + 1] = raw[3 * i + 1];
+            out[4 * i + 2] = raw[3 * i + 2];
+            out[4 * i + 3] = 255;
+        }
+    }
+    return out;
+}
+
+bool readLicencePreview(const fs::path& dir, LicencePreview& out, std::string& error) {
+    auto slurp = [](const fs::path& p, std::string& s) {
+        std::ifstream in(p, std::ios::binary);
+        if (!in) return false;
+        s.assign((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        return true;
+    };
+    std::string txt, raw;
+    if (!slurp(dir / "preview.txt", txt)) {
+        std::string why;
+        error = slurp(dir / "preview.err", why) && !why.empty() ? why : "no screenshot was written";
+        return false;
+    }
+    int w = 0, h = 0;
+    if (std::sscanf(txt.c_str(), "%d %d", &w, &h) != 2 || w <= 0 || h <= 0 || w > 1024 || h > 512) {
+        error = "preview.txt does not give a size";
+        return false;
+    }
+    if (!slurp(dir / "preview.raw", raw)) {
+        error = "no preview.raw";
+        return false;
+    }
+    std::vector<uint8_t> rgba = decodeScreenshot(std::vector<uint8_t>(raw.begin(), raw.end()), w, h);
+    if (rgba.empty()) {
+        error = "preview.raw is " + std::to_string(raw.size()) + " bytes, not " + std::to_string(w) + " x " +
+                std::to_string(h) + " pixels";
+        return false;
+    }
+    out.width = w;
+    out.height = h;
+    out.rgba = std::move(rgba);
+    return true;
+}
+
 bool requestCapture(const fs::path& dir, std::string* error) {
     std::error_code ec;
     for (const char* stale : {"capture.gpd", "capture.err", "capture.gpd.part"}) fs::remove(dir / stale, ec);

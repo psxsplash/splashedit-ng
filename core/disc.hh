@@ -165,6 +165,12 @@ DiscInfo writeDiscImage(const std::vector<DiscFile>& files, const std::string& v
                         const std::vector<LicenceSector>& licence = {},
                         const std::vector<std::vector<int16_t>>& tracks = {});
 
+// A disc of `licence` alone, for previewing the BIOS boot screen: the
+// writeDiscImage image with no files (so no SYSTEM.CNF: the BIOS shows the
+// licence, then stops at its shell) and the volume name LICENCE, `bin` and
+// its .cue. Throws as writeDiscImage.
+DiscInfo writeLicenceImage(const std::vector<LicenceSector>& licence, const std::filesystem::path& bin);
+
 // A bootable disc: SYSTEM.CNF, the engine as PSX.EXE, and each scene's files
 // under SCENE<i>/ as SCENE_<i>.SPK, .VRM, .SPU (and .GEO when it streams),
 // where psxsplash's CD-ROM loader opens them; scene 0 is the one the game
