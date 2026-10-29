@@ -5595,72 +5595,89 @@ static void agentMarkers(ImDrawList* dl, viewport::Ps1View& view, ImVec2 mn, ImV
     }
 }
 
+// The world bounds' corners of an object's mesh through its transform (the
+// exporter's world AABB); false without a mesh with bounds.
+static bool meshWorldBounds(const editor::Document& doc, const splash::FlatObject& fo, splash::Vec3* lo, splash::Vec3* hi) {
+    const splash::MeshComponent& mc = *fo.object->mesh;
+    if (mc.mesh.empty()) return false;
+    const std::optional<splash::Bounds>& lb = localBounds(doc, mc.mesh);
+    if (!lb) return false;
+    const splash::Vec3 a = lb->min(), b = lb->max();
+    for (int c = 0; c < 8; ++c) {
+        const splash::Vec3 p = fo.localToWorld.point({c & 1 ? b.x : a.x, c & 2 ? b.y : a.y, c & 4 ? b.z : a.z});
+        *lo = c == 0 ? p : splash::Vec3{std::min(lo->x, p.x), std::min(lo->y, p.y), std::min(lo->z, p.z)};
+        *hi = c == 0 ? p : splash::Vec3{std::max(hi->x, p.x), std::max(hi->y, p.y), std::max(hi->z, p.z)};
+    }
+    return true;
+}
+
+struct SceneBlob {
+    const splash::Object* object;
+    splash::shadow::Blob blob;
+};
+
 // Every Blob shadow as the console draws it (core/shadow.hh): a fan of eight
-// triangles on the last export's nav floor (else under the object's bounds),
-// black at the centre's darkness and clear at the rim, shrinking and fading
-// with height. Drawn over the scene rather than depth tested, and without the
-// console's fog fade. Scripted tests get one "shadow preview:" line per blob
-// and its screen box as vp.shadow.<name>.
-static void shadowOverlay(ImDrawList* dl, viewport::Ps1View& view, ImVec2 mn, ImVec2 sz, const editor::Document& doc,
-                          const std::vector<splash::FlatObject>& shown, const std::optional<splash::ExportResult>& res) {
+// triangles on the last export's nav floor, else under the object's bounds
+// and kept to the footprint of the object it stands on (the exported objects'
+// world bounds, the caster's own left out), shrinking and fading with height.
+static std::vector<SceneBlob> sceneBlobs(const editor::Document& doc, const std::vector<splash::FlatObject>& shown,
+                                         const std::optional<splash::ExportResult>& res) {
     static const std::vector<std::vector<splash::Vec3>> noOutlines;
     static const std::vector<splash::ExportStats::NavRegionInfo> noInfo;
     const bool nav = res && res->ok();
     const std::vector<std::vector<splash::Vec3>>& outlines = nav ? res->stats.navOutlines : noOutlines;
     const std::vector<splash::ExportStats::NavRegionInfo>& info = nav ? res->stats.navInfo : noInfo;
-    std::string lines;
+    auto exported = [](const splash::FlatObject& fo) {
+        return fo.activeInHierarchy && fo.object->startActive && fo.object->mesh;
+    };
+    std::vector<SceneBlob> out;
+    std::vector<std::pair<const splash::Object*, splash::shadow::SupportBox>> boxes;
+    bool boxesBuilt = false;
+    const float gte = doc.scene().settings.gteScaling > 0 ? doc.scene().settings.gteScaling : 100.f;
     for (const splash::FlatObject& fo : shown) {
-        if (!fo.activeInHierarchy || !fo.object->startActive || !fo.object->mesh) continue;
+        if (!exported(fo)) continue;
         const splash::MeshComponent& mc = *fo.object->mesh;
         if (mc.shadow != splash::ShadowMode::Blob) continue;
+        if (!boxesBuilt) {
+            boxesBuilt = true;
+            for (const splash::FlatObject& so : shown) {
+                splash::Vec3 lo, hi;
+                if (exported(so) && meshWorldBounds(doc, so, &lo, &hi)) boxes.push_back({so.object, {lo.x, hi.x, lo.z, hi.z, hi.y}});
+            }
+        }
+        std::vector<splash::shadow::SupportBox> supports;
+        for (const auto& [o, box] : boxes)
+            if (o != fo.object) supports.push_back(box);
         // The world bounds' bottom and top, as the exporter's world AABB.
         const splash::Vec3 pos = fo.localToWorld.position();
         float bottom = pos.y, top = pos.y;
-        if (!mc.mesh.empty())
-            if (const std::optional<splash::Bounds>& lb = localBounds(doc, mc.mesh)) {
-                const splash::Vec3 lo = lb->min(), hi = lb->max();
-                for (int c = 0; c < 8; ++c) {
-                    const float y = fo.localToWorld.point({c & 1 ? hi.x : lo.x, c & 2 ? hi.y : lo.y, c & 4 ? hi.z : lo.z}).y;
-                    bottom = c == 0 ? y : std::min(bottom, y);
-                    top = c == 0 ? y : std::max(top, y);
-                }
-            }
-        const splash::shadow::Blob b =
-            splash::shadow::blobFor(pos, bottom, top, mc.shadowSize, mc.shadowDarkness, outlines, info);
-        lines += "shadow preview: " + fo.object->name + " floor " +
+        splash::Vec3 lo, hi;
+        if (meshWorldBounds(doc, fo, &lo, &hi)) bottom = lo.y, top = hi.y;
+        out.push_back({fo.object, splash::shadow::blobFor(pos, bottom, top, mc.shadowSize, mc.shadowDarkness, outlines, info,
+                                                          supports, splash::shadow::supportTolerance(gte))});
+    }
+    return out;
+}
+
+// The scene view draws the blobs (Ps1View::setBlobs). Scripted tests get one
+// "shadow preview:" line per blob and its screen box as vp.shadow.<name>.
+static void shadowReport(viewport::Ps1View& view, ImVec2 mn, ImVec2 sz, const std::vector<SceneBlob>& blobs) {
+    std::string lines;
+    for (const SceneBlob& sb : blobs) {
+        const splash::shadow::Blob& b = sb.blob;
+        lines += "shadow preview: " + sb.object->name + " floor " +
                  (b.region >= 0 ? "R" + std::to_string(b.region) : std::string("bounds")) + " height " + fmtFixed(b.height) +
                  " radius " + fmtFixed(b.radius) + " darkness " + std::to_string(int(std::lround(b.darkness * 255))) + "\n";
-        if (!b.visible) continue;
-        ImVec2 c, rim[splash::shadow::kRimVerts];
-        bool ok = view.project(toGl(b.centre), mn, sz, &c);
-        for (int k = 0; k < splash::shadow::kRimVerts && ok; k++) ok = view.project(toGl(b.rim[size_t(k)]), mn, sz, &rim[k]);
-        if (!ok) continue;
-        // The console's Gouraud fan, centre dark and rim clear, as nested
-        // octagons on the floor plane: ring m of kRings covers the inner
-        // (kRings - m + 1) / kRings of the radius, and its alpha brings the
-        // stacked opacity there to darkness * m / kRings / kFloor. The console
-        // subtracts the darkness, which on a floor of kFloor brightness takes
-        // away darkness / kFloor of it (and saturates to black), so an alpha
-        // of darkness alone reads far lighter than the console blob.
-        constexpr int kRings = 24;
-        constexpr float kFloor = 0.5f;
-        ImVec2 lo = c, hi = c;
-        for (int k = 0; k < splash::shadow::kRimVerts; k++) {
-            lo = ImMin(lo, rim[k]);
-            hi = ImMax(hi, rim[k]);
+        if (!b.visible || !namedRectsOn()) continue;
+        ImVec2 lo, hi;
+        bool ok = view.project(toGl(b.centre), mn, sz, &lo);
+        hi = lo;
+        for (int k = 0; k < splash::shadow::kRimVerts && ok; k++) {
+            ImVec2 p;
+            ok = view.project(toGl(b.rim[size_t(k)]), mn, sz, &p);
+            lo = ImMin(lo, p), hi = ImMax(hi, p);
         }
-        float below = 0;  // opacity the rings drawn so far give the inner area
-        for (int m = 1; m <= kRings; m++) {
-            const float want = std::min(0.97f, b.darkness * float(m) / kRings / kFloor);
-            const float a = below < 1 ? 1 - (1 - want) / (1 - below) : 0;
-            below = want;
-            const float t = float(kRings - m + 1) / kRings;
-            ImVec2 ring[splash::shadow::kRimVerts];
-            for (int k = 0; k < splash::shadow::kRimVerts; k++) ring[k] = c + (rim[k] - c) * t;
-            dl->AddConvexPolyFilled(ring, splash::shadow::kRimVerts,
-                                    IM_COL32(0, 0, 0, int(std::lround(std::clamp(a, 0.f, 1.f) * 255))));
-        }
-        if (namedRectsOn()) nameRect("vp.shadow." + fo.object->name, ImRect(lo, hi));
+        if (ok) nameRect("vp.shadow." + sb.object->name, ImRect(lo, hi));
     }
     static std::string reported;
     if (namedRectsOn() && ImGui::GetFrameCount() > 1 && lines != reported) {
@@ -5973,6 +5990,31 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
     view.clean = st.viewMode == 1;
     // In pixels, so the clean view stays sharp at any UI scale or pixel density.
     const ImVec2 fb = ImGui::GetIO().DisplayFramebufferScale;
+    // While the timeline previews a pose, outlines and markers follow the
+    // scene as drawn (same flatten order); gizmos, picking and every edit
+    // keep reading the document's own transforms.
+    view.sync();
+    std::vector<splash::FlatObject> flats = splash::flatten(doc.scene());
+    const splash::Scene* drawn = view.drawnScene();
+    const bool previewing = drawn && drawn != &doc.scene();
+    const std::vector<splash::FlatObject> shown = previewing ? splash::flatten(*drawn) : flats;
+    // Blob shadows on the floor, drawn by the view in this frame's render,
+    // depth tested so the objects in front of them stay as they are.
+    std::vector<SceneBlob> blobs;
+    if (st.gizmos) blobs = sceneBlobs(doc, shown, st.live.result());
+    {
+        static_assert(splash::shadow::kRimVerts == 8, "Ps1View::Blob has eight rim points");
+        std::vector<viewport::Ps1View::Blob> drawnBlobs;
+        for (const SceneBlob& sb : blobs) {
+            if (!sb.blob.visible) continue;
+            viewport::Ps1View::Blob vb;
+            vb.centre = toGl(sb.blob.centre);
+            for (int k = 0; k < splash::shadow::kRimVerts; k++) vb.rim[k] = toGl(sb.blob.rim[size_t(k)]);
+            vb.darkness = sb.blob.darkness;
+            drawnBlobs.push_back(vb);
+        }
+        view.setBlobs(std::move(drawnBlobs));
+    }
     unsigned tex = view.render((int)(r.GetWidth() * fb.x), (int)(r.GetHeight() * fb.y), 240);
     ui::addTextureImageRounded(dl, (ImTextureID)(intptr_t)tex, r.Min, r.Max, ImVec2(0, 1), ImVec2(1, 0), IM_COL32_WHITE, radius::window);
 
@@ -5980,14 +6022,7 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
     nameRect("vp.view", r);
     // Overlays follow the camera, so keep them inside the panel.
     ImGui::PushClipRect(r.Min, r.Max, true);
-    std::vector<splash::FlatObject> flats = splash::flatten(doc.scene());
     const splash::Object* sel = doc.selected();
-    // While the timeline previews a pose, outlines and markers follow the
-    // scene as drawn (same flatten order); gizmos, picking and every edit
-    // keep reading the document's own transforms.
-    const splash::Scene* drawn = view.drawnScene();
-    const bool previewing = drawn && drawn != &doc.scene();
-    const std::vector<splash::FlatObject> shown = previewing ? splash::flatten(*drawn) : flats;
 
     // The mouse goes to the first item that claims it, so items are submitted
     // toolbars first, then the gizmo, then scene markers, then the viewport
@@ -6293,11 +6328,8 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
         editor::endPaintStroke(st.paintStroke, doc);
     }
 
-    // Blob shadows on the floor, under the selection outline and the gizmo.
-    if (st.gizmos) {
-        dl->ChannelsSetCurrent(kScene);
-        shadowOverlay(dl, view, mn, sz, doc, shown, st.live.result());
-    }
+    // The blob shadows the view drew, for scripted tests.
+    if (st.gizmos) shadowReport(view, mn, sz, blobs);
 
     // Selection outline and the tool's gizmo follow the selected object.
     // The rest of a multi-selection is outlined too, a little fainter (#263).

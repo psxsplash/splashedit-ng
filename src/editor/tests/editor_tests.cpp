@@ -15442,6 +15442,45 @@ void testShadows() {
     // No nav: flat under the bounds, whole.
     splash::shadow::Blob flat = splash::shadow::blobFor({0, 0, 0}, 3.f, 4.f, 0.5f, 100, {}, {});
     CHECK(flat.region < 0 && flat.centre.y == 3.f && flat.radius == 0.5f && flat.darkness == 1.f && flat.visible);
+    // On the bounds floor the rim stays on the footprint of the first object
+    // whose top is within the tolerance of the caster's bottom (two fixed-point
+    // units: 2 * 100 / 4096 m at gteScaling 100) and whose footprint holds the
+    // centre. A 1.5 m blob at (0.2, 1, 1) on a 2 x 1.5 m table top at Y 1.
+    {
+        using splash::shadow::SupportBox;
+        const float tol = splash::shadow::supportTolerance(100.f);
+        CHECK(std::fabs(tol - 0.048828125f) < 1e-7f);
+        const SupportBox table{-1, 1, 0.25f, 1.75f, 1.f};
+        auto blob = [&](const std::vector<SupportBox>& boxes) {
+            return splash::shadow::blobFor({0.2f, 1.3f, 1.f}, 1.f, 1.6f, 1.5f, 60, {}, {}, boxes, tol);
+        };
+        auto within = [](const splash::shadow::Blob& b, const SupportBox& s) {
+            for (const splash::Vec3& p : b.rim)
+                if (p.x < s.minX || p.x > s.maxX || p.z < s.minZ || p.z > s.maxZ || p.y != 1.f) return false;
+            return true;
+        };
+        const splash::shadow::Blob free = blob({});
+        CHECK(free.region < 0 && std::fabs(free.rim[0].x - 1.7f) < 1e-5f && std::fabs(free.rim[6].z + 0.5f) < 1e-5f);
+        const splash::shadow::Blob on = blob({table});
+        CHECK(within(on, table) && on.rim[0].x == 1.f && on.rim[6].z == 0.25f && on.rim[2].z == 1.75f &&
+              on.radius == free.radius && on.darkness == free.darkness && on.centre.x == 0.2f && on.centre.z == 1.f);
+        // A top just inside the tolerance still holds it; just outside, or a
+        // footprint without the centre, does not; the first match wins.
+        CHECK(within(blob({{-1, 1, 0.25f, 1.75f, 1.f + 0.048f}}), table));
+        const splash::shadow::Blob high = blob({{-1, 1, 0.25f, 1.75f, 1.f + 0.05f}});
+        CHECK(std::fabs(high.rim[0].x - 1.7f) < 1e-5f && std::fabs(high.rim[6].z + 0.5f) < 1e-5f);
+        const splash::shadow::Blob aside = blob({{0.3f, 2, 0.25f, 1.75f, 1.f}});
+        CHECK(std::fabs(aside.rim[0].x - 1.7f) < 1e-5f);
+        const SupportBox small{-0.5f, 0.5f, 0.5f, 1.5f, 1.f};
+        CHECK(within(blob({{-1, 1, 0.25f, 1.75f, 1.2f}, small, table}), small));
+        // On a nav floor the rim follows the nav, not the boxes.
+        std::vector<std::vector<splash::Vec3>> sq = {{{-2, 1, -1}, {2, 1, -1}, {2, 1, 3}, {-2, 1, 3}}};
+        std::vector<splash::ExportStats::NavRegionInfo> in(1);
+        in[0].planeD = 1.f;
+        const splash::shadow::Blob navd =
+            splash::shadow::blobFor({0.2f, 1.3f, 1.f}, 1.f, 1.6f, 1.5f, 60, sq, in, {table}, tol);
+        CHECK(navd.region == 0 && std::fabs(navd.rim[0].x - 1.7f) < 1e-5f && std::fabs(navd.rim[6].z + 0.5f) < 1e-5f);
+    }
 }
 
 void testGpuRaster() {
