@@ -11673,6 +11673,95 @@ void testDiscLicenceParse() {
     CHECK(splash::parseLicence(std::vector<uint8_t>(28032 + 1, 0), big).empty() && big.find("28033") != std::string::npos);
 }
 
+// buildLicence from the psxsplash licence's own TMD and text lines gives the
+// embedded licence back byte for byte; bad TMDs and lines are refused.
+void testDiscLicenceBuild() {
+    const std::vector<uint8_t>& lic = splash::psxsplashLicence();
+    std::string error;
+    std::vector<splash::LicenceSector> sectors = splash::parseLicence(lic, error);
+    CHECK(sectors.size() == 12);
+    std::vector<uint8_t> tmd = splash::licenceTmd(sectors);
+    CHECK(tmd.size() == 14336);
+    splash::TmdCheck c = splash::checkLicenceTmd(tmd);
+    CHECK(c.ok && c.error.empty() && c.triangles == 601);
+    const std::string top(reinterpret_cast<const char*>(sectors[4].data), 32);
+    const std::string bottom(reinterpret_cast<const char*>(sectors[4].data + 32), 32);
+    std::vector<uint8_t> built;
+    CHECK(splash::buildLicence(tmd, top, bottom, built, error) && error.empty());
+    CHECK(built.size() == lic.size());
+    bool same = built == lic;
+    if (!same && built.size() == lic.size())
+        for (size_t i = 0; i < lic.size(); i++)
+            if (built[i] != lic[i]) {
+                std::fprintf(stderr, "built licence differs at %zu: 0x%02x, the embedded one 0x%02x\n", i, built[i],
+                             lic[i]);
+                break;
+            }
+    CHECK(same);
+    std::pair<std::string, std::string> text = splash::licenceText(sectors);
+    CHECK(text.first == "     Created wit        h");
+    CHECK(text.second == "                psxsplash");
+    // Trimmed lines build the same licence (buildLicence pads with spaces).
+    std::vector<uint8_t> trimmed;
+    CHECK(splash::buildLicence(tmd, text.first, text.second, trimmed, error) && trimmed == lic);
+    CHECK(splash::licenceTmd({}).empty() && splash::licenceText({}).first.empty());
+
+    // Refusals, each naming its check; `out` is left alone.
+    auto refused = [&](const std::vector<uint8_t>& t, const std::string& a, const std::string& b, const char* why) {
+        std::vector<uint8_t> out = {1, 2, 3};
+        std::string e;
+        bool ok = splash::buildLicence(t, a, b, out, e);
+        if (ok || e.find(why) == std::string::npos || out.size() != 3)
+            std::fprintf(stderr, "licence build: expected refusal with \"%s\", got \"%s\"\n", why, e.c_str());
+        return !ok && e.find(why) != std::string::npos && out.size() == 3;
+    };
+    std::vector<uint8_t> magic = tmd;
+    magic[0] = 0x40;
+    CHECK(refused(magic, "a", "b", "0x41"));
+    std::vector<uint8_t> big = tmd;
+    big.push_back(0);
+    CHECK(refused(big, "a", "b", "14337"));
+    CHECK(refused(std::vector<uint8_t>(12, 0), "a", "b", " 12 bytes"));
+    std::vector<uint8_t> mode = tmd;
+    mode[12 + 28 + 3] = 0x21;  // the first primitive's mode
+    CHECK(refused(mode, "a", "b", "mode 0x21"));
+    std::vector<uint8_t> past = tmd;
+    past[12 + 7] = 0x10;  // n_vert far past the end
+    CHECK(refused(past, "a", "b", "vertex table"));
+    CHECK(refused(tmd, std::string(33, 'x'), "b", "Top line: the line is 33 bytes"));
+    CHECK(refused(tmd, "a", "caf\xe9", "Bottom line: byte 4 is 0xe9"));
+    CHECK(refused(tmd, "be\x07l", "b", "byte 3 is 0x07"));
+    CHECK(splash::licenceLineError(std::string(32, '~')).empty() && splash::licenceLineError("").empty());
+
+    // A TMD smaller than one sector: one triangle, three vertices, one normal.
+    std::vector<uint8_t> small;
+    auto u32 = [&](uint32_t v) {
+        for (int k = 0; k < 4; k++) small.push_back(uint8_t(v >> (8 * k)));
+    };
+    u32(0x41), u32(0), u32(1);
+    u32(28 + 16), u32(3), u32(28 + 16 + 24), u32(1), u32(28), u32(1), u32(0);
+    small.insert(small.end(), {4, 3, 0x20, 0x20, 0xff, 0xff, 0xff, 0x20, 0, 0, 0, 0, 1, 0, 2, 0});
+    small.resize(small.size() + 24 + 8, 0x11);
+    CHECK(small.size() == 88);
+    splash::TmdCheck sc = splash::checkLicenceTmd(small);
+    CHECK(sc.ok && sc.triangles == 1);
+    std::vector<uint8_t> sb;
+    CHECK(splash::buildLicence(small, "HELLO", "WORLD", sb, error) && sb.size() == 28032);
+    const uint8_t* s5 = sb.data() + 5 * 2336 + 8;
+    CHECK(std::memcmp(s5, small.data(), small.size()) == 0);
+    // Past the TMD's end, and every later sector, is the filler sectors 0-3 have.
+    const uint8_t* filler = lic.data() + 8;
+    CHECK(std::memcmp(s5 + 88, filler + 88, 2048 - 88) == 0);
+    bool rest = true;
+    for (int i = 6; i < 12; i++) rest = rest && std::memcmp(sb.data() + i * 2336 + 8, filler, 2048) == 0;
+    CHECK(rest);
+    const uint8_t* s4 = sb.data() + 4 * 2336 + 8;
+    CHECK(std::memcmp(s4, "HELLO                           WORLD                           \n", 65) == 0);
+    CHECK(std::memcmp(s4 + 65, filler + 65, 2048 - 65) == 0);
+    std::vector<splash::LicenceSector> back = splash::parseLicence(sb, error);
+    CHECK(splash::licenceText(back) == std::make_pair(std::string("HELLO"), std::string("WORLD")));
+}
+
 // disc.json, and resolving a licence by name, by relative path and by a bad file.
 void testDiscSettings() {
     using namespace disctest;
@@ -17485,6 +17574,7 @@ int main(int argc, char** argv) {
     testLoaderPack();
     testExportCanvasDefaultFont();
     testDiscLicenceParse();
+    testDiscLicenceBuild();
     testDiscSettings();
     testDiscLicenceImage();
     testDiscExportSettings();
