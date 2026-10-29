@@ -57,9 +57,20 @@ struct TmdCheck {
 };
 TmdCheck checkLicenceTmd(const std::vector<uint8_t>& tmd);
 
-// "" when `line` can be a licence text line (at most 32 bytes of printable
-// ASCII, 0x20-0x7E), else why not.
-std::string licenceLineError(const std::string& line);
+// "" when `line` can be a licence text line (at most `maxLen` bytes of
+// printable ASCII, 0x20-0x7E), else why not.
+std::string licenceLineError(const std::string& line, size_t maxLen = 32);
+
+// The region a licence's layout is for. Japan: filler in sectors 0-3 and
+// around the text, the text ended by '\n'. America and Europe (retail discs
+// of both lay out the same): zeros in sectors 0-3 and after the text, the
+// bottom line up to 38 bytes and ended by 0x00.
+enum class LicenceRegion { Japan, America, Europe };
+const char* licenceRegionName(LicenceRegion region);  // "japan", "america", "europe"
+bool parseLicenceRegion(const std::string& name, LicenceRegion& region);
+// Japan when sector 0's data starts with '0' (the filler), else America:
+// America and Europe licences cannot be told apart.
+LicenceRegion licenceRegionOf(const std::vector<LicenceSector>& sectors);
 
 // A 12 x 2336-byte licence (28032 bytes) as SPLASHLICENSE.DAT is laid out.
 // Every sector: subheader 00 00 08 00 00 00 08 00, 2048 data bytes, 280 zero
@@ -67,15 +78,19 @@ std::string licenceLineError(const std::string& line);
 // data[0..31] `top`, data[32..63] `bottom` (each space-padded to 32), and
 // data[64] a '\n' after the 64 text bytes, as SPLASHLICENSE.DAT has it.
 // Sectors 5-11: `tmd` in consecutive 2048-byte chunks; data past its end
-// stays filler. Returns false with `error` set (from checkLicenceTmd or
-// licenceLineError, "Top line: " / "Bottom line: " prefixed) and `out`
-// untouched when a check fails.
+// stays filler. That is the Japan layout; America and Europe instead have
+// sectors 0-3 data all zero and sector 4 data[0..31] `top` (space-padded),
+// then `bottom` from data[32] (up to 38 bytes, space-padded to 32 when
+// shorter), then zeros to the end of the sector, no '\n'. Returns false
+// with `error` set (from checkLicenceTmd or licenceLineError, "Top line: " /
+// "Bottom line: " prefixed) and `out` untouched when a check fails.
 bool buildLicence(const std::vector<uint8_t>& tmd, const std::string& top, const std::string& bottom,
-                  std::vector<uint8_t>& out, std::string& error);
+                  std::vector<uint8_t>& out, std::string& error, LicenceRegion region = LicenceRegion::Japan);
 
 // What buildLicence put in a licence: the data of sectors 5-11 (14336
 // bytes, the TMD and whatever follows it), and sector 4's data[0..31] and
-// [32..63] with trailing spaces trimmed. Both empty with fewer than 12 sectors.
+// the bottom line from data[32] to the first '\n' or 0x00 (at most 38
+// bytes), each with trailing spaces trimmed. Both empty with fewer than 12 sectors.
 std::vector<uint8_t> licenceTmd(const std::vector<LicenceSector>& sectors);
 std::pair<std::string, std::string> licenceText(const std::vector<LicenceSector>& sectors);
 

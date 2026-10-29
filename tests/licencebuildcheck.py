@@ -3,9 +3,11 @@
 # Bottom line, a status line, Build and Cancel), prefilled with the psxsplash
 # licence's text; the lines are replaced with HELLO and WORLD and Build writes
 # <project>/custom-licence.dat (12 x 2336 bytes, the lines space-padded at the
-# start of sector 4's data) and makes it the licence in disc.json. Cancel
-# closes the rows and writes nothing. While open the editor prints
-# 'disc: licence build "<top>" "<bottom>" <status>' whenever it changes.
+# start of sector 4's data) and makes it the licence in disc.json. Region
+# America builds the America layout (sectors 0-3 zero, no '\n' after the
+# text). Cancel closes the rows and writes nothing. While open the editor
+# prints 'disc: licence build <region> "<top>" "<bottom>" <status>' whenever
+# it changes.
 # usage: python3 licencebuildcheck.py <splashedit> [<builder.png>]   (needs a display: xvfb-run -a)
 import json, os, shutil, subprocess, sys, tempfile
 
@@ -19,7 +21,7 @@ ENV = dict(os.environ, SPLASHEDIT_REDUX='/nonexistent/pcsx-redux', SPLASHEDIT_PS
 # start) into view at 1600x960, as discsettingscheck.py does.
 FOLDS = ['--click', '@s_sequences', '--wait', '3', '--click', '@s_rendering', '--wait', '3', '--click', '@s_loading', '--wait', '3',
          '--click', '@s_vram', '--wait', '5']
-BUILDER = ('disc.licence.tmd', 'disc.licence.top', 'disc.licence.bottom', 'disc.licence.build', 'disc.licence.cancel')
+BUILDER = ('disc.licence.tmd', 'disc.licence.region', 'disc.licence.top', 'disc.licence.bottom', 'disc.licence.build', 'disc.licence.cancel')
 
 
 def check(name, ok, detail=''):
@@ -78,9 +80,9 @@ project, discs, lines, controls = run(
     click('disc.licence.build', '5'))
 builds = [l for l in discs if l.startswith('disc: licence build ')]
 check('the builder opens prefilled with the psxsplash text and logo',
-      bool(builds) and builds[0] == 'disc: licence build "     Created wit        h" "                psxsplash" '
+      bool(builds) and builds[0] == 'disc: licence build japan "     Created wit        h" "                psxsplash" '
                                     'TMD ok, 601 triangles', builds[:1])
-check('the typed lines reach the builder', 'disc: licence build "HELLO" "WORLD" TMD ok, 601 triangles' in builds, builds)
+check('the typed lines reach the builder', 'disc: licence build japan "HELLO" "WORLD" TMD ok, 601 triangles' in builds, builds)
 data = disc_json(project)
 check('Build makes custom-licence.dat the licence in disc.json', (data or {}).get('licence') == 'custom-licence.dat', data)
 check('the licence change is printed', 'disc: licence custom-licence.dat' in discs, discs)
@@ -95,6 +97,24 @@ check('Build closes the rows', not any(n in controls for n in BUILDER),
 check('the builder screenshot was taken', os.path.exists(shot), shot)
 if shot_out and os.path.exists(shot):
     shutil.copyfile(shot, shot_out)
+
+# Region America: the same lines build the America layout, sector 0's data
+# zero and no '\n' at sector 4's data[64].
+project, discs, lines, controls = run(
+    OPEN +
+    click('disc.licence.region') + click('disc.licence.region/America') +
+    click('disc.licence.top') + ['--text', 'HELLO', '--wait', '3'] +
+    click('disc.licence.bottom') + ['--text', 'WORLD', '--wait', '3'] +
+    click('disc.licence.build', '5'))
+builds = [l for l in discs if l.startswith('disc: licence build ')]
+check('America reaches the builder', 'disc: licence build america "HELLO" "WORLD" TMD ok, 601 triangles' in builds, builds)
+lic_path = os.path.join(project, 'custom-licence.dat')
+lic = open(lic_path, 'rb').read() if os.path.exists(lic_path) else b''
+check('the America licence is 28032 bytes', len(lic) == 28032, len(lic))
+check('the America licence has sector 0 data zero', lic[8:8 + 2048] == bytes(2048), lic[8:24])
+s4 = lic[4 * 2336 + 8:4 * 2336 + 8 + 2048]
+check('the America licence has no newline after the text', len(s4) == 2048 and s4[64] != 0x0a and
+      s4[:64] == b'HELLO'.ljust(32) + b'WORLD'.ljust(32) and s4[64:] == bytes(2048 - 64), s4[60:72])
 
 # Cancel closes the rows and writes nothing.
 project, discs, lines, controls = run(OPEN +

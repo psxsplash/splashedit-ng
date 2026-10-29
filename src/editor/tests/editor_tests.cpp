@@ -11681,6 +11681,66 @@ void testDiscLicenceParse() {
     CHECK(splash::parseLicence(std::vector<uint8_t>(28032 + 1, 0), big).empty() && big.find("28033") != std::string::npos);
 }
 
+// The America/Europe licence layout: zeros in sectors 0-3 and after the
+// text, a bottom line of up to 38 bytes, no '\n'; Japan stays the default.
+void testDiscLicenceRegion() {
+    std::string error;
+    std::vector<splash::LicenceSector> ps = splash::parseLicence(splash::psxsplashLicence(), error);
+    const std::vector<uint8_t> tmd = splash::licenceTmd(ps);
+    CHECK(splash::licenceRegionOf(ps) == splash::LicenceRegion::Japan);
+    const std::string usBottom = "Sony Computer Entertainment Amer  ica ";
+    CHECK(usBottom.size() == 38);
+    // Sectors 0-3 data zero, no '\n' in sectors 0-4, sector 4 the top line
+    // space-padded to 32, `bottom` from [32], zeros after it.
+    auto westLayout = [&](const std::vector<uint8_t>& b, const std::string& bottom) {
+        if (b.size() != 28032) return false;
+        bool ok = true;
+        for (size_t i = 0; i < 5; i++)
+            for (size_t k = 0; k < 2048; k++) {
+                const uint8_t v = b[i * 2336 + 8 + k];
+                ok = ok && v != '\n' && (i == 4 || v == 0);
+            }
+        const uint8_t* s4 = b.data() + 4 * 2336 + 8;
+        ok = ok && std::memcmp(s4, "HELLO                           ", 32) == 0 &&
+             std::memcmp(s4 + 32, bottom.data(), bottom.size()) == 0;
+        for (size_t k = 32 + bottom.size(); k < 2048; k++) ok = ok && s4[k] == 0;
+        return ok;
+    };
+    for (splash::LicenceRegion r : {splash::LicenceRegion::America, splash::LicenceRegion::Europe}) {
+        std::vector<uint8_t> b, w, jp;
+        CHECK(splash::buildLicence(tmd, "HELLO", usBottom, b, error, r) && westLayout(b, usBottom));
+        // A short bottom line is space-padded to 32, then zeros.
+        CHECK(splash::buildLicence(tmd, "HELLO", "WORLD", w, error, r) && westLayout(w, "WORLD                           "));
+        std::vector<splash::LicenceSector> back = splash::parseLicence(b, error);
+        CHECK(splash::licenceText(back) == std::make_pair(std::string("HELLO"), std::string("Sony Computer Entertainment Amer  ica")));
+        CHECK(back.size() == 12 && splash::licenceRegionOf(back) == splash::LicenceRegion::America);
+        std::vector<splash::LicenceSector> wback = splash::parseLicence(w, error);
+        CHECK(splash::licenceText(wback) == std::make_pair(std::string("HELLO"), std::string("WORLD")));
+        CHECK(wback.size() == 12 && splash::licenceRegionOf(wback) == splash::LicenceRegion::America);
+        // The logo sectors are the same as Japan's.
+        CHECK(splash::buildLicence(tmd, "HELLO", "WORLD", jp, error) && w.size() == jp.size() &&
+              std::memcmp(jp.data() + 5 * 2336, w.data() + 5 * 2336, 7 * 2336) == 0);
+    }
+    std::vector<uint8_t> out;
+    CHECK(!splash::buildLicence(tmd, "a", std::string(39, 'x'), out, error, splash::LicenceRegion::America) &&
+          error.find("Bottom line: the line is 39 bytes; at most 38") != std::string::npos);
+    CHECK(!splash::buildLicence(tmd, "a", std::string(33, 'x'), out, error) &&
+          error.find("Bottom line: the line is 33 bytes; at most 32") != std::string::npos);
+    CHECK(!splash::buildLicence(tmd, std::string(33, 'x'), "b", out, error, splash::LicenceRegion::Europe) &&
+          error.find("Top line: the line is 33 bytes") != std::string::npos);
+    CHECK(splash::buildLicence(tmd, "a", "b", out, error, splash::LicenceRegion::Japan) && out[8] == '0' &&
+          out[4 * 2336 + 8 + 64] == '\n');
+    std::vector<uint8_t> jpSame;
+    CHECK(splash::buildLicence(tmd, splash::licenceText(ps).first, splash::licenceText(ps).second, jpSame, error,
+                               splash::LicenceRegion::Japan) && jpSame == splash::psxsplashLicence());
+    splash::LicenceRegion r = splash::LicenceRegion::Japan;
+    CHECK(splash::parseLicenceRegion("america", r) && r == splash::LicenceRegion::America);
+    CHECK(splash::parseLicenceRegion("europe", r) && r == splash::LicenceRegion::Europe);
+    CHECK(splash::parseLicenceRegion("japan", r) && r == splash::LicenceRegion::Japan);
+    CHECK(!splash::parseLicenceRegion("usa", r) && !splash::parseLicenceRegion("America", r) && r == splash::LicenceRegion::Japan);
+    CHECK(std::string(splash::licenceRegionName(splash::LicenceRegion::Europe)) == "europe");
+}
+
 // buildLicence from the psxsplash licence's own TMD and text lines gives the
 // embedded licence back byte for byte; bad TMDs and lines are refused.
 void testDiscLicenceBuild() {
@@ -17721,6 +17781,7 @@ int main(int argc, char** argv) {
     testExportCanvasDefaultFont();
     testDiscLicenceParse();
     testDiscLicenceBuild();
+    testDiscLicenceRegion();
     testDiscSettings();
     testDiscLicenceImage();
     testLicencePreview();

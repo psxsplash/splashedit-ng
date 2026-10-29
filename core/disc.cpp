@@ -287,7 +287,7 @@ namespace {
 
 constexpr size_t kLicenceSectors = 12, kLicenceStride = 2336, kTmdFirst = 5;
 constexpr size_t kTmdMax = (kLicenceSectors - kTmdFirst) * kSector;  // 14336
-constexpr size_t kLineMax = 32;
+constexpr size_t kLineMax = 32, kBottomMaxWest = 38;  // the America/Europe bottom line runs to data[69]
 
 uint32_t rd32(const uint8_t* p) { return p[0] | p[1] << 8 | p[2] << 16 | uint32_t(p[3]) << 24; }
 
@@ -338,9 +338,9 @@ TmdCheck checkLicenceTmd(const std::vector<uint8_t>& tmd) {
     return r;
 }
 
-std::string licenceLineError(const std::string& line) {
-    if (line.size() > kLineMax)
-        return "the line is " + std::to_string(line.size()) + " bytes; at most " + std::to_string(kLineMax);
+std::string licenceLineError(const std::string& line, size_t maxLen) {
+    if (line.size() > maxLen)
+        return "the line is " + std::to_string(line.size()) + " bytes; at most " + std::to_string(maxLen);
     for (size_t i = 0; i < line.size(); i++) {
         uint8_t c = uint8_t(line[i]);
         if (c < 0x20 || c > 0x7e) {
@@ -352,8 +352,30 @@ std::string licenceLineError(const std::string& line) {
     return "";
 }
 
+const char* licenceRegionName(LicenceRegion region) {
+    switch (region) {
+        case LicenceRegion::America: return "america";
+        case LicenceRegion::Europe: return "europe";
+        default: return "japan";
+    }
+}
+
+bool parseLicenceRegion(const std::string& name, LicenceRegion& region) {
+    for (LicenceRegion r : {LicenceRegion::Japan, LicenceRegion::America, LicenceRegion::Europe})
+        if (name == licenceRegionName(r)) {
+            region = r;
+            return true;
+        }
+    return false;
+}
+
+LicenceRegion licenceRegionOf(const std::vector<LicenceSector>& sectors) {
+    return !sectors.empty() && sectors[0].data[0] == '0' ? LicenceRegion::Japan : LicenceRegion::America;
+}
+
 bool buildLicence(const std::vector<uint8_t>& tmd, const std::string& top, const std::string& bottom,
-                  std::vector<uint8_t>& out, std::string& error) {
+                  std::vector<uint8_t>& out, std::string& error, LicenceRegion region) {
+    const bool japan = region == LicenceRegion::Japan;
     TmdCheck c = checkLicenceTmd(tmd);
     if (!c.ok) {
         error = c.error;
@@ -363,7 +385,7 @@ bool buildLicence(const std::vector<uint8_t>& tmd, const std::string& top, const
         error = "Top line: " + e;
         return false;
     }
-    if (std::string e = licenceLineError(bottom); !e.empty()) {
+    if (std::string e = licenceLineError(bottom, japan ? kLineMax : kBottomMaxWest); !e.empty()) {
         error = "Bottom line: " + e;
         return false;
     }
@@ -373,12 +395,12 @@ bool buildLicence(const std::vector<uint8_t>& tmd, const std::string& top, const
         const uint8_t sub[8] = {0, 0, kSubmodeData, 0, 0, 0, kSubmodeData, 0};
         std::memcpy(s, sub, 8);
         uint8_t* data = s + 8;
-        licenceFiller(data);
+        if (japan || i >= kTmdFirst) licenceFiller(data);
         if (i == 4) {
             std::memset(data, ' ', 2 * kLineMax);
             std::memcpy(data, top.data(), top.size());
             std::memcpy(data + kLineMax, bottom.data(), bottom.size());
-            data[2 * kLineMax] = '\n';
+            if (japan) data[2 * kLineMax] = '\n';
         } else if (i >= kTmdFirst) {
             size_t from = (i - kTmdFirst) * kSector;
             if (from < tmd.size()) std::memcpy(data, tmd.data() + from, std::min(kSector, tmd.size() - from));
@@ -397,12 +419,15 @@ std::vector<uint8_t> licenceTmd(const std::vector<LicenceSector>& sectors) {
 
 std::pair<std::string, std::string> licenceText(const std::vector<LicenceSector>& sectors) {
     if (sectors.size() < kLicenceSectors) return {};
-    auto line = [&](size_t at) {
-        std::string s(reinterpret_cast<const char*>(sectors[4].data + at), kLineMax);
+    auto line = [&](size_t at, size_t max) {
+        const char* p = reinterpret_cast<const char*>(sectors[4].data + at);
+        size_t n = 0;
+        while (n < max && p[n] != '\n' && p[n] != 0) n++;
+        std::string s(p, n);
         while (!s.empty() && s.back() == ' ') s.pop_back();
         return s;
     };
-    return {line(0), line(kLineMax)};
+    return {line(0, kLineMax), line(kLineMax, kBottomMaxWest)};
 }
 
 DiscSettings readDiscSettings(const fs::path& file) {
