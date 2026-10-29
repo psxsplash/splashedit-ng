@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdio>
 #include <cstring>
 #include <ctime>
 #include <fstream>
@@ -280,6 +281,128 @@ std::vector<LicenceSector> parseLicence(const std::vector<uint8_t>& bytes, std::
 const std::vector<uint8_t>& psxsplashLicence() {
     static const std::vector<uint8_t> bytes(std::begin(kPsxsplashLicence), std::end(kPsxsplashLicence));
     return bytes;
+}
+
+namespace {
+
+constexpr size_t kLicenceSectors = 12, kLicenceStride = 2336, kTmdFirst = 5;
+constexpr size_t kTmdMax = (kLicenceSectors - kTmdFirst) * kSector;  // 14336
+constexpr size_t kLineMax = 32;
+
+uint32_t rd32(const uint8_t* p) { return p[0] | p[1] << 8 | p[2] << 16 | uint32_t(p[3]) << 24; }
+
+// The licence data filler: 32 lines of 63 '0' and '\n', 2048 bytes.
+void licenceFiller(uint8_t* data) {
+    for (size_t i = 0; i < kSector; i++) data[i] = (i % 64 == 63) ? '\n' : '0';
+}
+
+}  // namespace
+
+TmdCheck checkLicenceTmd(const std::vector<uint8_t>& tmd) {
+    TmdCheck r;
+    const size_t n = tmd.size();
+    auto fail = [&](std::string why) {
+        r.error = "TMD: " + why;
+        return r;
+    };
+    if (n < 13 || n > kTmdMax)
+        return fail("the file is " + std::to_string(n) + " bytes; a licence logo is 13 to " +
+                    std::to_string(kTmdMax) + " bytes");
+    const uint8_t* p = tmd.data();
+    if (rd32(p) != 0x41) return fail("not a TMD file (id is not 0x41)");
+    if (rd32(p + 4) != 0) return fail("flags are not 0");
+    if (rd32(p + 8) != 1) return fail(std::to_string(rd32(p + 8)) + " objects; a licence logo has 1");
+    if (n < 12 + 28) return fail("the object table runs past the end of the file");
+    const uint8_t* o = p + 12;
+    const uint64_t vertTop = rd32(o), nVert = rd32(o + 4), normalTop = rd32(o + 8), nNormal = rd32(o + 12),
+                   primTop = rd32(o + 16), nPrim = rd32(o + 20);
+    const uint64_t body = n - 12;  // offsets are from the object table
+    if (vertTop + nVert * 8 > body) return fail("the vertex table runs past the end of the file");
+    if (normalTop + nNormal * 8 > body) return fail("the normal table runs past the end of the file");
+    uint64_t at = primTop;
+    for (uint64_t i = 0; i < nPrim; i++) {
+        if (at + 4 > body) return fail("primitive " + std::to_string(i) + " runs past the end of the file");
+        const uint8_t* h = o + at;
+        const uint8_t ilen = h[1], mode = h[3];
+        if (mode != 0x20 || ilen != 3) {
+            char b[96];
+            std::snprintf(b, sizeof b, "primitive %llu is mode 0x%02x ilen %u; a licence logo is flat triangles (0x20, 3)",
+                          (unsigned long long)i, mode, ilen);
+            return fail(b);
+        }
+        at += 4 + uint64_t(ilen) * 4;
+        if (at > body) return fail("primitive " + std::to_string(i) + " runs past the end of the file");
+    }
+    r.ok = true;
+    r.triangles = int(nPrim);
+    return r;
+}
+
+std::string licenceLineError(const std::string& line) {
+    if (line.size() > kLineMax)
+        return "the line is " + std::to_string(line.size()) + " bytes; at most " + std::to_string(kLineMax);
+    for (size_t i = 0; i < line.size(); i++) {
+        uint8_t c = uint8_t(line[i]);
+        if (c < 0x20 || c > 0x7e) {
+            char b[96];
+            std::snprintf(b, sizeof b, "byte %zu is 0x%02x; only printable ASCII (0x20-0x7E) shows", i + 1, c);
+            return b;
+        }
+    }
+    return "";
+}
+
+bool buildLicence(const std::vector<uint8_t>& tmd, const std::string& top, const std::string& bottom,
+                  std::vector<uint8_t>& out, std::string& error) {
+    TmdCheck c = checkLicenceTmd(tmd);
+    if (!c.ok) {
+        error = c.error;
+        return false;
+    }
+    if (std::string e = licenceLineError(top); !e.empty()) {
+        error = "Top line: " + e;
+        return false;
+    }
+    if (std::string e = licenceLineError(bottom); !e.empty()) {
+        error = "Bottom line: " + e;
+        return false;
+    }
+    std::vector<uint8_t> b(kLicenceSectors * kLicenceStride, 0);
+    for (size_t i = 0; i < kLicenceSectors; i++) {
+        uint8_t* s = b.data() + i * kLicenceStride;
+        const uint8_t sub[8] = {0, 0, kSubmodeData, 0, 0, 0, kSubmodeData, 0};
+        std::memcpy(s, sub, 8);
+        uint8_t* data = s + 8;
+        licenceFiller(data);
+        if (i == 4) {
+            std::memset(data, ' ', 2 * kLineMax);
+            std::memcpy(data, top.data(), top.size());
+            std::memcpy(data + kLineMax, bottom.data(), bottom.size());
+            data[2 * kLineMax] = '\n';
+        } else if (i >= kTmdFirst) {
+            size_t from = (i - kTmdFirst) * kSector;
+            if (from < tmd.size()) std::memcpy(data, tmd.data() + from, std::min(kSector, tmd.size() - from));
+        }
+    }
+    out = std::move(b);
+    return true;
+}
+
+std::vector<uint8_t> licenceTmd(const std::vector<LicenceSector>& sectors) {
+    std::vector<uint8_t> out;
+    if (sectors.size() < kLicenceSectors) return out;
+    for (size_t i = kTmdFirst; i < kLicenceSectors; i++) out.insert(out.end(), sectors[i].data, sectors[i].data + kSector);
+    return out;
+}
+
+std::pair<std::string, std::string> licenceText(const std::vector<LicenceSector>& sectors) {
+    if (sectors.size() < kLicenceSectors) return {};
+    auto line = [&](size_t at) {
+        std::string s(reinterpret_cast<const char*>(sectors[4].data + at), kLineMax);
+        while (!s.empty() && s.back() == ' ') s.pop_back();
+        return s;
+    };
+    return {line(0), line(kLineMax)};
 }
 
 DiscSettings readDiscSettings(const fs::path& file) {

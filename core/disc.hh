@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "splashpack.hh"
@@ -44,6 +45,39 @@ std::vector<LicenceSector> parseLicence(const std::vector<uint8_t>& bytes, std::
 // The "psxsplash" licence: Unity splashedit's SPLASHLICENSE.DAT (MIT,
 // psxsplash; 12 x 2336 bytes), its "Created with psxsplash" text at LBA 4.
 const std::vector<uint8_t>& psxsplashLicence();
+
+// A licence logo model: a TMD file (id 0x41, flags 0, one object) whose
+// primitives are all mode 0x20 (flat triangle, ilen 3), at most 14336 bytes
+// (7 sectors). Bytes after the TMD's tables are allowed. `ok` false gives the
+// failing check in `error`; `triangles` is the primitive count when ok.
+struct TmdCheck {
+    bool ok = false;
+    std::string error;
+    int triangles = 0;
+};
+TmdCheck checkLicenceTmd(const std::vector<uint8_t>& tmd);
+
+// "" when `line` can be a licence text line (at most 32 bytes of printable
+// ASCII, 0x20-0x7E), else why not.
+std::string licenceLineError(const std::string& line);
+
+// A 12 x 2336-byte licence (28032 bytes) as SPLASHLICENSE.DAT is laid out.
+// Every sector: subheader 00 00 08 00 00 00 08 00, 2048 data bytes, 280 zero
+// bytes. The data starts as filler, 32 lines of 63 '0' and '\n'. Sector 4:
+// data[0..31] `top`, data[32..63] `bottom` (each space-padded to 32), and
+// data[64] a '\n' after the 64 text bytes, as SPLASHLICENSE.DAT has it.
+// Sectors 5-11: `tmd` in consecutive 2048-byte chunks; data past its end
+// stays filler. Returns false with `error` set (from checkLicenceTmd or
+// licenceLineError, "Top line: " / "Bottom line: " prefixed) and `out`
+// untouched when a check fails.
+bool buildLicence(const std::vector<uint8_t>& tmd, const std::string& top, const std::string& bottom,
+                  std::vector<uint8_t>& out, std::string& error);
+
+// What buildLicence put in a licence: the data of sectors 5-11 (14336
+// bytes, the TMD and whatever follows it), and sector 4's data[0..31] and
+// [32..63] with trailing spaces trimmed. Both empty with fewer than 12 sectors.
+std::vector<uint8_t> licenceTmd(const std::vector<LicenceSector>& sectors);
+std::pair<std::string, std::string> licenceText(const std::vector<LicenceSector>& sectors);
 
 // A project's disc settings file (disc.json): {"volume": "...", "licence":
 // "...", "tracks": ["...", ...]}. `volume` empty = the volume name comes from

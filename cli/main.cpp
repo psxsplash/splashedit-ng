@@ -104,6 +104,11 @@ static int usage() {
                  "  --track adds a CD-DA music track (WAV, AIFF, MP3, Ogg Vorbis or FLAC; relative to the\n"
                  "    working directory), tracks 2 and up in the order given (Audio.PlayCDDA(2) plays the\n"
                  "    first); any --track replaces disc.json's list\n"
+                 "usage: splashpack-cli licence --out <file> [--tmd <file>] [--top <text>] [--bottom <text>]\n"
+                 "    [--from <file|psxsplash>]\n"
+                 "  builds a 12-sector licence file (28032 bytes, for --licence) from a TMD logo (flat\n"
+                 "    triangles, at most 14336 bytes) and two text lines (at most 32 printable ASCII\n"
+                 "    bytes each); what is not given comes from the --from licence (default psxsplash)\n"
                  "usage: splashpack-cli font <font.ttf> --size <px> -o <sheet.png>\n"
                  "       splashpack-cli font <bitmap.png> --cell <w>x<h> -o <sheet.png>\n"
                  "  builds one UI font sheet the way export does and prints its cell size and height\n"
@@ -563,6 +568,69 @@ static int buildCmd(int argc, char** argv) {
     }
 }
 
+static int licenceCmd(int argc, char** argv) {
+    std::string out, tmdPath, from = "psxsplash", top, bottom;
+    bool hasTop = false, hasBottom = false;
+    for (int i = 2; i < argc; i++) {
+        std::string a = argv[i];
+        if (a == "--out" && i + 1 < argc) out = argv[++i];
+        else if (a == "--tmd" && i + 1 < argc) tmdPath = argv[++i];
+        else if (a == "--from" && i + 1 < argc) from = argv[++i];
+        else if (a == "--top" && i + 1 < argc) {
+            top = argv[++i];
+            hasTop = true;
+        } else if (a == "--bottom" && i + 1 < argc) {
+            bottom = argv[++i];
+            hasBottom = true;
+        } else return usage();
+    }
+    if (out.empty()) return usage();
+    auto read = [](const std::string& path, std::vector<uint8_t>& bytes) {
+        std::ifstream f(fs::path(path), std::ios::binary);
+        if (!f) return false;
+        bytes.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+        return true;
+    };
+    std::vector<uint8_t> tmd;
+    if (!tmdPath.empty() && !read(tmdPath, tmd)) {
+        std::fprintf(stderr, "error: cannot read %s\n", tmdPath.c_str());
+        return 1;
+    }
+    if (tmdPath.empty() || !hasTop || !hasBottom) {
+        // What is not given comes from the --from licence.
+        std::string error;
+        std::vector<splash::LicenceSector> sectors = splash::resolveLicence(from, {}, error);
+        if (!error.empty()) {
+            std::fprintf(stderr, "error: %s\n", error.c_str());
+            return 1;
+        }
+        if (sectors.size() < 12) {
+            std::fprintf(stderr, "error: --from %s has no licence logo or text\n", from.c_str());
+            return 1;
+        }
+        if (tmdPath.empty()) tmd = splash::licenceTmd(sectors);
+        std::pair<std::string, std::string> text = splash::licenceText(sectors);
+        if (!hasTop) top = text.first;
+        if (!hasBottom) bottom = text.second;
+    }
+    std::vector<uint8_t> bytes;
+    std::string error;
+    if (!splash::buildLicence(tmd, top, bottom, bytes, error)) {
+        std::fprintf(stderr, "error: %s\n", error.c_str());
+        return 1;
+    }
+    std::ofstream f(fs::path(out), std::ios::binary | std::ios::trunc);
+    f.write(reinterpret_cast<const char*>(bytes.data()), std::streamsize(bytes.size()));
+    f.close();
+    if (!f) {
+        std::fprintf(stderr, "error: cannot write %s\n", out.c_str());
+        return 1;
+    }
+    std::printf("licence %zu bytes, %d triangles: \"%s\" / \"%s\"\n", bytes.size(),
+                splash::checkLicenceTmd(tmd).triangles, top.c_str(), bottom.c_str());
+    return 0;
+}
+
 static int discCmd(int argc, char** argv) {
     std::vector<std::string> scenePaths;
     std::string outPath, project, engine, licence, volume;
@@ -637,6 +705,7 @@ static int discCmd(int argc, char** argv) {
 
 int main(int argc, char** argv) {
     if (argc >= 2 && std::strcmp(argv[1], "disc") == 0) return discCmd(argc, argv);
+    if (argc >= 2 && std::strcmp(argv[1], "licence") == 0) return licenceCmd(argc, argv);
     if (argc >= 2 && std::strcmp(argv[1], "build") == 0) return buildCmd(argc, argv);
     if (argc >= 2 && std::strcmp(argv[1], "font") == 0) return font(argc, argv);
     if (argc >= 2 && std::strcmp(argv[1], "texstats") == 0) return texstats(argc, argv);
