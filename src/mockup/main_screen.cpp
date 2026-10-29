@@ -427,8 +427,126 @@ static void sendEdits(State& st, const editor::Document& doc) {
     });
 }
 
+// Preview boot screen (the Disc section): a disc of the licence alone, booted
+// on the user's BIOS by a pcsx-redux with no window, which writes one
+// screenshot here and quits (assets/licencepreview.lua).
+static std::filesystem::path licencePreviewDir() {
+    std::error_code ec;
+    std::filesystem::path tmp = std::filesystem::temp_directory_path(ec);
+    return (ec ? std::filesystem::path(".") : tmp) / "splashedit-licence-preview";
+}
+
+// Scripted runs: "disc: licence preview <w>x<h> <status>" each time one ends.
+static void reportLicencePreview(const State::Play::LicencePreview& lp) {
+    scriptLine(nullptr, "disc: licence preview " + std::to_string(lp.width) + "x" + std::to_string(lp.height) + " " + lp.status);
+}
+
+static void dropLicencePreview(State::Play::LicencePreview& lp) {
+    if (lp.tex) {
+        GLuint t = lp.tex;
+        glDeleteTextures(1, &t);
+    }
+    lp.tex = 0;
+    lp.width = lp.height = 0;
+}
+
+static void startLicencePreview(State& st, const std::filesystem::path& root, const std::string& licence) {
+    namespace fs = std::filesystem;
+    State::Play::LicencePreview& lp = st.play.licencePreview;
+    lp.emu.stop();
+    dropLicencePreview(lp);
+    lp.licence = licence;
+    auto fail = [&](const std::string& status, const std::string& message) {
+        lp.status = status;
+        lp.message = message;
+        reportLicencePreview(lp);
+    };
+    const editor::PlayTools eff = editor::withDefaults(st.play.tools, st.play.bundleDir);
+    if (const std::string why = editor::licencePreviewBiosError(eff.bios); !why.empty())
+        return fail("no-bios", "The preview needs a PlayStation BIOS: set one in Play settings (" + why + ")");
+    std::error_code ec;
+    if (eff.redux.empty() || !fs::is_regular_file(eff.redux, ec))
+        return fail("failed:no-redux", "The preview needs pcsx-redux: set it in Play settings");
+    if (lp.script.empty()) return fail("failed:no-script", "assets/licencepreview.lua is missing from this install");
+    std::string error;
+    const std::vector<splash::LicenceSector> sectors = splash::resolveLicence(licence, root, error);
+    if (sectors.empty()) return fail("failed:licence", error.empty() ? std::string("No licence to preview") : error);
+    const fs::path dir = licencePreviewDir();
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir, ec);
+    try {
+        splash::writeLicenceImage(sectors, dir / "licence.bin");
+    } catch (const std::exception& e) {
+        return fail("failed:image", e.what());
+    }
+    if (!lp.emu.start(editor::licencePreviewCommand(eff, dir / "licence.cue", dir, lp.script), &error))
+        return fail("failed:start", "Cannot start pcsx-redux: " + error);
+    lp.startedAt = SDL_GetTicks();
+    lp.status.clear();
+    lp.message = "Booting " + utf8(eff.bios.filename()) + " in pcsx-redux...";
+}
+
+// Once a frame: notices the preview's redux ending (or taking over a
+// minute) and shows what it left.
+static void pollLicencePreview(State::Play::LicencePreview& lp) {
+    if (!lp.emu.running()) return;
+    lp.emu.poll();
+    if (lp.emu.running()) {
+        if (SDL_GetTicks() - lp.startedAt < 60000) return;
+        lp.emu.stop();
+        lp.status = "failed:timeout";
+        lp.message = "pcsx-redux took over a minute; stopped";
+        reportLicencePreview(lp);
+        return;
+    }
+    const std::filesystem::path dir = licencePreviewDir();
+    editor::LicencePreview img;
+    std::string error;
+    if (!editor::readLicencePreview(dir, img, error)) {
+        const int code = lp.emu.exitCode().value_or(-1);
+        lp.status = code != 0 ? "failed:exit-" + std::to_string(code) : std::string("failed:no-capture");
+        lp.message = "No boot screen: " + error;
+        if (!lp.emu.output().empty()) lp.message += " (pcsx-redux: " + lp.emu.output().back() + ")";
+        reportLicencePreview(lp);
+        return;
+    }
+    GLuint t = 0;
+    glGenTextures(1, &t);
+    glBindTexture(GL_TEXTURE_2D, t);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, img.width, img.height, 0, GL_RGBA, GL_UNSIGNED_BYTE, img.rgba.data());
+    glBindTexture(GL_TEXTURE_2D, 0);
+    lp.tex = t;
+    lp.width = img.width;
+    lp.height = img.height;
+    // The frame as decoded, beside the capture (preview.png), for comparing
+    // it with another boot of the same disc.
+    splash::Image png;
+    png.width = img.width;
+    png.height = img.height;
+    png.pixels.resize(img.rgba.size() / 4);
+    for (int y = 0; y < img.height; y++)
+        for (int x = 0; x < img.width; x++) {
+            const uint8_t* s = &img.rgba[(size_t(y) * img.width + x) * 4];
+            png.pixels[size_t(img.height - 1 - y) * img.width + x] = {s[0] / 255.f, s[1] / 255.f, s[2] / 255.f, 1.f};
+        }
+    try {
+        splash::savePng(png, dir / "preview.png");
+    } catch (const std::exception&) {
+    }
+    lp.status = "ok";
+    lp.message = "The BIOS's boot screen in pcsx-redux, " + std::to_string(img.width) + " x " + std::to_string(img.height) +
+                 ". The PCSX line is pcsx-redux's drive ID, not the licence.";
+    reportLicencePreview(lp);
+}
+
 static void updatePlay(State& st, const editor::Document& doc) {
     State::Play& p = st.play;
+    pollLicencePreview(p.licencePreview);
     sendEdits(st, doc);
     if (p.hwBuild.valid() && p.hwBuild.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
         splash::ExportResult r = p.hwBuild.get();
@@ -8757,6 +8875,45 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
                 }
             } else if (doCancel) {
                 buildOpen = false;
+            }
+        }
+
+        // Preview boot screen: the real BIOS (Play settings' BIOS) showing
+        // this licence in pcsx-redux, run in the background, its frame under
+        // the button (startLicencePreview, pollLicencePreview).
+        if (cur != 0) {
+            State::Play::LicencePreview& lp = st.play.licencePreview;
+            const bool busy = lp.emu.running();
+            const float tx = x0 + space::sm, tw = x1 - space::sm - tx;
+            const float lineH = f.regular->CalcTextSizeA(type::caption, FLT_MAX, 0, "A").y;
+            const float bh = size::field + 6;
+            ImGui::BeginDisabled(busy || root.empty());
+            const bool doPreview =
+                button("disc.licence.preview", ImVec2(tx, y), nullptr, busy ? "Booting..." : "Preview boot screen", ButtonKind::Secondary,
+                       nullptr, root.empty() ? "Open a project first"
+                                             : "Boots this licence on the BIOS set in Play settings, in pcsx-redux, and shows its boot screen");
+            ImGui::EndDisabled();
+            y += bh + space::xs;
+            if (doPreview && !busy && !root.empty()) startLicencePreview(st, root, ds.licence);
+            // What it shows is for the licence it ran on; another one hides it.
+            const bool current = lp.licence == ds.licence;
+            if (current && !lp.message.empty()) {
+                const ImRect sr(ImVec2(tx, y - 2), ImVec2(tx + tw, y - 2 + 2 * lineH));
+                const ImVec4 sclip(sr.Min.x, sr.Min.y, sr.Max.x, sr.Max.y);
+                const bool bad = lp.status == "no-bios" || lp.status.rfind("failed", 0) == 0;
+                dl->AddText(f.regular, type::caption, sr.Min, bad ? color::warn : color::textFaint, lp.message.c_str(), nullptr, tw,
+                            &sclip);
+                nameRect("disc.licence.previewstatus", sr);
+                y += 2 * lineH + space::xs;
+            }
+            if (current && !busy && lp.tex && lp.width > 0 && lp.height > 0) {
+                // The whole frame across the section, at its own proportions.
+                const float ih = tw * float(lp.height) / float(lp.width);
+                const ImRect ir(ImVec2(tx, y), ImVec2(tx + tw, y + ih));
+                ui::addTextureImage(dl, (ImTextureID)(intptr_t)lp.tex, ir.Min, ir.Max);
+                dl->AddRect(ir.Min, ir.Max, color::border);
+                nameRect("disc.licence.previewimage", ir);
+                y += ih + space::sm;
             }
         }
 
