@@ -12094,7 +12094,7 @@ void testLicenceTmd() {
     sphere.positions.push_back({0, 1, 0});
     for (int i = 1; i < stacks; i++)
         for (int j = 0; j < slices; j++) {
-            const float th = float(M_PI) * float(i) / stacks, ph = 2 * float(M_PI) * float(j) / slices;
+            const float th = editor::kPi * float(i) / stacks, ph = 2 * editor::kPi * float(j) / slices;
             sphere.positions.push_back({std::sin(th) * std::cos(ph), std::cos(th), std::sin(th) * std::sin(ph)});
         }
     sphere.positions.push_back({0, -1, 0});
