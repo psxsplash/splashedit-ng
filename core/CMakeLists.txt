@@ -80,6 +80,7 @@ add_library(splashcore STATIC
     disc.cpp
     font.cpp
     licencesim.cpp
+    licencetmd.cpp
     scene.cpp
     path.cpp
     strings.cpp
