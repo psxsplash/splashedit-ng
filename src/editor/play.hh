@@ -201,6 +201,37 @@ std::vector<std::string> reduxCommand(const PlayTools& tools, const std::filesys
                                       const std::filesystem::path& captureScript = {},
                                       const std::filesystem::path& console = {});
 
+// The Disc section's Preview boot screen: the real BIOS (`tools.bios`) booting
+// `cue`, a disc of the licence alone (splash::writeLicenceImage), in
+// pcsx-redux with no window (-no-ui) and its default settings, the user's
+// neither read nor written (-testmode -safe), the BIOS's own boot screens
+// played (-no-fastboot), running `script` (assets/licencepreview.lua), which
+// writes its one screenshot into `dir` (passed as -pcdrvbase; PCdrv stays
+// off) and quits.
+std::vector<std::string> licencePreviewCommand(const PlayTools& tools, const std::filesystem::path& cue,
+                                               const std::filesystem::path& dir, const std::filesystem::path& script);
+
+// "" when `bios` can run the preview, else why not: none set, not there or
+// unreadable, or OpenBIOS (pcsx-redux's own, which has no Sony boot screen;
+// its images carry the string "OpenBIOS").
+std::string licencePreviewBiosError(const std::filesystem::path& bios);
+
+// A pcsx-redux screenshot as RGBA8 rows top-down, alpha 255: `raw` of
+// width * height 16-bit words (little-endian 1555, red in the low 5 bits,
+// each channel c * 255 / 31 rounded down), else of width * height RGB byte
+// triples. Empty for any other size.
+std::vector<uint8_t> decodeScreenshot(const std::vector<uint8_t>& raw, int width, int height);
+
+// What licencepreview.lua left in `dir`: preview.txt ("<width> <height>
+// <bpp>") and preview.raw, decoded. False with `error` set when preview.txt
+// is missing (preview.err's text when there is one) or does not match the
+// raw's size.
+struct LicencePreview {
+    int width = 0, height = 0;
+    std::vector<uint8_t> rgba;
+};
+bool readLicencePreview(const std::filesystem::path& dir, LicencePreview& out, std::string& error);
+
 // Frame capture while Play runs: the editor writes capture.flag in the Play
 // directory; framecapture.lua, polling for it every 10 vsyncs, records one
 // frame with redux's GPU dump recorder into capture.gpd (written whole, then

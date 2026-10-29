@@ -490,7 +490,7 @@ Args parse(int argc, char** argv) {
             parseTarget(v, act);
             a.actions.push_back(act);
         } else if (!std::strcmp(argv[i], "--wait-play")) {
-            // Holds the script here while a Play, Run on hardware or Export build is running, up to 90 s.
+            // Holds the script here while a Play, Run on hardware or Export build, or a licence preview, is running, up to 90 s.
             a.actions.push_back(Action(Action::WaitPlay));
         } else if (!std::strcmp(argv[i], "--wait-import")) {
             // Holds the script here while a model import is running (in the background), up to 90 s.
@@ -756,6 +756,9 @@ int main(int argc, char** argv) {
         std::error_code ec;
         const std::filesystem::path script = std::filesystem::path(std::u8string(assetDir.begin(), assetDir.end())) / "framecapture.lua";
         if (std::filesystem::is_regular_file(script, ec)) state.play.captureScript = script;
+        // Preview boot screen: the screenshot redux takes of the BIOS (editor::licencePreviewCommand).
+        const std::filesystem::path preview = script.parent_path() / "licencepreview.lua";
+        if (std::filesystem::is_regular_file(preview, ec)) state.play.licencePreview.script = preview;
     }
     {
         const std::string templates = resourceDir("templates", SPLASHEDIT_TEMPLATE_DIR);
@@ -829,7 +832,10 @@ int main(int argc, char** argv) {
     ImRect scrollSeen;
     bool scrollDone = false;
     // The live export is running, or its last result is for an older revision of the scene.
-    const auto playBuilding = [&] { return state.play.build.valid() || state.play.hwBuild.valid() || state.play.disc.valid(); };
+    const auto playBuilding = [&] {
+        return state.play.build.valid() || state.play.hwBuild.valid() || state.play.disc.valid() ||
+               state.play.licencePreview.emu.running();
+    };
     // An open meter fixes list (#194) also holds it until its fixes are
     // measured for this revision and the before/after thumbnails converted.
     const auto fixesBehind = [&] {

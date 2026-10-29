@@ -124,7 +124,21 @@ struct State {
         editor::PlayTools tools;             // as set by the user; withDefaults() fills the rest
         std::filesystem::path bundleDir;     // where the editor lives; redux/ and engine/ ship there
         std::filesystem::path captureScript;  // assets/framecapture.lua, passed to redux for Capture frame
-        bool capturing = false;               // a capture.flag is out, waiting for capture.gpd
+        // The Disc section's Preview boot screen: the pcsx-redux booting the
+        // licence alone (editor::licencePreviewCommand) and since when (SDL
+        // ticks); the script it runs (assets/licencepreview.lua); the last
+        // frame as a GL texture (0: none) and its size; the licence it was
+        // made for (DiscSettings::licence); its scripted status ("" none yet,
+        // ok, no-bios, failed:<why>) and the line shown under the button.
+        struct LicencePreview {
+            Emulator emu;
+            uint64_t startedAt = 0;
+            std::filesystem::path script;
+            unsigned tex = 0;
+            int width = 0, height = 0;
+            std::string licence, status, message;
+        } licencePreview;
+        bool capturing = false;              // a capture.flag is out, waiting for capture.gpd
         uint64_t captureAt = 0;               // SDL ticks when it was written
         std::future<splash::ExportResult> build;
         // The session's consoles, cons[0] being console 1 (the only one with

@@ -711,6 +711,10 @@ DiscInfo writeDiscImage(const std::vector<DiscFile>& files, const std::string& v
     return info;
 }
 
+DiscInfo writeLicenceImage(const std::vector<LicenceSector>& licence, const fs::path& bin) {
+    return writeDiscImage({}, "LICENCE", bin, licence);
+}
+
 EngineKind engineKind(const std::vector<uint8_t>& exe) {
     if (exe.size() < 2048 || std::memcmp(exe.data(), "PS-X EXE", 8) != 0) return EngineKind::NotExe;
     auto has = [&](const char* s) {
