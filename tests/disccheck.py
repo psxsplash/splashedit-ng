@@ -3,7 +3,8 @@
 # P/Q parity), then the ISO 9660 tree, then the files psxsplash's CD-ROM
 # loader opens (SCENE0/SCENE_0.{SPK,VRM,SPU};1); then a disc of two scenes,
 # the second under SCENE1/SCENE_1.*; then a disc with the psxsplash licence
-# and --volume, the same from disc.json, and a licence of a bad size.
+# and --volume, the same from disc.json, and a licence of a bad size; then
+# splashpack-cli licence building one with its own text, and a disc of it.
 # usage: python3 disccheck.py <splashpack-cli>
 import json, os, shutil, struct, subprocess, sys, tempfile
 
@@ -357,6 +358,40 @@ r9 = subprocess.run([cli, 'disc', scene, '--engine', os.path.join(tmp, 'cd.ps-ex
                      '--licence', short], capture_output=True, text=True)
 check('bad-size licence refused', r9.returncode != 0 and '1000' in r9.stderr and not os.path.exists(badbin),
       (r9.returncode, r9.stderr))
+
+# splashpack-cli licence: the psxsplash logo with new text lines, 12 sectors
+# of 2336 bytes, the lines space-padded at LBA 4's data; a bad TMD is refused.
+built_lic = os.path.join(tmp, 'hello.dat')
+r10 = subprocess.run([cli, 'licence', '--out', built_lic, '--top', 'HELLO', '--bottom', 'WORLD'],
+                     capture_output=True, text=True)
+check('licence exits 0', r10.returncode == 0, r10.stderr)
+blic = open(built_lic, 'rb').read() if os.path.exists(built_lic) else b''
+check('built licence is 28032 bytes', len(blic) == 28032, len(blic))
+s4 = blic[4 * 2336 + 8:4 * 2336 + 8 + 64]
+check('built licence sector 4 holds the padded lines', s4 == b'HELLO'.ljust(32) + b'WORLD'.ljust(32), s4)
+same_lic = os.path.join(tmp, 'same.dat')
+r14 = subprocess.run([cli, 'licence', '--out', same_lic], capture_output=True, text=True)
+same = open(same_lic, 'rb').read() if os.path.exists(same_lic) else b''
+check('licence with nothing given rebuilds the psxsplash text and logo', r14.returncode == 0 and
+      b'Created wit' in same[4 * 2336 + 8:4 * 2336 + 72] and len(blic) == len(same) and
+      blic[:4 * 2336] == same[:4 * 2336] and blic[5 * 2336:] == same[5 * 2336:], r14.stderr)
+junk = os.path.join(tmp, 'junk.tmd')
+open(junk, 'wb').write(bytes(range(7, 27)))
+junk_out = os.path.join(tmp, 'junk.dat')
+r11 = subprocess.run([cli, 'licence', '--out', junk_out, '--tmd', junk], capture_output=True, text=True)
+check('bad --tmd refused', r11.returncode == 1 and 'TMD' in r11.stderr and not os.path.exists(junk_out),
+      (r11.returncode, r11.stderr))
+r12 = subprocess.run([cli, 'licence', '--out', junk_out, '--top', 'x' * 33], capture_output=True, text=True)
+check('33-byte --top refused', r12.returncode == 1 and '33' in r12.stderr, (r12.returncode, r12.stderr))
+hello_bin = os.path.join(tmp, 'hello.bin')
+r13 = subprocess.run([cli, 'disc', scene, '--engine', os.path.join(tmp, 'cd.ps-exe'), '-o', hello_bin,
+                      '--licence', built_lic], capture_output=True, text=True)
+check('disc with the built licence exits 0', r13.returncode == 0, r13.stderr)
+if r13.returncode == 0:
+    raw = open(hello_bin, 'rb').read()
+    check('LBA 4 of the disc carries HELLO / WORLD',
+          raw[4 * 2352 + 24:4 * 2352 + 24 + 64] == b'HELLO'.ljust(32) + b'WORLD'.ljust(32),
+          raw[4 * 2352 + 24:4 * 2352 + 24 + 64])
 
 print('%d checks, %d failed' % (checks, fails))
 sys.exit(1 if fails else 0)
