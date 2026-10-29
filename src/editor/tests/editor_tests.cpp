@@ -78,6 +78,7 @@
 #include "ui/colour_hex.hh"
 #include "budget.hh"
 #include "disc.hh"
+#include "licencesim.hh"
 #include "font.hh"
 #include "navregion.hh"
 #include "rooms.hh"
@@ -11912,6 +11913,78 @@ void testDiscSettings() {
 
 // Sectors 0-15 of the written image: unchanged without a licence, the
 // licence then blank Form 2 with one.
+// The software boot screen (licencesim.hh). The stock logo's counts and box
+// are the real BIOS's: its capture (pcsx-redux, SCPH-5501) of this licence
+// matches the simulation pixel for pixel on the logo's even rows.
+void testLicenceSim() {
+    std::string error;
+    const std::vector<splash::LicenceSector> ps = splash::parseLicence(splash::psxsplashLicence(), error);
+    std::vector<uint8_t> rgb;
+    splash::LicenceSimStats st;
+    CHECK(splash::simulateLicence(ps, rgb, error, {}, &st));
+    CHECK(rgb.size() == size_t(640) * 480 * 3);
+    CHECK(st.trianglesTotal == 601);
+    CHECK(st.trianglesDrawn == 321);  // NCLIP drops the back faces
+    CHECK(st.x0 == 213 && st.x1 == 451 && st.y0 == 11 && st.y1 == 266);
+    auto px = [&](int x, int y) { return std::array<int, 3>{rgb[(size_t(y) * 640 + x) * 3], rgb[(size_t(y) * 640 + x) * 3 + 1], rgb[(size_t(y) * 640 + x) * 3 + 2]}; };
+    auto black = [&](int x, int y) { return px(x, y) == std::array<int, 3>{0, 0, 0}; };
+    CHECK(black(5, 5) && black(630, 470) && black(214, 20));
+    CHECK(!black(320, 150));  // the P's face, lit red
+    CHECK(px(320, 150)[0] > 200 && px(320, 150)[1] < 40);
+    // No fonts: the logo alone; the text band stays black.
+    bool textBand = false;
+    for (int y = 330; y < 410 && !textBand; y++)
+        for (int x = 100; x < 560; x++) textBand = textBand || !black(x, y);
+    CHECK(!textBand);
+    CHECK(std::string(splash::licenceSimRegionLine(splash::LicenceRegion::Japan)) == "SCEI");
+    CHECK(std::string(splash::licenceSimRegionLine(splash::LicenceRegion::America)) == "SCEA");
+    CHECK(std::string(splash::licenceSimRegionLine(splash::LicenceRegion::Europe)) == "SCEE");
+
+    // With the editor's fonts: the text lines, the wordmark and the drive line
+    // in the BIOS's text grey (22/31 of white at most), the logo unchanged.
+    splash::LicenceSimOptions opt;
+    opt.fontDir = std::filesystem::path(SPLASHEDIT_SOURCE_DIR) / "assets" / "fonts";
+    std::vector<uint8_t> withText;
+    CHECK(splash::simulateLicence(ps, withText, error, opt));
+    auto inked = [&](const std::vector<uint8_t>& img, int x0, int y0, int x1, int y1) {
+        int n = 0, top = 0;
+        for (int y = y0; y < y1; y++)
+            for (int x = x0; x < x1; x++) {
+                const uint8_t* q = &img[(size_t(y) * 640 + x) * 3];
+                n += q[0] != 0;
+                top = std::max<int>(top, q[0]);
+                if (q[0] != q[1] || q[1] != q[2]) return -1;  // grey only
+            }
+        return top <= 22 * 255 / 31 ? n : -2;
+    };
+    CHECK(inked(withText, 200, 330, 460, 350) > 100);  // "Created with" (chars 0-31)
+    CHECK(inked(withText, 220, 270, 440, 310) > 300);  // PlayStation
+    CHECK(inked(withText, 280, 390, 360, 410) > 40);   // SCEI (a Japan layout)
+    CHECK(inked(withText, 470, 350, 600, 370) == 0);   // no chars 64+ in a Japan layout
+    CHECK(std::equal(withText.begin(), withText.begin() + 640 * 3 * 266, rgb.begin()));
+
+    // A western layout's chars 64+ ("  ica ", 6) drawn around (530, 360); the
+    // drive line follows the region asked for.
+    std::vector<uint8_t> us;
+    CHECK(splash::buildLicence(splash::licenceTmd(ps), "          Licensed  by", "Sony Computer Entertainment Amer  ica ", us, error,
+                               splash::LicenceRegion::America));
+    const std::vector<splash::LicenceSector> usSectors = splash::parseLicence(us, error);
+    std::vector<uint8_t> usImg, euImg;
+    CHECK(splash::simulateLicence(usSectors, usImg, error, opt));
+    CHECK(inked(usImg, 490, 350, 580, 370) > 20);
+    opt.region = int(splash::LicenceRegion::Europe);
+    CHECK(splash::simulateLicence(usSectors, euImg, error, opt));
+    CHECK(inked(euImg, 280, 390, 360, 410) > 40 && !std::equal(usImg.begin(), usImg.end(), euImg.begin()));
+
+    // No licence or no logo: an error, no image.
+    error.clear();
+    CHECK(!splash::simulateLicence({}, rgb, error) && !error.empty());
+    std::vector<splash::LicenceSector> noLogo = ps;
+    std::memset(noLogo[5].data, 0, 2048);
+    error.clear();
+    CHECK(!splash::simulateLicence(noLogo, rgb, error) && error.rfind("TMD:", 0) == 0);
+}
+
 void testDiscLicenceImage() {
     using namespace disctest;
     const fs::path dir = g_outDir / "disclicence";
@@ -17784,6 +17857,7 @@ int main(int argc, char** argv) {
     testDiscLicenceRegion();
     testDiscSettings();
     testDiscLicenceImage();
+    testLicenceSim();
     testLicencePreview();
     testDiscExportSettings();
     testAudioSizes();

@@ -7,8 +7,9 @@
 # settings (SPLASHEDIT_BIOS) and licencepreview.lua, and shows the screenshot
 # redux leaves there (preview.raw, 16-bit 1555 or 24-bit RGB, and
 # preview.txt "<w> <h> <bpp>") under the button. Each run prints
-# 'disc: licence preview <w>x<h> <status>', status ok, no-bios (none set, or
-# OpenBIOS: nothing runs) or failed:<why>.
+# 'disc: licence preview <w>x<h> <status>', status ok, simulated (no BIOS set,
+# or OpenBIOS: nothing runs, the screen is re-rendered in software) or
+# failed:<why>.
 # usage: python3 licencepreviewcheck.py <splashedit> [<preview.png>]   (needs a display: xvfb-run -a)
 import json, os, re, shutil, stat, struct, subprocess, sys, tempfile, zlib
 
@@ -194,13 +195,14 @@ if rects.get('disc.licence.previewimage'):
 else:
     check('the 24-bit frame is drawn', False, sorted(n for n in rects if n.startswith('disc.licence')))
 
-# No BIOS set, or OpenBIOS: redux does not run and the section says why.
+# No BIOS set, or OpenBIOS: redux does not run; the frame is simulated
+# instead (tests/licencesimcheck.py) and the section says why.
 for name, bios in (('no BIOS', None), ('OpenBIOS', OPEN)):
     discs, rects, shot, pdir = run(PREVIEW, bios=bios)
-    check(name + ': the preview reports no-bios', previews(discs) == ['disc: licence preview 0x0 no-bios'], previews(discs))
+    check(name + ': the preview reports simulated', previews(discs) == ['disc: licence preview 640x480 simulated'], previews(discs))
     check(name + ': redux is not run', not os.path.exists(os.path.join(pdir, 'argv.json')), pdir)
-    check(name + ': the status line is drawn, no frame', 'disc.licence.previewstatus' in rects and
-          'disc.licence.previewimage' not in rects, sorted(n for n in rects if n.startswith('disc.licence')))
+    check(name + ': the status line and the simulated frame are drawn', 'disc.licence.previewstatus' in rects and
+          'disc.licence.previewimage' in rects, sorted(n for n in rects if n.startswith('disc.licence')))
 
 # A redux that exits without a screenshot.
 discs, rects, shot, pdir = run(PREVIEW, mode='fail')
