@@ -22,6 +22,7 @@
 #include "gpu_raster.hh"
 #include "gpudump.hh"
 #include "import.hh"
+#include "licencesim.hh"
 #include "splashpack.hh"
 #include "texture.hh"
 #include "unity_import.hh"
@@ -111,6 +112,8 @@ static int usage() {
                  "    bytes each; the bottom one 38 for america and europe); what is not given comes\n"
                  "    from the --from licence (default psxsplash); --region picks the sector layout\n"
                  "    (default japan)\n"
+                 "  --preview-sim <out.png> [--fonts <dir>] instead renders the --from licence's boot screen\n"
+                 "    in software (640x480; --fonts: Inter's directory, else no text; --region: the console)\n"
                  "usage: splashpack-cli font <font.ttf> --size <px> -o <sheet.png>\n"
                  "       splashpack-cli font <bitmap.png> --cell <w>x<h> -o <sheet.png>\n"
                  "  builds one UI font sheet the way export does and prints its cell size and height\n"
@@ -571,8 +574,8 @@ static int buildCmd(int argc, char** argv) {
 }
 
 static int licenceCmd(int argc, char** argv) {
-    std::string out, tmdPath, from = "psxsplash", top, bottom, regionName = "japan";
-    bool hasTop = false, hasBottom = false;
+    std::string out, tmdPath, from = "psxsplash", top, bottom, regionName = "japan", simOut, fonts;
+    bool hasTop = false, hasBottom = false, hasRegion = false;
     for (int i = 2; i < argc; i++) {
         std::string a = argv[i];
         if (a == "--out" && i + 1 < argc) out = argv[++i];
@@ -586,13 +589,42 @@ static int licenceCmd(int argc, char** argv) {
             hasBottom = true;
         } else if (a == "--region" && i + 1 < argc) {
             regionName = argv[++i];
-        } else return usage();
+            hasRegion = true;
+        } else if (a == "--preview-sim" && i + 1 < argc) simOut = argv[++i];
+        else if (a == "--fonts" && i + 1 < argc) fonts = argv[++i];
+        else return usage();
     }
-    if (out.empty()) return usage();
+    if (out.empty() && simOut.empty()) return usage();
     splash::LicenceRegion region = splash::LicenceRegion::Japan;
     if (!splash::parseLicenceRegion(regionName, region)) {
         std::fprintf(stderr, "error: --region %s is not japan, america or europe\n", regionName.c_str());
         return 1;
+    }
+    if (!simOut.empty()) {
+        // The boot screen re-rendered (licencesim.hh) from the --from licence.
+        std::string error;
+        const std::vector<splash::LicenceSector> sectors = splash::resolveLicence(from, fs::current_path(), error);
+        splash::LicenceSimOptions opt;
+        opt.fontDir = fonts;
+        if (hasRegion) opt.region = int(region);
+        splash::LicenceSimStats st;
+        std::vector<uint8_t> rgb;
+        if (!error.empty() || !splash::simulateLicence(sectors, rgb, error, opt, &st)) {
+            std::fprintf(stderr, "error: %s\n", error.c_str());
+            return 1;
+        }
+        splash::Image img;
+        img.width = splash::kLicenceSimWidth;
+        img.height = splash::kLicenceSimHeight;
+        for (int y = img.height - 1; y >= 0; y--)
+            for (int x = 0; x < img.width; x++) {
+                const uint8_t* q = &rgb[(size_t(y) * img.width + x) * 3];
+                img.pixels.push_back({q[0] / 255.f, q[1] / 255.f, q[2] / 255.f, 1.f});
+            }
+        splash::savePng(img, simOut);
+        std::printf("licence preview %dx%d simulated, %d of %d triangles, box x %d..%d y %d..%d\n", img.width, img.height,
+                    st.trianglesDrawn, st.trianglesTotal, st.x0, st.x1, st.y0, st.y1);
+        return 0;
     }
     auto read = [](const std::string& path, std::vector<uint8_t>& bytes) {
         std::ifstream f(fs::path(path), std::ios::binary);

@@ -759,6 +759,7 @@ int main(int argc, char** argv) {
         // Preview boot screen: the screenshot redux takes of the BIOS (editor::licencePreviewCommand).
         const std::filesystem::path preview = script.parent_path() / "licencepreview.lua";
         if (std::filesystem::is_regular_file(preview, ec)) state.play.licencePreview.script = preview;
+        state.play.licencePreview.fontDir = script.parent_path() / "fonts";  // the simulated preview's text
     }
     {
         const std::string templates = resourceDir("templates", SPLASHEDIT_TEMPLATE_DIR);

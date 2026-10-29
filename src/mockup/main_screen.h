@@ -137,6 +137,14 @@ struct State {
             unsigned tex = 0;
             int width = 0, height = 0;
             std::string licence, status, message;
+            // Simulated (splash::simulateLicence, no BIOS): asked for with the
+            // toggle, or used when no BIOS is set; the fonts it draws the text
+            // in (assets/fonts); the sectors it last drew (redrawn when they
+            // change) and when they were last read (seconds).
+            bool simulated = false;
+            std::filesystem::path fontDir;
+            std::vector<uint8_t> simSectors;
+            double simAt = -1;
         } licencePreview;
         bool capturing = false;              // a capture.flag is out, waiting for capture.gpd
         uint64_t captureAt = 0;               // SDL ticks when it was written

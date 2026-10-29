@@ -21,6 +21,7 @@
 #include "audio.hh"
 #include "budget.hh"
 #include "disc.hh"
+#include "licencesim.hh"
 #include "rooms.hh"
 #include "splashpack.hh"
 #include "path.hh"
@@ -450,6 +451,53 @@ static void dropLicencePreview(State::Play::LicencePreview& lp) {
     lp.width = lp.height = 0;
 }
 
+static unsigned uploadLicencePreview(int w, int h, const uint8_t* rgba) {
+    GLuint t = 0;
+    glGenTextures(1, &t);
+    glBindTexture(GL_TEXTURE_2D, t);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    return t;
+}
+
+// Simulated: the boot screen re-rendered in software (splash::simulateLicence,
+// no BIOS, no boot), redrawn only when the licence's sectors change.
+static void simulateLicencePreview(State::Play::LicencePreview& lp, const std::filesystem::path& root, const std::string& licence,
+                                   bool noBios) {
+    std::string error;
+    const std::vector<splash::LicenceSector> sectors = splash::resolveLicence(licence, root, error);
+    std::vector<uint8_t> bytes;
+    for (const splash::LicenceSector& s : sectors)
+        bytes.insert(bytes.end(), reinterpret_cast<const uint8_t*>(&s), reinterpret_cast<const uint8_t*>(&s) + sizeof s);
+    if (lp.status == "simulated" && lp.licence == licence && bytes == lp.simSectors) return;
+    lp.emu.stop();
+    dropLicencePreview(lp);
+    lp.licence = licence;
+    lp.simSectors = std::move(bytes);
+    splash::LicenceSimOptions opt;
+    opt.fontDir = lp.fontDir;
+    std::vector<uint8_t> rgb;
+    if (sectors.empty() || !splash::simulateLicence(sectors, rgb, error, opt)) {
+        lp.status = "failed:licence";
+        lp.message = error.empty() ? std::string("No licence to preview") : error;
+        return reportLicencePreview(lp);
+    }
+    std::vector<uint8_t> rgba(rgb.size() / 3 * 4, 255);
+    for (size_t i = 0; i < rgb.size() / 3; i++) std::memcpy(&rgba[i * 4], &rgb[i * 3], 3);
+    lp.tex = uploadLicencePreview(splash::kLicenceSimWidth, splash::kLicenceSimHeight, rgba.data());
+    lp.width = splash::kLicenceSimWidth;
+    lp.height = splash::kLicenceSimHeight;
+    lp.status = "simulated";
+    lp.message = std::string(noBios ? "No BIOS in Play settings: simulated. " : "Simulated. ") +
+                 "The logo as the BIOS draws it; the text in the editor's font, not the BIOS's.";
+    reportLicencePreview(lp);
+}
+
 static void startLicencePreview(State& st, const std::filesystem::path& root, const std::string& licence) {
     namespace fs = std::filesystem;
     State::Play::LicencePreview& lp = st.play.licencePreview;
@@ -462,8 +510,11 @@ static void startLicencePreview(State& st, const std::filesystem::path& root, co
         reportLicencePreview(lp);
     };
     const editor::PlayTools eff = editor::withDefaults(st.play.tools, st.play.bundleDir);
-    if (const std::string why = editor::licencePreviewBiosError(eff.bios); !why.empty())
-        return fail("no-bios", "The preview needs a PlayStation BIOS: set one in Play settings (" + why + ")");
+    const bool noBios = !editor::licencePreviewBiosError(eff.bios).empty();
+    if (noBios || lp.simulated) {
+        lp.status.clear();
+        return simulateLicencePreview(lp, root, licence, noBios);
+    }
     std::error_code ec;
     if (eff.redux.empty() || !fs::is_regular_file(eff.redux, ec))
         return fail("failed:no-redux", "The preview needs pcsx-redux: set it in Play settings");
@@ -510,17 +561,7 @@ static void pollLicencePreview(State::Play::LicencePreview& lp) {
         reportLicencePreview(lp);
         return;
     }
-    GLuint t = 0;
-    glGenTextures(1, &t);
-    glBindTexture(GL_TEXTURE_2D, t);
-    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, img.width, img.height, 0, GL_RGBA, GL_UNSIGNED_BYTE, img.rgba.data());
-    glBindTexture(GL_TEXTURE_2D, 0);
-    lp.tex = t;
+    lp.tex = uploadLicencePreview(img.width, img.height, img.rgba.data());
     lp.width = img.width;
     lp.height = img.height;
     // The frame as decoded, beside the capture (preview.png), for comparing
@@ -8903,7 +8944,9 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
 
         // Preview boot screen: the real BIOS (Play settings' BIOS) showing
         // this licence in pcsx-redux, run in the background, its frame under
-        // the button (startLicencePreview, pollLicencePreview).
+        // the button (startLicencePreview, pollLicencePreview). With no BIOS,
+        // or the Simulated toggle on, a software re-render instead, redrawn
+        // when the licence changes (simulateLicencePreview).
         if (cur != 0) {
             State::Play::LicencePreview& lp = st.play.licencePreview;
             const bool busy = lp.emu.running();
@@ -8911,13 +8954,24 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
             const float lineH = f.regular->CalcTextSizeA(type::caption, FLT_MAX, 0, "A").y;
             const float bh = size::field + 6;
             ImGui::BeginDisabled(busy || root.empty());
+            const char* label = busy ? "Booting..." : "Preview boot screen";
             const bool doPreview =
-                button("disc.licence.preview", ImVec2(tx, y), nullptr, busy ? "Booting..." : "Preview boot screen", ButtonKind::Secondary,
-                       nullptr, root.empty() ? "Open a project first"
-                                             : "Boots this licence on the BIOS set in Play settings, in pcsx-redux, and shows its boot screen");
+                button("disc.licence.preview", ImVec2(tx, y), nullptr, label, ButtonKind::Secondary, nullptr,
+                       root.empty() ? "Open a project first"
+                                    : "Boots this licence on the BIOS set in Play settings, in pcsx-redux, and shows its boot screen "
+                                      "(with no BIOS, or Simulated on, a software re-render of it)");
             ImGui::EndDisabled();
+            const float swX = tx + buttonWidth(nullptr, label) + space::md, swY = y + bh / 2;
+            const ImRect simSw(ImVec2(swX, swY - 8), ImVec2(swX + 30, swY + 8));
+            nameRect("disc.licence.previewsim", simSw);
+            if (toggle("previewsim", simSw, lp.simulated)) lp.simulated = !lp.simulated;
+            dl->AddText(f.regular, type::caption, ImVec2(simSw.Max.x + space::xs, swY - lineH / 2), color::textFaint, "Simulated");
             y += bh + space::xs;
             if (doPreview && !busy && !root.empty()) startLicencePreview(st, root, ds.licence);
+            if (lp.status == "simulated" && !busy && !root.empty() && (lp.licence != ds.licence || now - lp.simAt > 1.0)) {
+                lp.simAt = now;
+                simulateLicencePreview(lp, root, ds.licence, lp.message.rfind("No BIOS", 0) == 0);
+            }
             // What it shows is for the licence it ran on; another one hides it.
             const bool current = lp.licence == ds.licence;
             if (current && !lp.message.empty()) {
