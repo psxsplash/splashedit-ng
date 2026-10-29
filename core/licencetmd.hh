@@ -26,9 +26,8 @@ struct LicenceTmdReport {
 
 // One flat triangle per mesh triangle, its normal the face's and its colour
 // the material colour times the mean vertex colour times the texture's texel
-// at the UV centroid (textures relative to `textureRoot`). The .mesh's Y up
-// becomes the shell's Y down, so the logo shows as the model does from the
-// front. Simplified (simplifyToTriangles) until it fits. False, with `error`
+// at the UV centroid (textures relative to `textureRoot`). The logo shows the
+// model as seen from its front (+Z, as the importer takes it), upright. Simplified (simplifyToTriangles) until it fits. False, with `error`
 // set, when nothing fits or no triangle is left.
 bool meshToLicenceTmd(const Mesh& mesh, const std::vector<Material>& materials, const std::filesystem::path& textureRoot,
                       const LicenceTmdOptions& options, std::vector<uint8_t>& out, LicenceTmdReport& report, std::string& error);

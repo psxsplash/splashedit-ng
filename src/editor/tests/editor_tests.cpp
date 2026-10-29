@@ -12070,13 +12070,14 @@ void testLicenceTmd() {
     CHECK(h.ok && h.st.y1 - h.st.y0 < (r.st.y1 - r.st.y0) * 0.6 && std::abs((h.st.x0 + h.st.x1) / 2 - 318) <= 4 &&
           std::abs((h.st.y0 + h.st.y1) / 2 - 164) <= 4);
 
-    // An L seen from the front: a tall bar on the left, a short foot on the
+    // An L seen from its front (+Z; the .mesh's X is the file's mirrored, so
+    // the foot's right is -X here): a tall bar on the left, a short foot on the
     // right at the bottom. More lit below than above on the right (a vertical
     // flip puts the foot at the top), and more on the left than the right in
     // the top half (a mirror puts the bar on the right).
     splash::Mesh ell;
     addBox(ell, {0, 0, 0}, {1, 3, 1});
-    addBox(ell, {1, 0, 0}, {2.4f, 0.8f, 1});
+    addBox(ell, {-1.4f, 0, 0}, {0, 0.8f, 1});
     CHECK(splash::meshToLicenceTmd(ell, white, {}, {}, tmd, rep, error));
     r = render(tmd);
     const int mx = (r.st.x0 + r.st.x1) / 2, my = (r.st.y0 + r.st.y1) / 2;

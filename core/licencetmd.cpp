@@ -24,8 +24,10 @@ constexpr float kRT[3][3] = {{0x0ffb / 4096.f, 0, -188 / 4096.f}, {-73 / 4096.f,
 constexpr float kTR[3] = {0, -340, 5888}, kH = 1024, kOFX = 320, kOFY = 240;
 // The stock logo's box on the 640 x 480 screen.
 constexpr float kBoxX0 = 214, kBoxX1 = 422, kBoxY0 = 65, kBoxY1 = 263;
-// .mesh space to the shell's: X right, Y up -> Y down, Z away from the viewer.
-constexpr float kAxisX = 1, kAxisY = -1;
+// .mesh space to the shell's, which looks along +Z with Y down: turned to face
+// the viewer with its front (+Z, the importer's) and flipped upright. Three
+// sign changes keep the winding's sense the shell's NCLIP expects.
+constexpr float kAxisX = -1, kAxisY = -1, kAxisZ = -1;
 // What the stock logo has: the primitive header's flag byte and the object's scale.
 constexpr uint8_t kPrimFlag = 0x20;
 constexpr uint32_t kObjectScale = 7;
@@ -45,7 +47,7 @@ struct Fit {
     Vec3 mid;  // the bounding box centre, axes mapped
     float scale = 1, ox = 0, oy = 0;
     Vec3 at(Vec3 p) const {
-        const Vec3 l = Vec3{p.x * kAxisX, p.y * kAxisY, p.z} - mid;
+        const Vec3 l = Vec3{p.x * kAxisX, p.y * kAxisY, p.z * kAxisZ} - mid;
         return {l.x * scale + ox, l.y * scale + oy, l.z * scale};
     }
 };
@@ -55,7 +57,7 @@ struct Fit {
 bool fitToBox(const Mesh& mesh, float size, Fit& fit, std::vector<std::string>& warnings, std::string& error) {
     Vec3 lo{1e30f, 1e30f, 1e30f}, hi{-1e30f, -1e30f, -1e30f};
     for (const Vec3& p : mesh.positions) {
-        const Vec3 m{p.x * kAxisX, p.y * kAxisY, p.z};
+        const Vec3 m{p.x * kAxisX, p.y * kAxisY, p.z * kAxisZ};
         lo = vmin(lo, m), hi = vmax(hi, m);
     }
     fit.mid = (lo + hi) * 0.5f;
