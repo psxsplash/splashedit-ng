@@ -87,10 +87,7 @@ const char* resultText(cgltf_result r) {
     }
 }
 
-struct Pixels {
-    int w = 0, h = 0;
-    std::vector<unsigned char> rgba;
-};
+using Pixels = RgbaImage;
 
 // The encoded bytes of a glTF image: a buffer view (.glb), a data: URI or a
 // file next to the model.
@@ -124,13 +121,9 @@ std::vector<unsigned char> imageBytes(const cgltf_options& opt, const cgltf_imag
 }
 
 Pixels decode(const std::vector<unsigned char>& bytes, const std::string& what) {
-    Pixels px;
-    int n;
-    unsigned char* d = stbi_load_from_memory(bytes.data(), int(bytes.size()), &px.w, &px.h, &n, 4);
-    if (!d) fail(what + " is not a PNG or JPEG image (" + stbi_failure_reason() + ")");
-    px.rgba.assign(d, d + size_t(px.w) * px.h * 4);
-    stbi_image_free(d);
-    return px;
+    std::optional<Pixels> px = decodeRgba(bytes);
+    if (!px) fail(what + " is not a PNG or JPEG image (" + stbi_failure_reason() + ")");
+    return std::move(*px);
 }
 
 // Scales the image down so neither side exceeds kMaxTextureSide.
@@ -228,7 +221,35 @@ struct SourceMaterial {
     std::array<float, 4> color{1, 1, 1, 1};
     const void* image = nullptr;
     std::function<std::optional<std::vector<unsigned char>>()> load;
+    // Baked into the base colour with ImportSettings::bakeDetail, like `image`/`load`.
+    const void* normal = nullptr;
+    std::function<std::optional<std::vector<unsigned char>>()> loadNormal;
+    float normalScale = 1;
+    const void* occlusion = nullptr;
+    std::function<std::optional<std::vector<unsigned char>>()> loadOcclusion;
+    int occlusionChannel = 0;
+    float occlusionStrength = 1;
 };
+
+// `mat`'s normal and occlusion maps baked into its base image, at the base's
+// full size. A map that cannot be read or decoded is left out with a warning.
+void bakeMaterialDetail(Pixels& px, const SourceMaterial& mat, std::vector<std::string>& warnings) {
+    auto read = [&](const auto& load, const char* kind) -> std::optional<RgbaImage> {
+        if (!load) return std::nullopt;
+        std::optional<RgbaImage> img;
+        try {
+            if (std::optional<std::vector<unsigned char>> bytes = load()) img = decodeRgba(*bytes);
+        } catch (const std::runtime_error&) {
+        }
+        if (!img)
+            warnings.push_back(std::string("the ") + kind + " map of material '" + mat.name +
+                               "' is not a PNG or JPEG image that could be read, it is left out of the texture");
+        return img;
+    };
+    std::optional<RgbaImage> normal = read(mat.loadNormal, "normal"), occlusion = read(mat.loadOcclusion, "occlusion");
+    bakeSurfaceDetail(px, {normal ? &*normal : nullptr, mat.normalScale, occlusion ? &*occlusion : nullptr, mat.occlusionChannel,
+                           mat.occlusionStrength});
+}
 
 // A mesh being built in one space. Its submeshes are keyed by the model's
 // material index (the order materials are first met in the whole file).
@@ -900,12 +921,17 @@ void finishImport(ImportedModel& out, Sink& baked, std::vector<NodeBuild>& nodes
     fs::create_directories(project / dir, ec);
     if (ec) fail("cannot create " + projectPath(project / dir) + ": " + ec.message());
 
-    // Textures: each image used as a base colour, written once.
-    std::map<const void*, std::string> written;
-    std::set<const void*> tried;
+    // Textures: each image used as a base colour, written once (once per
+    // pair of detail maps baked into it).
+    using TexKey = std::tuple<const void*, const void*, const void*>;
+    auto keyOf = [&](const SourceMaterial& m) {
+        return settings.bakeDetail ? TexKey{m.image, m.normal, m.occlusion} : TexKey{m.image, nullptr, nullptr};
+    };
+    std::map<TexKey, std::string> written;
+    std::set<TexKey> tried;
     int imagesUsed = 0;
     for (const SourceMaterial& mat : mats)
-        if (mat.image && !written.count(mat.image)) written[mat.image] = {}, imagesUsed++;
+        if (mat.image && !written.count(keyOf(mat))) written[keyOf(mat)] = {}, imagesUsed++;
     int n = 0;
     std::vector<Material> byIndex;  // per model material index
     for (const SourceMaterial& mat : mats) {
@@ -913,10 +939,11 @@ void finishImport(ImportedModel& out, Sink& baked, std::vector<NodeBuild>& nodes
         Material outMat;
         outMat.color = mat.color;
         if (mat.image) {
-            std::string& rel = written[mat.image];
-            if (tried.insert(mat.image).second) {
+            std::string& rel = written[keyOf(mat)];
+            if (tried.insert(keyOf(mat)).second) {
                 if (std::optional<std::vector<unsigned char>> bytes = mat.load()) {
                     Pixels px = decode(*bytes, what + " texture");
+                    if (settings.bakeDetail) bakeMaterialDetail(px, mat, out.warnings);
                     if (fit(px))
                         out.warnings.push_back("a texture was scaled down to " + std::to_string(px.w) + " x " + std::to_string(px.h) +
                                                ", the most a PS1 texture can be");
@@ -1320,6 +1347,18 @@ ImportedModel importGltf(const fs::path& source, const fs::path& project, const 
             sm.image = image;
             sm.load = [&opt, image, dir = source.parent_path()] { return std::make_optional(imageBytes(opt, *image, dir)); };
         }
+        auto detail = [&](const cgltf_texture_view& v, const void*& id, auto& load) {
+            if (!v.texture || !v.texture->image) return;
+            const cgltf_image* image = v.texture->image;
+            id = image;
+            load = [&opt, image, dir = source.parent_path()] { return std::make_optional(imageBytes(opt, *image, dir)); };
+        };
+        if (mat) {
+            detail(mat->normal_texture, sm.normal, sm.loadNormal);
+            sm.normalScale = mat->normal_texture.texture ? mat->normal_texture.scale : 1.0f;
+            detail(mat->occlusion_texture, sm.occlusion, sm.loadOcclusion);
+            sm.occlusionStrength = mat->occlusion_texture.texture ? mat->occlusion_texture.scale : 1.0f;  // cgltf keeps strength as scale
+        }
         mats.push_back(std::move(sm));
     }
     finishImport(out, baked, tree, mats, rig, source, project, settings, stem);
@@ -1594,6 +1633,16 @@ ImportedModel importUfbx(const fs::path& source, const fs::path& project, const 
                     return bytes;
                 };
             }
+            auto detail = [&](const ufbx_material_map& m, const void*& id, auto& load) {
+                const ufbx_texture* d = m.texture;
+                if (d && d->type != UFBX_TEXTURE_FILE && d->file_textures.count) d = d->file_textures.data[0];
+                if (!d || d->type != UFBX_TEXTURE_FILE) return false;
+                id = d;
+                load = [d, dir = source.parent_path()] { return textureBytes(*d, dir); };
+                return true;
+            };
+            if (!detail(mat->pbr.normal_map, sm.normal, sm.loadNormal)) detail(mat->fbx.normal_map, sm.normal, sm.loadNormal);
+            detail(mat->pbr.ambient_occlusion, sm.occlusion, sm.loadOcclusion);
         }
         mats.push_back(std::move(sm));
     }
@@ -1713,6 +1762,7 @@ json settingsJson(const ImportSettings& s) {
     // Only when set, so a sidecar without a target stays as it was.
     if (s.targetTriangles > 0) j["targetTriangles"] = s.targetTriangles;
     if (!s.convertUnits) j["convertUnits"] = false;
+    if (s.bakeDetail) j["bakeDetail"] = true;
     if (s.targetTriangles > 0 && s.sourceTriangles > 0) j["sourceTriangles"] = s.sourceTriangles;
     if (!s.clipNames.empty()) {
         json names = json::object();
@@ -1743,6 +1793,7 @@ ImportSettings loadImportSettings(const fs::path& model) {
         if (!j.is_object()) fail(what + ": not a JSON object");
         s.scale = j.value("scale", s.scale);
         s.convertUnits = j.value("convertUnits", s.convertUnits);
+        s.bakeDetail = j.value("bakeDetail", s.bakeDetail);
         if (j.contains("up")) s.up = enumFrom(j["up"], kUpAxes, "up axis");
         if (j.contains("normals")) s.normals = enumFrom(j["normals"], kNormals, "normals");
         s.smoothingAngle = j.value("smoothingAngle", s.smoothingAngle);
@@ -1770,7 +1821,7 @@ ImportSettings loadImportSettings(const fs::path& model) {
         }
         json written = settingsJson(s);
         for (auto& [k, v] : j.items())
-            if (!written.contains(k) && k != "targetTriangles" && k != "sourceTriangles") s.extra.push_back({k, v.dump()});
+            if (!written.contains(k) && k != "targetTriangles" && k != "sourceTriangles" && k != "bakeDetail") s.extra.push_back({k, v.dump()});
     } catch (const json::exception& e) {
         fail(what + ": " + e.what());
     } catch (const std::runtime_error& e) {
@@ -1788,6 +1839,68 @@ void saveImportSettings(const fs::path& model, const ImportSettings& settings) {
     std::ofstream out(file, std::ios::binary);
     out << text;
     if (!out) fail("cannot write " + projectPath(file.filename()));
+}
+
+std::optional<RgbaImage> decodeRgba(const std::vector<unsigned char>& bytes) {
+    RgbaImage px;
+    int n;
+    unsigned char* d = stbi_load_from_memory(bytes.data(), int(bytes.size()), &px.w, &px.h, &n, 4);
+    if (!d) return std::nullopt;
+    px.rgba.assign(d, d + size_t(px.w) * px.h * 4);
+    stbi_image_free(d);
+    return px;
+}
+
+void bakeSurfaceDetail(RgbaImage& base, const DetailMaps& maps) {
+    // A map at the base's size, resampled (linear data, not sRGB) when it differs.
+    std::vector<unsigned char> nbuf, obuf;
+    auto sized = [&](const RgbaImage* m, std::vector<unsigned char>& out) -> const unsigned char* {
+        if (!m || m->w <= 0 || m->h <= 0) return nullptr;
+        if (m->w == base.w && m->h == base.h) return m->rgba.data();
+        out.assign(size_t(base.w) * base.h * 4, 0);
+        stbir_resize_uint8_linear(m->rgba.data(), m->w, m->h, 0, out.data(), base.w, base.h, 0, STBIR_RGBA);
+        return out.data();
+    };
+    const unsigned char* nm = sized(maps.normal, nbuf);
+    const unsigned char* om = sized(maps.occlusion, obuf);
+    if (!nm && !om) return;
+    const float ll = std::sqrt(0.4f * 0.4f + 0.5f * 0.5f + 1.0f);
+    const float L[3] = {-0.4f / ll, 0.5f / ll, 1.0f / ll};
+    const int oc = std::clamp(maps.occlusionChannel, 0, 3);
+    // x and y encoded 127 or 128 are 0: a flat map must leave the texel exact.
+    auto axis = [](unsigned char c) { return c == 127 || c == 128 ? 0.0f : 2.0f * c / 255.0f - 1.0f; };
+    for (size_t i = 0; i < size_t(base.w) * base.h; i++) {
+        float shade = 1;
+        if (nm) {
+            const unsigned char* t = nm + i * 4;
+            float n[3] = {axis(t[0]) * maps.normalScale, axis(t[1]) * maps.normalScale, 2.0f * t[2] / 255.0f - 1.0f};
+            const float len = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+            if (len > 1e-6f) shade = std::clamp((n[0] * L[0] + n[1] * L[1] + n[2] * L[2]) / len / L[2], 0.0f, 1.6f);
+        }
+        if (om) shade *= 1 + maps.occlusionStrength * (om[i * 4 + oc] / 255.0f - 1);
+        if (shade == 1) continue;
+        for (int c = 0; c < 3; c++) {
+            unsigned char& v = base.rgba[i * 4 + c];
+            v = (unsigned char)std::clamp(std::lround(v * shade), 0L, 255L);
+        }
+    }
+}
+
+void bakeSurfaceDetailFile(const fs::path& base, const DetailFiles& maps, const fs::path& out, std::vector<std::string>& warnings) {
+    auto read = [](const fs::path& f) -> std::optional<RgbaImage> {
+        std::ifstream in(f, std::ios::binary);
+        if (!in) return std::nullopt;
+        return decodeRgba({std::istreambuf_iterator<char>(in), {}});
+    };
+    std::optional<RgbaImage> px = read(base);
+    if (!px) fail("texture " + projectPath(base.filename()) + " is not a PNG or JPEG image");
+    std::optional<RgbaImage> normal, occlusion;
+    for (auto [file, map] : {std::pair{&maps.normal, &normal}, std::pair{&maps.occlusion, &occlusion}})
+        if (!file->empty() && !(*map = read(*file)))
+            warnings.push_back("detail map " + projectPath(file->filename()) + " is not a PNG or JPEG image, it is left out of the texture");
+    bakeSurfaceDetail(*px, {normal ? &*normal : nullptr, maps.normalScale, occlusion ? &*occlusion : nullptr, maps.occlusionChannel,
+                            maps.occlusionStrength});
+    if (!stbi_write_png(projectPath(out).c_str(), px->w, px->h, 4, px->rgba.data(), px->w * 4)) fail("cannot write " + projectPath(out));
 }
 
 }  // namespace splash

@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <map>
+#include <optional>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -88,8 +89,46 @@ struct ImportSettings {
     // makes from the take, so a rename survives importing again. Saved only
     // when there are any.
     std::map<std::string, std::string> clipNames;
+    // A material's normal map and occlusion map baked into the base colour
+    // texture written (see bakeSurfaceDetail): psxsplash lights per vertex,
+    // so the texture is the only place that detail can stay. Saved only on.
+    bool bakeDetail = false;
     ExtraKeys extra;
 };
+
+// An 8-bit RGBA image, rows top-down as stb_image reads them.
+struct RgbaImage {
+    int w = 0, h = 0;
+    std::vector<unsigned char> rgba;
+};
+// A PNG or JPEG decoded; nothing when it is neither.
+std::optional<RgbaImage> decodeRgba(const std::vector<unsigned char>& bytes);
+// The maps bakeSurfaceDetail shades a base colour image by. A normal map is
+// tangent space, green up (OpenGL); occlusion reads one channel of its image.
+struct DetailMaps {
+    const RgbaImage* normal = nullptr;
+    float normalScale = 1;
+    const RgbaImage* occlusion = nullptr;
+    int occlusionChannel = 0;  // 0 red (glTF, FBX), 1 green (Unity)
+    float occlusionStrength = 1;
+};
+// Each texel of `base` times the light a fixed lamp up and to the left
+// (-0.4, 0.5, 1) gives its normal, relative to a flat one (clamped to 0 to
+// 1.6), times 1 + strength * (occlusion - 1). Maps of another size are
+// resampled to the base's. A flat normal (x and y encoded 127 or 128, z 255)
+// and full occlusion leave the texel exactly as it was; alpha is kept.
+void bakeSurfaceDetail(RgbaImage& base, const DetailMaps& maps);
+// The same on files: `base` read, the maps that decode baked into it (one
+// that does not is a warning, left out), written to `out` as PNG. Throws
+// std::runtime_error when `base` cannot be read or `out` written.
+struct DetailFiles {
+    std::filesystem::path normal, occlusion;  // empty for none
+    float normalScale = 1;
+    int occlusionChannel = 0;
+    float occlusionStrength = 1;
+};
+void bakeSurfaceDetailFile(const std::filesystem::path& base, const DetailFiles& maps, const std::filesystem::path& out,
+                           std::vector<std::string>& warnings);
 
 // models/crate.fbx -> models/crate.fbx.import.json
 std::filesystem::path importSettingsPath(const std::filesystem::path& model);

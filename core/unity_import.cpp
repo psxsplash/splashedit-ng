@@ -1163,8 +1163,8 @@ void applyProperty(YNode& body, const std::string& path, const YNode& value) {
 
 class Importer {
   public:
-    Importer(const fs::path& unity, const GuidIndex& index, const fs::path& dest, ImportReport& report)
-        : m_unity(unity), m_index(index), m_dest(dest), m_report(report) {}
+    Importer(const fs::path& unity, const GuidIndex& index, const fs::path& dest, ImportReport& report, bool bakeDetail = false)
+        : m_unity(unity), m_index(index), m_dest(dest), m_report(report), m_bakeDetail(bakeDetail) {}
 
     Scene convert(const fs::path& sceneFile, const std::string& sceneName);
     // PSXData: memory card settings for every scene, VRAM areas for the project.
@@ -1221,6 +1221,8 @@ class Importer {
     std::string copyAsset(const fs::path& src, const std::string& folder, int* counter);
     std::string luaOf(const YNode& ref, const std::string& path, const std::string& field);
     std::string textureOf(const Ref& r, const std::string& path);
+    fs::path textureFile(const Ref& r, const std::string& path, bool quiet = false);
+    std::string detailOf(const Ref& base, const DetailFiles& maps, const std::string& path);
     ModelAsset* model(const std::string& guid, const std::string& path);
     std::string primitive(long long fileId, const std::string& path);
     void item(ReportItem::Kind k, const std::string& object, const std::string& what) {
@@ -1231,6 +1233,7 @@ class Importer {
     const GuidIndex& m_index;
     fs::path m_dest;
     ImportReport& m_report;
+    bool m_bakeDetail = false;
     std::string m_scene;
     std::vector<UObj> m_objs;
     std::vector<std::unique_ptr<std::vector<YDoc>>> m_docStore;
@@ -1586,20 +1589,54 @@ std::string Importer::luaOf(const YNode& refNode, const std::string& path, const
     return rel;
 }
 
-std::string Importer::textureOf(const Ref& r, const std::string& path) {
+// A texture's file when it is a PNG or JPEG in the project, else empty (and
+// a report item unless `quiet`).
+fs::path Importer::textureFile(const Ref& r, const std::string& path, bool quiet) {
     if (r.null() || r.guid.empty()) return {};
     const fs::path f = m_index.file(r.guid);
     std::error_code ec;
     if (f.empty() || !fs::is_regular_file(f, ec)) {
-        item(ReportItem::Missing, path, "texture (guid " + r.guid + ") is not in the project");
+        if (!quiet) item(ReportItem::Missing, path, "texture (guid " + r.guid + ") is not in the project");
         return {};
     }
     const std::string ext = lower(f.extension().string());
     if (ext != ".png" && ext != ".jpg" && ext != ".jpeg") {
-        item(ReportItem::LeftOut, path, "texture " + m_index.path(r.guid) + " is a " + ext + " file; save it as PNG to use it");
+        if (!quiet) item(ReportItem::LeftOut, path, "texture " + m_index.path(r.guid) + " is a " + ext + " file; save it as PNG to use it");
         return {};
     }
-    return copyAsset(f, "textures", &m_report.textures);
+    return f;
+}
+
+std::string Importer::textureOf(const Ref& r, const std::string& path) {
+    const fs::path f = textureFile(r, path);
+    return f.empty() ? std::string() : copyAsset(f, "textures", &m_report.textures);
+}
+
+// The base texture with the material's detail maps baked in, written once
+// per base and maps as textures/<base>_detail.png; empty when there is
+// nothing to bake or the base cannot be read (textureOf then copies it).
+std::string Importer::detailOf(const Ref& base, const DetailFiles& maps, const std::string& path) {
+    const fs::path f = textureFile(base, path, true);
+    if (f.empty() || (maps.normal.empty() && maps.occlusion.empty())) return {};
+    const std::string key = generic(f) + "|" + generic(maps.normal) + "|" + generic(maps.occlusion) + "|" +
+                            std::to_string(maps.normalScale) + "|" + std::to_string(maps.occlusionStrength);
+    if (auto it = m_copied.find(key); it != m_copied.end()) return it->second;
+    const std::string stem = "textures/" + safeStem(f.stem().string()) + "_detail";
+    std::string rel = stem + ".png";
+    for (int n = 2; m_taken.count(rel); ++n) rel = stem + "_" + std::to_string(n) + ".png";
+    std::vector<std::string> warnings;
+    std::error_code ec;
+    fs::create_directories(m_dest / "textures", ec);
+    try {
+        bakeSurfaceDetailFile(f, maps, m_dest / fromUtf8(rel), warnings);
+    } catch (const std::exception& e) {
+        item(ReportItem::Changed, path, std::string(e.what()) + ": its detail maps are left out");
+        return {};
+    }
+    for (const std::string& w : warnings) item(ReportItem::Changed, path, w);
+    m_taken.insert(rel);
+    ++m_report.textures;
+    return m_copied[key] = rel;
 }
 
 Material Importer::materialOf(const Ref& r, const std::string& path) {
@@ -1627,7 +1664,21 @@ Material Importer::materialOf(const Ref& r, const std::string& path) {
                     haveColor = true;
                 }
         }
-        mat.texture = textureOf(tex, path);
+        // _BumpMap and _OcclusionMap (its green channel, as URP reads it).
+        DetailFiles detail;
+        detail.occlusionChannel = 1;
+        if (m_bakeDetail) {
+            for (const YNode& e : props["m_TexEnvs"].seq) {
+                if (const YNode* t = e.find("_BumpMap")) detail.normal = textureFile(refOf((*t)["m_Texture"]), path);
+                if (const YNode* t = e.find("_OcclusionMap")) detail.occlusion = textureFile(refOf((*t)["m_Texture"]), path);
+            }
+            for (const YNode& e : props["m_Floats"].seq) {
+                if (const YNode* v = e.find("_BumpScale")) detail.normalScale = float(v->num(1));
+                if (const YNode* v = e.find("_OcclusionStrength")) detail.occlusionStrength = float(v->num(1));
+            }
+            mat.texture = detailOf(tex, detail, path);
+        }
+        if (mat.texture.empty()) mat.texture = textureOf(tex, path);
         break;
     }
     return mat;
@@ -1643,6 +1694,7 @@ ModelAsset* Importer::model(const std::string& guid, const std::string& path) {
         const fs::path copy = m_dest / fromUtf8(rel);
         ImportSettings s;
         s.source = generic(fs::absolute(src));
+        s.bakeDetail = m_bakeDetail;
         // Unity's model import scale and Convert Units, when the .meta sets them.
         for (const YDoc& d : parseYaml(readText(fs::path(src) += ".meta")))
             if (const YNode* mi = d.body.find("ModelImporter"))
@@ -2663,8 +2715,8 @@ bool isInside(const fs::path& child, const fs::path& parent) {
 }  // namespace
 
 Scene convertScene(const fs::path& unityProject, const GuidIndex& index, const fs::path& scenePath, const fs::path& dest,
-                   ImportReport& report) {
-    Importer imp(unityProject, index, dest, report);
+                   ImportReport& report, const ImportOptions& options) {
+    Importer imp(unityProject, index, dest, report, options.bakeDetail);
     imp.readPsxData();
     return imp.convert(scenePath, scenePath.stem().string());
 }
@@ -2744,7 +2796,7 @@ ImportReport importProject(const fs::path& unityProject, const fs::path& dest, c
         return report;
     }
     for (const char* sub : {"meshes", "textures", "scripts"}) fs::create_directories(dest / sub, ec);
-    Importer imp(unityProject, index, dest, report);
+    Importer imp(unityProject, index, dest, report, options.bakeDetail);
     imp.readPsxData();
     std::set<std::string> names;
     std::string list;

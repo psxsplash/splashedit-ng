@@ -202,6 +202,9 @@ struct ImportOptions {
     // given here. Numbers start at 2 (track 1 is the data) and leave no gap;
     // the files go into music/ and their list into disc.json.
     std::vector<std::pair<int, std::string>> cdTracks;
+    // A material's _BumpMap and _OcclusionMap baked into its base texture
+    // (see splash::bakeSurfaceDetail), and every model's bakeDetail set.
+    bool bakeDetail = false;
 };
 
 // Imports into `dest`, a folder that does not exist yet or is empty (and is
@@ -219,6 +222,6 @@ ImportReport importProject(const std::filesystem::path& unityProject, const std:
 // `scenePath` (a .unity file) as importProject writes them, assets copied
 // into `dest`. Report items go to `report`.
 Scene convertScene(const std::filesystem::path& unityProject, const GuidIndex& index, const std::filesystem::path& scenePath,
-                   const std::filesystem::path& dest, ImportReport& report);
+                   const std::filesystem::path& dest, ImportReport& report, const ImportOptions& options = {});
 
 }  // namespace splash::unity
