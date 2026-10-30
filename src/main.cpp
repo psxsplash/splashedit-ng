@@ -1011,6 +1011,7 @@ int main(int argc, char** argv) {
         }
         scaleQueuedMouse(g_uiScale);
         ImGui::NewFrame();
+        ui::textEditNewFrame();
         ui::interactiveRects().clear();
         ui::namedRects().clear();
         // The splash hides the editor until it starts fading out.
