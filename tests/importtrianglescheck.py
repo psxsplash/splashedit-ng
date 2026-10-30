@@ -4,6 +4,7 @@
 # imported again simplified: the row reads 3200 -> at most 800, its share of
 # the 2000 in-view guide turns from bad to good, the sidecar keeps the target
 # and the count it started from, and the baked mesh on disk has at most 800.
+# Then Bake lost detail, off at first, is switched on and the sidecar keeps it.
 # usage: python3 importtrianglescheck.py <splashedit> [screenshot.png]   (needs a display: xvfb-run -a)
 import json, os, re, shutil, struct, subprocess, sys, tempfile, zlib
 
@@ -73,7 +74,7 @@ W = lambda n: ['--wait', str(n)]
 # The drop imports in the background: the row is there once it is done.
 cmd = [editor, '--size', '1600x960', '--project', project] + W(5) + ['--drop-now', grid + '@800,400'] + W(10) + ['--wait-import'] + W(10) + \
       ['--dblclick', '@itris'] + W(3) + ['--key', 'ctrl+a', '--text', '800', '--key', 'enter'] + W(10) + \
-      ['--wait-import'] + W(30) + ['--move', '800,400'] + W(5) + ['--screenshot', shot]
+      ['--wait-import'] + W(30) + ['--click', '@ibakelost'] + W(10) + ['--wait-import'] + W(30) + ['--move', '800,400'] + W(5) + ['--screenshot', shot]
 r = subprocess.run(cmd, capture_output=True, text=True, env=ENV, timeout=300)
 out = (r.stdout + r.stderr).strip()
 if keep and os.path.exists(shot): shutil.copyfile(shot, keep)
@@ -94,6 +95,9 @@ check('the sidecar keeps the target and the count before simplifying',
 mesh = os.path.join(project, 'models', 'grid.mesh')
 tris = sum(len(s) // 3 for s in json.load(open(mesh))['submeshes']) if os.path.exists(mesh) else -1
 check('the baked mesh on disk was simplified', 0 < tris <= 800 and str(tris) == last[1], tris)
+lost = re.findall(r'^import bake lost detail: (\w+)$', out, re.M)
+check('Bake lost detail starts off and the switch turns it on',
+      bool(lost) and lost[0] == 'off' and lost[-1] == 'on' and side.get('bakeLost') is True, (lost[:1], lost[-1:], side.get('bakeLost')))
 
 # The share is drawn in the good colour in the inspector.
 if os.path.exists(shot):
