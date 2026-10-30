@@ -15421,11 +15421,14 @@ void testLostBakeIdentity() {
 void testLostBakeGrooves() {
     using namespace lostbake;
     const splash::Mesh hi = plate();
-    splash::Mesh lo = hi;
-    // All the way down: the simplifier's error metric keeps groove vertices
-    // until little else is left (at 60 triangles 18 of them still stand).
-    splash::simplifyToTriangles(lo, 2);
-    splash::recomputeNormals(lo, 60);
+    // What simplifying the plate all the way down gives: one flat quad. Built
+    // here rather than by simplifyToTriangles, whose two triangles differ
+    // between compilers (testLostBakeImport covers the simplifier).
+    splash::Mesh lo;
+    lo.positions = {{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}};
+    lo.normals = {{0, 0, 1}, {0, 0, 1}, {0, 0, 1}, {0, 0, 1}};
+    lo.uv = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
+    lo.submeshes = {{0, 1, 2, 0, 2, 3}};
     bool flat = true;
     for (const splash::Vec3& p : lo.positions) flat = flat && p.z == 0;
     CHECK(flat);  // the fixture: simplifying took the grooves away
