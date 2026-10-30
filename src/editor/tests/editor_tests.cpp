@@ -79,6 +79,7 @@
 #include "budget.hh"
 #include "disc.hh"
 #include "licencesim.hh"
+#include "licencetmd.hh"
 #include "font.hh"
 #include "navregion.hh"
 #include "rooms.hh"
@@ -11985,6 +11986,162 @@ void testLicenceSim() {
     CHECK(!splash::simulateLicence(noLogo, rgb, error) && error.rfind("TMD:", 0) == 0);
 }
 
+namespace lictmdtest {
+
+// Axis-aligned boxes in .mesh space (Y up), every triangle wound as the
+// importer winds an outward face: cross(b - a, c - a) points out.
+void addBox(splash::Mesh& m, splash::Vec3 lo, splash::Vec3 hi) {
+    const int base = int(m.positions.size());
+    for (int i = 0; i < 8; i++) {
+        m.positions.push_back({i & 1 ? hi.x : lo.x, i & 2 ? hi.y : lo.y, i & 4 ? hi.z : lo.z});
+        m.normals.push_back({0, 0, 0});
+    }
+    if (m.submeshes.empty()) m.submeshes.emplace_back();
+    const splash::Vec3 mid = (lo + hi) * 0.5f;
+    static const int quads[6][4] = {{0, 2, 3, 1}, {4, 5, 7, 6}, {0, 1, 5, 4}, {2, 6, 7, 3}, {0, 4, 6, 2}, {1, 3, 7, 5}};
+    for (const auto& q : quads)
+        for (const auto& t : {std::array<int, 3>{q[0], q[1], q[2]}, std::array<int, 3>{q[0], q[2], q[3]}}) {
+            std::array<int, 3> v = {base + t[0], base + t[1], base + t[2]};
+            const splash::Vec3 a = m.positions[size_t(v[0])], b = m.positions[size_t(v[1])], c = m.positions[size_t(v[2])];
+            if (splash::dot(splash::cross(b - a, c - a), (a + b + c) / 3 - mid) < 0) std::swap(v[1], v[2]);
+            m.submeshes[0].insert(m.submeshes[0].end(), v.begin(), v.end());
+        }
+}
+
+// The licence screen of a TMD, logo only.
+struct Render {
+    std::vector<uint8_t> rgb;
+    splash::LicenceSimStats st;
+    bool ok = false;
+};
+Render render(const std::vector<uint8_t>& tmd) {
+    Render r;
+    std::vector<uint8_t> lic;
+    std::string error;
+    if (!splash::buildLicence(tmd, "A", "B", lic, error)) return r;
+    const std::vector<splash::LicenceSector> sectors = splash::parseLicence(lic, error);
+    r.ok = splash::simulateLicence(sectors, r.rgb, error, {}, &r.st);
+    return r;
+}
+
+// Lit pixels of `r` in [x0, x1) x [y0, y1).
+int lit(const Render& r, int x0, int y0, int x1, int y1) {
+    int n = 0;
+    for (int y = y0; y < y1; y++)
+        for (int x = x0; x < x1; x++) {
+            const uint8_t* q = &r.rgb[(size_t(y) * 640 + x) * 3];
+            n += (q[0] | q[1] | q[2]) != 0;
+        }
+    return n;
+}
+
+}  // namespace lictmdtest
+
+// Models into licence logos (licencetmd.hh), checked through the simulated
+// boot screen: in the stock logo's box, upright, not mirrored, outward faces
+// kept by the shell's NCLIP, inside 14336 bytes, coloured by the material.
+void testLicenceTmd() {
+    using namespace lictmdtest;
+    const std::vector<splash::Material> white = {splash::Material{}};
+    std::vector<uint8_t> tmd;
+    splash::LicenceTmdReport rep;
+    std::string error;
+
+    // A closed unit cube: all 12 triangles in, only the near faces drawn, the
+    // drawn box inside the stock logo's (x 214..422, y 65..263) and filling it.
+    splash::Mesh cube;
+    addBox(cube, {-0.5f, -0.5f, -0.5f}, {0.5f, 0.5f, 0.5f});
+    CHECK(splash::meshToLicenceTmd(cube, white, {}, {}, tmd, rep, error));
+    const splash::TmdCheck c = splash::checkLicenceTmd(tmd);
+    CHECK(c.ok && c.triangles == 12 && rep.trianglesIn == 12 && rep.trianglesOut == 12 && !rep.simplified);
+    CHECK(rep.bytes == tmd.size() && tmd.size() == 40 + 8 * 8 + 8 * 6 + 16 * 12);
+    Render r = render(tmd);
+    CHECK(r.ok && r.st.trianglesTotal == 12);
+    CHECK(r.st.trianglesDrawn > 1 && r.st.trianglesDrawn < 11);
+    CHECK(r.st.trianglesDrawn <= 6);  // at most three faces of a cube face a point outside it; reversed winding draws 8
+    CHECK(r.st.x0 >= 214 && r.st.x1 <= 422 && r.st.y0 >= 65 && r.st.y1 <= 263);
+    CHECK(r.st.x1 - r.st.x0 >= 0.6 * 208 || r.st.y1 - r.st.y0 >= 0.6 * 198);
+    std::printf("licencetmd cube: %d of 12 drawn, box x %d..%d y %d..%d\n", r.st.trianglesDrawn, r.st.x0, r.st.x1, r.st.y0, r.st.y1);
+    // Half the size: half the box, still centred on it.
+    splash::LicenceTmdOptions half;
+    half.size = 0.5f;
+    CHECK(splash::meshToLicenceTmd(cube, white, {}, half, tmd, rep, error));
+    Render h = render(tmd);
+    CHECK(h.ok && h.st.y1 - h.st.y0 < (r.st.y1 - r.st.y0) * 0.6 && std::abs((h.st.x0 + h.st.x1) / 2 - 318) <= 4 &&
+          std::abs((h.st.y0 + h.st.y1) / 2 - 164) <= 4);
+
+    // An L seen from its front (+Z; the .mesh's X is the file's mirrored, so
+    // the foot's right is -X here): a tall bar on the left, a short foot on the
+    // right at the bottom. More lit below than above on the right (a vertical
+    // flip puts the foot at the top), and more on the left than the right in
+    // the top half (a mirror puts the bar on the right).
+    splash::Mesh ell;
+    addBox(ell, {0, 0, 0}, {1, 3, 1});
+    addBox(ell, {-1.4f, 0, 0}, {0, 0.8f, 1});
+    CHECK(splash::meshToLicenceTmd(ell, white, {}, {}, tmd, rep, error));
+    r = render(tmd);
+    const int mx = (r.st.x0 + r.st.x1) / 2, my = (r.st.y0 + r.st.y1) / 2;
+    const int bottomRight = lit(r, mx, my, r.st.x1 + 1, r.st.y1 + 1), topRight = lit(r, mx, r.st.y0, r.st.x1 + 1, my);
+    const int topLeft = lit(r, r.st.x0, r.st.y0, mx, my);
+    std::printf("licencetmd L: bottom right %d, top right %d, top left %d\n", bottomRight, topRight, topLeft);
+    CHECK(r.ok && bottomRight > topRight);
+    CHECK(topLeft > topRight);
+
+    // About 5000 triangles: simplified into 14336 bytes.
+    splash::Mesh sphere;
+    sphere.submeshes.emplace_back();
+    const int stacks = 50, slices = 51;
+    sphere.positions.push_back({0, 1, 0});
+    for (int i = 1; i < stacks; i++)
+        for (int j = 0; j < slices; j++) {
+            const float th = editor::kPi * float(i) / stacks, ph = 2 * editor::kPi * float(j) / slices;
+            sphere.positions.push_back({std::sin(th) * std::cos(ph), std::cos(th), std::sin(th) * std::sin(ph)});
+        }
+    sphere.positions.push_back({0, -1, 0});
+    sphere.normals = sphere.positions;
+    const int south = int(sphere.positions.size()) - 1;
+    auto ring = [&](int i, int j) { return 1 + (i - 1) * slices + (j % slices); };
+    auto tri = [&](int a, int b, int c2) {
+        const splash::Vec3 pa = sphere.positions[size_t(a)], pb = sphere.positions[size_t(b)], pc = sphere.positions[size_t(c2)];
+        if (splash::dot(splash::cross(pb - pa, pc - pa), pa + pb + pc) < 0) std::swap(b, c2);
+        sphere.submeshes[0].insert(sphere.submeshes[0].end(), {a, b, c2});
+    };
+    for (int j = 0; j < slices; j++) {
+        tri(0, ring(1, j), ring(1, j + 1));
+        tri(south, ring(stacks - 1, j), ring(stacks - 1, j + 1));
+        for (int i = 1; i + 1 < stacks; i++) {
+            tri(ring(i, j), ring(i + 1, j), ring(i + 1, j + 1));
+            tri(ring(i, j), ring(i + 1, j + 1), ring(i, j + 1));
+        }
+    }
+    CHECK(sphere.submeshes[0].size() / 3 == 4998);
+    const auto t0 = std::chrono::steady_clock::now();
+    CHECK(splash::meshToLicenceTmd(sphere, white, {}, {}, tmd, rep, error));
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    std::printf("licencetmd sphere: %d -> %d triangles, %zu bytes, %.1f ms\n", rep.trianglesIn, rep.trianglesOut, rep.bytes, ms);
+    CHECK(rep.trianglesIn == 4998 && rep.simplified && tmd.size() <= 14336 && splash::checkLicenceTmd(tmd).ok);
+    CHECK(rep.trianglesOut == splash::checkLicenceTmd(tmd).triangles && rep.trianglesOut > 100);
+    // Still the whole sphere: about as wide as tall, centred on the box.
+    r = render(tmd);
+    CHECK(r.ok && r.st.x1 - r.st.x0 > 150 && r.st.y1 - r.st.y0 > 150 && std::abs((r.st.x0 + r.st.x1) / 2 - 318) <= 4);
+    splash::LicenceTmdOptions capped;
+    capped.maxTriangles = 200;
+    CHECK(splash::meshToLicenceTmd(sphere, white, {}, capped, tmd, rep, error) && rep.trianglesOut <= 200);
+
+    // A red material: red logo pixels.
+    std::vector<splash::Material> red(1);
+    red[0].color = {1, 0, 0, 1};
+    CHECK(splash::meshToLicenceTmd(cube, red, {}, {}, tmd, rep, error));
+    r = render(tmd);
+    long sum[3] = {0, 0, 0};
+    for (size_t i = 0; i < r.rgb.size(); i++) sum[i % 3] += r.rgb[i];
+    CHECK(r.ok && sum[0] > 0 && sum[0] >= 2 * sum[1] && sum[0] >= 2 * sum[2]);
+
+    // Nothing to draw: an error.
+    error.clear();
+    CHECK(!splash::meshToLicenceTmd(splash::Mesh{}, white, {}, {}, tmd, rep, error) && !error.empty());
+}
+
 void testDiscLicenceImage() {
     using namespace disctest;
     const fs::path dir = g_outDir / "disclicence";
@@ -17858,6 +18015,7 @@ int main(int argc, char** argv) {
     testDiscSettings();
     testDiscLicenceImage();
     testLicenceSim();
+    testLicenceTmd();
     testLicencePreview();
     testDiscExportSettings();
     testAudioSizes();

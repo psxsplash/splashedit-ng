@@ -22,6 +22,7 @@
 #include "budget.hh"
 #include "disc.hh"
 #include "licencesim.hh"
+#include "licencetmd.hh"
 #include "rooms.hh"
 #include "splashpack.hh"
 #include "path.hh"
@@ -2034,7 +2035,7 @@ static void SDLCALL onLicenceTmdPicked(void*, const char* const* files, int) {
     g_licenceTmdPicked = files[0];
 }
 
-static const SDL_DialogFileFilter kTmdFilter[] = {{"TMD model", "tmd"}, {"All files", "*"}};
+static const SDL_DialogFileFilter kTmdFilter[] = {{"TMD logo or model", "tmd;gltf;glb;fbx;obj;blend"}, {"All files", "*"}};
 
 static std::mutex g_trackMutex;
 static std::optional<std::string> g_trackPicked;
@@ -8758,7 +8759,31 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
         static std::string buildTop, buildBottom, buildTmdName, buildTmdError;
         static std::vector<uint8_t> buildTmd;  // the picked file, or the current licence's logo
         static splash::LicenceRegion buildRegion = splash::LicenceRegion::Japan;
+        // A picked model: converted (splash::modelToLicenceTmd) at buildLogoSize percent.
+        static fs::path buildModel;
+        static int buildLogoSize = 100, buildConvertedSize = 100;
+        static std::string buildConverted;  // "<name> converted: ..." for the status line
+        auto convertModel = [&] {
+            buildConvertedSize = buildLogoSize;
+            splash::LicenceTmdOptions opt;
+            opt.size = float(buildLogoSize) / 100;
+            splash::LicenceTmdReport rep;
+            std::string err;
+            buildTmd.clear();
+            buildConverted.clear();
+            buildTmdError.clear();
+            if (!splash::modelToLicenceTmd(buildModel, opt, buildTmd, rep, err)) {
+                buildTmdError = buildTmdName + ": " + err;
+                return;
+            }
+            buildConverted = buildTmdName + " converted: " + std::to_string(rep.trianglesOut) + " triangles, " +
+                             std::to_string(rep.bytes) + " bytes";
+            if (rep.simplified) buildConverted += ", simplified from " + std::to_string(rep.trianglesIn);
+        };
         if (pick == 3) {
+            buildModel.clear();
+            buildConverted.clear();
+            buildLogoSize = 100;
             // The current licence's logo and text, or psxsplash's when it has none.
             std::string why;
             std::vector<splash::LicenceSector> from = splash::resolveLicence(ds.licence, root, why);
@@ -8826,21 +8851,28 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
                     const fs::path p(std::u8string(picked->begin(), picked->end()));
                     buildTmdName = utf8(p.filename());
                     buildTmdError.clear();
-                    std::ifstream in(p, std::ios::binary);
-                    if (in)
+                    buildModel.clear();
+                    buildConverted.clear();
+                    if (splash::canImportModel(p)) {
+                        buildModel = p;
+                        convertModel();
+                    } else if (std::ifstream in(p, std::ios::binary); in) {
                         buildTmd.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
-                    else
+                    } else {
                         buildTmdError = "Cannot read " + buildTmdName;
+                    }
                 }
             }
             const float tx = x0 + space::sm, tw = x1 - space::sm - tx;
             const float lineH = f.regular->CalcTextSizeA(type::caption, FLT_MAX, 0, "A").y;
             dl->AddText(f.regular, type::caption, ImVec2(tx, y - 2), color::textFaint,
-                        "Build a licence from a TMD logo and two lines of text.", nullptr, tw);
+                        "Build a licence from a logo (a TMD or a model) and two lines of text.", nullptr, tw);
             y += lineH + space::xs;
 
-            const ImRect mr = row("ldisclictmd", "Logo (.tmd)",
-                                  "The logo the BIOS shows: a TMD model of flat triangles, at most 14336 bytes.");
+            const ImRect mr = row("ldisclictmd", "Logo (.tmd or model)",
+                                  "The logo the BIOS shows: a TMD model of flat triangles, at most 14336 bytes. A model "
+                                  "(glTF, FBX, OBJ, .blend) is converted to flat triangles, as seen from the front, and "
+                                  "simplified when it does not fit.");
             const float bh = size::field + 6;
             const ImVec2 bp(mr.Min.x, mr.GetCenter().y - bh / 2);
             if (button("disc.licence.tmd", bp, nullptr, "Choose file...", ButtonKind::Secondary)) {
@@ -8853,6 +8885,16 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
             const ImVec4 nclip(nameX, mr.Min.y, x1 - space::xs, mr.Max.y);
             dl->AddText(f.regular, type::caption, ImVec2(nameX, centerY(f.regular, type::caption, mr.Min.y, mr.Max.y)),
                         buildTmdName.empty() ? color::textFaint : color::text, tmdShown.c_str(), nullptr, 0.0f, &nclip);
+            if (!buildModel.empty()) {
+                const ImRect sr = row("ldisclicsize", "Logo size",
+                                      "How large the converted model is drawn: 100% fills the stock logo's box (10 to 200%).");
+                nameRect("disc.licence.logosize", sr);
+                float v = float(buildLogoSize);
+                const FieldEdit fe = numberField("disclicsize", sr, std::to_string(buildLogoSize).c_str(), "%", 0, nullptr, &v, true);
+                if (fe.changed) buildLogoSize = std::clamp(int(std::lround(v)), 10, 200);
+                // A conversion takes up to a second: a drag converts once, when released.
+                if ((fe.done || (fe.changed && !fe.scrubbed)) && buildLogoSize != buildConvertedSize) convertModel();
+            }
 
             static const char* const regionItems[3] = {"Japan", "America", "Europe"};
             const int curRegion = int(buildRegion);
@@ -8885,6 +8927,7 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
 
             // What a Build now would do: the first check that fails, or the logo's size.
             std::string status;
+            bool good = false;
             if (!buildTmdError.empty()) {
                 status = buildTmdError;
             } else if (const splash::TmdCheck c = splash::checkLicenceTmd(buildTmd); !c.ok) {
@@ -8894,9 +8937,11 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
             } else if (std::string e2 = splash::licenceLineError(buildBottom, bottomMax); !e2.empty()) {
                 status = "Bottom line: " + e2;
             } else {
-                status = "TMD ok, " + std::to_string(c.triangles) + (c.triangles == 1 ? " triangle" : " triangles");
+                good = true;
+                status = !buildConverted.empty()
+                             ? buildConverted
+                             : "TMD ok, " + std::to_string(c.triangles) + (c.triangles == 1 ? " triangle" : " triangles");
             }
-            const bool good = status.rfind("TMD ok", 0) == 0;
             {
                 // Two lines, whatever the message wraps to, so the buttons stay put.
                 const ImRect sr(ImVec2(tx, y + space::xs - 2), ImVec2(tx + tw, y + space::xs - 2 + 2 * lineH));

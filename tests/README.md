@@ -489,7 +489,9 @@ and acts as if it stayed open; then a click on another list row selects nothing,
 `testDialogGate` checks the one-at-a-time gate). An image's Texture field (`ui.tex`) takes a texture
 dragged from the Project panel (`textures/other.png`, found by searching), as a Script's File takes a
 .lua, and refuses a scene with a status message; its Browse opens in the project folder (any dialog
-whose caller names no folder does). Needs a display (CI runs it under `xvfb-run` on Linux).
+whose caller names no folder does). With `SPLASHEDIT_FILE_DIALOG=pick:<file>` an open-file dialog
+shows nothing and answers `<file>` at once, printing `file dialog: <kind> picked <file>`
+(licencetmdcheck.py picks a model that way). Needs a display (CI runs it under `xvfb-run` on Linux).
 
     python3 uiinspectorcheck.py <splashedit>
 

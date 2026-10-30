@@ -23,6 +23,7 @@
 #include "gpudump.hh"
 #include "import.hh"
 #include "licencesim.hh"
+#include "licencetmd.hh"
 #include "splashpack.hh"
 #include "texture.hh"
 #include "unity_import.hh"
@@ -112,6 +113,9 @@ static int usage() {
                  "    bytes each; the bottom one 38 for america and europe); what is not given comes\n"
                  "    from the --from licence (default psxsplash); --region picks the sector layout\n"
                  "    (default japan)\n"
+                 "  --model <file> instead of --tmd: a model (glTF, FBX, OBJ, .blend) turned into the logo, flat\n"
+                 "    triangles in the stock logo's box, simplified when it does not fit; --logo-size <percent>\n"
+                 "    (10..200, default 100) scales it; --tmd-out <file> writes the logo TMD used\n"
                  "  --preview-sim <out.png> [--fonts <dir>] instead renders the --from licence's boot screen\n"
                  "    in software (640x480; --fonts: Inter's directory, else no text; --region: the console)\n"
                  "usage: splashpack-cli font <font.ttf> --size <px> -o <sheet.png>\n"
@@ -574,12 +578,15 @@ static int buildCmd(int argc, char** argv) {
 }
 
 static int licenceCmd(int argc, char** argv) {
-    std::string out, tmdPath, from = "psxsplash", top, bottom, regionName = "japan", simOut, fonts;
+    std::string out, tmdPath, from = "psxsplash", top, bottom, regionName = "japan", simOut, fonts, model, tmdOut, logoSize;
     bool hasTop = false, hasBottom = false, hasRegion = false;
     for (int i = 2; i < argc; i++) {
         std::string a = argv[i];
         if (a == "--out" && i + 1 < argc) out = argv[++i];
         else if (a == "--tmd" && i + 1 < argc) tmdPath = argv[++i];
+        else if (a == "--model" && i + 1 < argc) model = argv[++i];
+        else if (a == "--logo-size" && i + 1 < argc) logoSize = argv[++i];
+        else if (a == "--tmd-out" && i + 1 < argc) tmdOut = argv[++i];
         else if (a == "--from" && i + 1 < argc) from = argv[++i];
         else if (a == "--top" && i + 1 < argc) {
             top = argv[++i];
@@ -632,12 +639,41 @@ static int licenceCmd(int argc, char** argv) {
         bytes.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
         return true;
     };
+    if (!model.empty() && !tmdPath.empty()) {
+        std::fprintf(stderr, "error: --model and --tmd both give the logo; pick one\n");
+        return 1;
+    }
+    int sizePercent = 100;
+    if (!logoSize.empty()) {
+        char* end = nullptr;
+        const long v = std::strtol(logoSize.c_str(), &end, 10);
+        if (model.empty() || *end != 0 || v < 10 || v > 200) {
+            std::fprintf(stderr, model.empty() ? "error: --logo-size needs --model\n"
+                                               : "error: --logo-size wants a percent from 10 to 200\n");
+            return 1;
+        }
+        sizePercent = int(v);
+    }
     std::vector<uint8_t> tmd;
     if (!tmdPath.empty() && !read(tmdPath, tmd)) {
         std::fprintf(stderr, "error: cannot read %s\n", tmdPath.c_str());
         return 1;
     }
-    if (tmdPath.empty() || !hasTop || !hasBottom) {
+    std::string converted;
+    if (!model.empty()) {
+        splash::LicenceTmdOptions opt;
+        opt.size = float(sizePercent) / 100;
+        splash::LicenceTmdReport rep;
+        std::string error;
+        if (!splash::modelToLicenceTmd(fs::path(model), opt, tmd, rep, error)) {
+            std::fprintf(stderr, "error: %s: %s\n", model.c_str(), error.c_str());
+            return 1;
+        }
+        for (const std::string& w : rep.warnings) std::fprintf(stderr, "warning: %s\n", w.c_str());
+        converted = ", from " + std::to_string(rep.trianglesIn) + " model triangles, " + std::to_string(rep.bytes) + " TMD bytes" +
+                    (rep.simplified ? " (simplified)" : "");
+    }
+    if ((tmdPath.empty() && model.empty()) || !hasTop || !hasBottom) {
         // What is not given comes from the --from licence.
         std::string error;
         std::vector<splash::LicenceSector> sectors = splash::resolveLicence(from, {}, error);
@@ -649,7 +685,7 @@ static int licenceCmd(int argc, char** argv) {
             std::fprintf(stderr, "error: --from %s has no licence logo or text\n", from.c_str());
             return 1;
         }
-        if (tmdPath.empty()) tmd = splash::licenceTmd(sectors);
+        if (tmdPath.empty() && model.empty()) tmd = splash::licenceTmd(sectors);
         std::pair<std::string, std::string> text = splash::licenceText(sectors);
         if (!hasTop) top = text.first;
         if (!hasBottom) bottom = text.second;
@@ -667,8 +703,17 @@ static int licenceCmd(int argc, char** argv) {
         std::fprintf(stderr, "error: cannot write %s\n", out.c_str());
         return 1;
     }
-    std::printf("licence %zu bytes, %d triangles, %s: \"%s\" / \"%s\"\n", bytes.size(),
-                splash::checkLicenceTmd(tmd).triangles, splash::licenceRegionName(region), top.c_str(),
+    if (!tmdOut.empty()) {
+        std::ofstream t(fs::path(tmdOut), std::ios::binary | std::ios::trunc);
+        t.write(reinterpret_cast<const char*>(tmd.data()), std::streamsize(tmd.size()));
+        t.close();
+        if (!t) {
+            std::fprintf(stderr, "error: cannot write %s\n", tmdOut.c_str());
+            return 1;
+        }
+    }
+    std::printf("licence %zu bytes, %d triangles%s, %s: \"%s\" / \"%s\"\n", bytes.size(),
+                splash::checkLicenceTmd(tmd).triangles, converted.c_str(), splash::licenceRegionName(region), top.c_str(),
                 bottom.c_str());
     return 0;
 }

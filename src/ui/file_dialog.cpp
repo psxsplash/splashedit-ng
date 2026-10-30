@@ -27,6 +27,12 @@ bool held() {
     return v && !std::strcmp(v, "hold");
 }
 
+// SPLASHEDIT_FILE_DIALOG=pick:<file>: no dialog shows; an open dialog answers <file> at once.
+const char* picked() {
+    const char* v = std::getenv("SPLASHEDIT_FILE_DIALOG");
+    return v && !std::strncmp(v, "pick:", 5) ? v + 5 : nullptr;
+}
+
 void SDLCALL answered(void*, const char* const* files, int filter) {
     if (g_callback) g_callback(g_userdata, files, filter);
     g_gate.leave();
@@ -71,7 +77,14 @@ bool showOpenFileDialog(const char* kind, SDL_DialogFileCallback callback, void*
                         int nfilters, const char* defaultLocation, bool allowMany) {
     std::string folder;
     if (!begin(kind, callback, userdata, defaultLocation, &folder)) return false;
-    if (!held()) SDL_ShowOpenFileDialog(answered, nullptr, g_window, filters, nfilters, orNull(folder), allowMany);
+    if (const char* file = picked()) {
+        std::printf("file dialog: %s picked %s\n", kind, file);
+        std::fflush(stdout);
+        const char* const files[2] = {file, nullptr};
+        answered(nullptr, files, 0);
+    } else if (!held()) {
+        SDL_ShowOpenFileDialog(answered, nullptr, g_window, filters, nfilters, orNull(folder), allowMany);
+    }
     return true;
 }
 
