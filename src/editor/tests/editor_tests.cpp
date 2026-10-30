@@ -15315,6 +15315,195 @@ void testBakeDetailDedupe() {
     CHECK(bytes(flat) == plain && bytes(bumped) != plain && !bytes(bumped).empty());
 }
 
+// Bake lost detail (ImportSettings::bakeLost, splash::bakeLostDetail).
+namespace lostbake {
+namespace fs = std::filesystem;
+constexpr int kN = 64;                                  // quads a side, and texels a side
+constexpr int kGrooves[2] = {19, 45};                   // groove bottoms, in quads from the left
+constexpr int kHalf = 4;                                // a groove's half width, in quads
+constexpr float kDepth = kHalf / float(kN) * 0.36f;     // walls about 20 degrees off flat
+constexpr int kSlot0 = 14, kSlot1 = 50;                 // rows of vertices the grooves run along
+// A 1 x 1 plate in XY facing +Z, UV = (x, y), with two V-grooves along Y
+// (each with a wall facing +X, then one facing -X); normals hard at 10 degrees.
+float depthAt(int i, int j) {
+    if (j < kSlot0 || j > kSlot1) return 0;
+    float z = 0;
+    for (int c : kGrooves) z = std::min(z, -kDepth * std::max(0.0f, 1 - std::abs(i - c) / float(kHalf)));
+    return z;
+}
+splash::Mesh plate() {
+    splash::Mesh m;
+    for (int j = 0; j <= kN; j++)
+        for (int i = 0; i <= kN; i++) {
+            m.positions.push_back({i / float(kN), j / float(kN), depthAt(i, j)});
+            m.normals.push_back({0, 0, 1});
+            m.uv.push_back({i / float(kN), j / float(kN)});
+        }
+    m.submeshes.emplace_back();
+    for (int j = 0; j < kN; j++)
+        for (int i = 0; i < kN; i++) {
+            const int a = j * (kN + 1) + i, b = a + 1, c = a + kN + 2, d = a + kN + 1;
+            m.submeshes[0].insert(m.submeshes[0].end(), {a, b, c, a, c, d});
+        }
+    splash::recomputeNormals(m, 10);
+    return m;
+}
+splash::RgbaImage grey() {
+    splash::RgbaImage im{kN, kN, std::vector<unsigned char>(size_t(kN) * kN * 4, 128)};
+    for (size_t i = 3; i < im.rgba.size(); i += 4) im.rgba[i] = 255;
+    return im;
+}
+// The texel over quad (i, j): rows run down, v up.
+int red(const splash::RgbaImage& im, int i, int j) { return im.rgba[(size_t(kN - 1 - j) * kN + size_t(i)) * 4]; }
+bool far(int i, int j) {
+    if (j < kSlot0 - 2 || j > kSlot1 + 2) return true;
+    for (int c : kGrooves)
+        if (std::abs(i - c) <= kHalf + 2) return false;
+    return true;
+}
+// p.gltf beside p.bin and base.png: the plate, its base colour a grey texture.
+void gltf(const fs::path& dir) {
+    fs::create_directories(dir);
+    baketest::png(dir / "base.png", kN, kN, [](int, int) { return baketest::Px{128, 128, 128, 255}; });
+    const splash::Mesh m = plate();
+    std::string bin;
+    auto put = [&](const void* p, size_t n) { bin.append(static_cast<const char*>(p), n); };
+    for (const splash::Vec3& p : m.positions) put(&p, 12);
+    for (const splash::Vec2& t : m.uv) {
+        const float uv[2] = {t.x, 1 - t.y};  // glTF's V from the top
+        put(uv, 8);
+    }
+    for (int i : m.submeshes[0]) {
+        const uint16_t k = uint16_t(i);
+        put(&k, 2);
+    }
+    const size_t nv = m.positions.size(), ni = m.submeshes[0].size();
+    std::ofstream(dir / "p.bin", std::ios::binary) << bin;
+    std::ofstream(dir / "p.gltf")
+        << R"({"asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],"nodes":[{"mesh":0}],)"
+        << R"("meshes":[{"primitives":[{"attributes":{"POSITION":0,"TEXCOORD_0":1},"indices":2,"material":0}]}],)"
+        << R"("materials":[{"pbrMetallicRoughness":{"baseColorTexture":{"index":0}}}],"textures":[{"source":0}],)"
+        << R"("images":[{"uri":"base.png"}],"buffers":[{"uri":"p.bin","byteLength":)" << bin.size() << R"(}],"bufferViews":[)"
+        << R"({"buffer":0,"byteOffset":0,"byteLength":)" << nv * 12 << "},"
+        << R"({"buffer":0,"byteOffset":)" << nv * 12 << R"(,"byteLength":)" << nv * 8 << "},"
+        << R"({"buffer":0,"byteOffset":)" << nv * 20 << R"(,"byteLength":)" << ni * 2 << "}],"
+        << R"("accessors":[{"bufferView":0,"componentType":5126,"count":)" << nv << R"(,"type":"VEC3","min":[0,0,)" << -kDepth
+        << R"(],"max":[1,1,0]},{"bufferView":1,"componentType":5126,"count":)" << nv << R"(,"type":"VEC2"},)"
+        << R"({"bufferView":2,"componentType":5123,"count":)" << ni << R"(,"type":"SCALAR"}]})";
+}
+// dir/p.gltf imported into a fresh project dir/<as>: its texture's bytes.
+std::string imported(const fs::path& dir, const char* as, bool lost, int target, splash::ImportedModel* model = nullptr) {
+    const fs::path proj = dir / as;
+    fs::remove_all(proj);
+    fs::create_directories(proj);
+    splash::ImportSettings s;
+    s.bakeLost = lost;
+    s.targetTriangles = target;
+    const splash::ImportedModel m = splash::importModel(dir / "p.gltf", proj, s);
+    if (model) *model = m;
+    return m.materials.empty() || m.materials[0].texture.empty() ? std::string() : baketest::bytes(proj / m.materials[0].texture);
+}
+}  // namespace lostbake
+
+// hi == lo leaves every texel byte-identical.
+void testLostBakeIdentity() {
+    using namespace lostbake;
+    const splash::Mesh hi = plate();
+    splash::RgbaImage im = grey();
+    const splash::LostDetailStats st = splash::bakeLostDetail(im, hi, hi, {0});
+    CHECK(im.rgba == grey().rgba);
+    CHECK(st.baked == kN * kN && st.covered == kN * kN && st.overlapped == 0 && st.skippedUv == 0);
+}
+
+// Simplified flat, the grooves come back as shade in the texture: the wall
+// facing the lamp (up and to the viewer's left, +X in the .mesh) lighter, the
+// other darker, the plate far from them untouched.
+void testLostBakeGrooves() {
+    using namespace lostbake;
+    const splash::Mesh hi = plate();
+    splash::Mesh lo = hi;
+    // All the way down: the simplifier's error metric keeps groove vertices
+    // until little else is left (at 60 triangles 18 of them still stand).
+    splash::simplifyToTriangles(lo, 2);
+    splash::recomputeNormals(lo, 60);
+    bool flat = true;
+    for (const splash::Vec3& p : lo.positions) flat = flat && p.z == 0;
+    CHECK(flat);  // the fixture: simplifying took the grooves away
+    splash::RgbaImage im = grey();
+    const splash::LostDetailStats st = splash::bakeLostDetail(im, hi, lo, {0});
+    CHECK(st.overlapped == 0 && st.skippedUv == 0 && st.baked > kN * kN * 9 / 10);
+    int changed = 0, walls = 0, farSame = 0, farAll = 0;
+    double towards = 0, away = 0;
+    for (int j = kSlot0 + 2; j < kSlot1 - 2; j++)
+        for (int c : kGrooves)
+            for (int k = 0; k < kHalf; k++) {
+                const int lit = red(im, c - kHalf + k, j), shaded = red(im, c + k, j);  // +X-facing, then -X-facing
+                changed += (lit != 128) + (shaded != 128), walls += 2;
+                towards += lit, away += shaded;
+            }
+    for (int j = 0; j < kN; j++)
+        for (int i = 0; i < kN; i++)
+            if (far(i, j)) {
+                farAll++;
+                const size_t o = (size_t(kN - 1 - j) * kN + size_t(i)) * 4;
+                farSame += im.rgba[o] == 128 && im.rgba[o + 1] == 128 && im.rgba[o + 2] == 128 && im.rgba[o + 3] == 255;
+            }
+    towards /= walls / 2, away /= walls / 2;
+    std::printf("lostbake grooves: %d/%d wall texels changed, far %d/%d same, +X wall %.1f, -X wall %.1f\n", changed, walls, farSame,
+                farAll, towards, away);
+    CHECK(changed == walls);
+    CHECK(farAll > 1000 && farSame == farAll);
+    CHECK(towards > 128 && 128 > away);  // the lamp's side
+}
+
+// Two lo triangles over the same texels (mirrored UVs): those stay as they were.
+void testLostBakeOverlap() {
+    using namespace lostbake;
+    const splash::Mesh hi = plate();
+    splash::Mesh lo;
+    // The left half of the plate, then the right half mapped onto the same
+    // UVs mirrored: every texel of the left half under two triangles.
+    for (float x0 : {0.0f, 0.5f})
+        for (auto [x, y] : {std::pair{0.0f, 0.0f}, {0.5f, 0.0f}, {0.5f, 1.0f}, {0.0f, 1.0f}}) {
+            lo.positions.push_back({x0 + x, y, 0});
+            lo.normals.push_back({0, 0, 1});
+            lo.uv.push_back({x0 == 0 ? x : 0.5f - x, y});
+        }
+    lo.submeshes = {{0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7}};
+    splash::RgbaImage im = grey();
+    const splash::LostDetailStats st = splash::bakeLostDetail(im, hi, lo, {0});
+    std::printf("lostbake overlap: covered %d overlapped %d baked %d\n", st.covered, st.overlapped, st.baked);
+    CHECK(im.rgba == grey().rgba);
+    CHECK(st.overlapped > 0 && st.overlapped == st.covered && st.baked == 0);
+}
+
+// Through importModel: on with a target the texture differs from off; on
+// without a target it is off's byte for byte. The sidecar keeps the setting.
+void testLostBakeImport() {
+    using namespace lostbake;
+    const fs::path dir = g_outDir / "lostbake";
+    fs::remove_all(dir);
+    gltf(dir);
+    splash::ImportedModel m;
+    const std::string off = imported(dir, "off", false, 200), on = imported(dir, "on", true, 200, &m);
+    const std::string all = imported(dir, "all", false, 0), allOn = imported(dir, "allon", true, 0);
+    std::printf("lostbake import: %d -> %d triangles, %zu warnings\n", m.sourceTriangles, m.triangles, m.warnings.size());
+    CHECK(m.triangles < m.sourceTriangles);
+    CHECK(!off.empty() && !on.empty() && on != off);
+    CHECK(!all.empty() && allOn == all);
+    for (const std::string& w : m.warnings) CHECK(w.find("overlap") == std::string::npos && w.find("outside 0 to 1") == std::string::npos);
+    splash::ImportSettings s;
+    s.bakeLost = true;
+    splash::saveImportSettings(dir / "p.gltf", s);
+    const std::string text = baketest::bytes(splash::importSettingsPath(dir / "p.gltf"));
+    CHECK(text.find("\"bakeLost\": true") != std::string::npos);
+    const splash::ImportSettings back = splash::loadImportSettings(dir / "p.gltf");
+    CHECK(back.bakeLost && back.extra.empty());
+    splash::saveImportSettings(dir / "p.gltf", splash::ImportSettings{});
+    CHECK(baketest::bytes(splash::importSettingsPath(dir / "p.gltf")).find("bakeLost") == std::string::npos);
+    CHECK(!splash::loadImportSettings(dir / "p.gltf").bakeLost);
+}
+
 void testUnityYaml() {
     using namespace splash::unity;
     const char* text =
@@ -18204,6 +18393,10 @@ int main(int argc, char** argv) {
     testBakeDetailGltf();
     testBakeDetailUnity();
     testBakeDetailDedupe();
+    testLostBakeIdentity();
+    testLostBakeGrooves();
+    testLostBakeOverlap();
+    testLostBakeImport();
     testSimplifyToTriangles();
     testImportTargetTriangles();
     testModelImports();

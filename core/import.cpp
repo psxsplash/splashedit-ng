@@ -505,6 +505,7 @@ void dropped(const std::string& node) {
 // position that are within `degrees` of its own face's, each weighted by the
 // angle its triangle makes there, so a cube corner takes its three sides
 // evenly. Corners holding the same vertex and normal share one vertex.
+}  // namespace
 void recomputeNormals(Mesh& mesh, float degrees) {
     std::vector<std::array<int, 3>> tris;
     for (const std::vector<int>& sm : mesh.submeshes)
@@ -569,6 +570,7 @@ void recomputeNormals(Mesh& mesh, float degrees) {
     }
     mesh = std::move(out);
 }
+namespace {
 
 // Quaternion product a * b: b's rotation, then a's.
 Quat mulQuat(Quat a, Quat b) {
@@ -910,6 +912,15 @@ void finishImport(ImportedModel& out, Sink& baked, std::vector<NodeBuild>& nodes
     placeRootSpaceNodes(nodes);
     checkpoint(0.6f);
     out.sourceTriangles = baked.triangles();
+    // bakeLost: the full mesh, for what simplifying takes away from it.
+    const bool bakeLost = settings.bakeLost && settings.targetTriangles > 0;
+    Mesh hi;
+    if (bakeLost) {
+        hi.positions = baked.mesh.positions;
+        hi.normals = baked.mesh.normals;
+        hi.uv = baked.mesh.uv;
+        hi.submeshes = baked.mesh.submeshes;
+    }
     reduce(out, baked, nodes, settings);
     checkpoint(0.65f);
     const Mesh& mesh = baked.mesh;
@@ -922,10 +933,22 @@ void finishImport(ImportedModel& out, Sink& baked, std::vector<NodeBuild>& nodes
     if (ec) fail("cannot create " + projectPath(project / dir) + ": " + ec.message());
 
     // Textures: each image used as a base colour, written once (once per
-    // pair of detail maps baked into it).
-    using TexKey = std::tuple<const void*, const void*, const void*>;
+    // pair of detail maps baked into it). With bakeLost the key says so: a
+    // copy with lost detail baked in is never taken for the plain image. It
+    // is baked from the triangles of every material sharing the key, which
+    // all draw it.
+    using TexKey = std::tuple<const void*, const void*, const void*, bool>;
     auto keyOf = [&](const SourceMaterial& m) {
-        return settings.bakeDetail ? TexKey{m.image, m.normal, m.occlusion} : TexKey{m.image, nullptr, nullptr};
+        return settings.bakeDetail ? TexKey{m.image, m.normal, m.occlusion, bakeLost} : TexKey{m.image, nullptr, nullptr, bakeLost};
+    };
+    // The baked mesh's submeshes whose material draws `key`'s texture.
+    auto submeshesOf = [&](const TexKey& key) {
+        std::vector<int> sms;
+        for (size_t k = 0; k < baked.materials.size(); k++) {
+            const SourceMaterial& m = mats[size_t(baked.materials[k])];
+            if (m.image && keyOf(m) == key) sms.push_back(int(k));
+        }
+        return sms;
     };
     std::map<TexKey, std::string> written;
     std::set<TexKey> tried;
@@ -944,10 +967,20 @@ void finishImport(ImportedModel& out, Sink& baked, std::vector<NodeBuild>& nodes
                 if (std::optional<std::vector<unsigned char>> bytes = mat.load()) {
                     Pixels px = decode(*bytes, what + " texture");
                     if (settings.bakeDetail) bakeMaterialDetail(px, mat, out.warnings);
+                    fs::path file = dir / (imagesUsed == 1 ? stem + ".png" : stem + "_" + std::to_string(n++) + ".png");
+                    if (bakeLost) {
+                        const LostDetailStats st = bakeLostDetail(px, hi, mesh, submeshesOf(keyOf(mat)));
+                        if (st.overlapped * 20 > st.covered)
+                            out.warnings.push_back(projectPath(file) +
+                                                   ": UVs overlap (mirrored or tiled), lost detail baked only where they do not");
+                        if (st.skippedUv > 0)
+                            out.warnings.push_back(projectPath(file) + ": " + std::to_string(st.skippedUv) +
+                                                   (st.skippedUv == 1 ? " triangle has" : " triangles have") +
+                                                   " UVs outside 0 to 1, lost detail is not baked on them");
+                    }
                     if (fit(px))
                         out.warnings.push_back("a texture was scaled down to " + std::to_string(px.w) + " x " + std::to_string(px.h) +
                                                ", the most a PS1 texture can be");
-                    fs::path file = dir / (imagesUsed == 1 ? stem + ".png" : stem + "_" + std::to_string(n++) + ".png");
                     if (!stbi_write_png(projectPath(project / file).c_str(), px.w, px.h, 4, px.rgba.data(), px.w * 4))
                         fail("cannot write " + projectPath(file));
                     rel = projectPath(file);
@@ -1763,6 +1796,7 @@ json settingsJson(const ImportSettings& s) {
     if (s.targetTriangles > 0) j["targetTriangles"] = s.targetTriangles;
     if (!s.convertUnits) j["convertUnits"] = false;
     if (s.bakeDetail) j["bakeDetail"] = true;
+    if (s.bakeLost) j["bakeLost"] = true;
     if (s.targetTriangles > 0 && s.sourceTriangles > 0) j["sourceTriangles"] = s.sourceTriangles;
     if (!s.clipNames.empty()) {
         json names = json::object();
@@ -1794,6 +1828,7 @@ ImportSettings loadImportSettings(const fs::path& model) {
         s.scale = j.value("scale", s.scale);
         s.convertUnits = j.value("convertUnits", s.convertUnits);
         s.bakeDetail = j.value("bakeDetail", s.bakeDetail);
+        s.bakeLost = j.value("bakeLost", s.bakeLost);
         if (j.contains("up")) s.up = enumFrom(j["up"], kUpAxes, "up axis");
         if (j.contains("normals")) s.normals = enumFrom(j["normals"], kNormals, "normals");
         s.smoothingAngle = j.value("smoothingAngle", s.smoothingAngle);
@@ -1821,7 +1856,9 @@ ImportSettings loadImportSettings(const fs::path& model) {
         }
         json written = settingsJson(s);
         for (auto& [k, v] : j.items())
-            if (!written.contains(k) && k != "targetTriangles" && k != "sourceTriangles" && k != "bakeDetail") s.extra.push_back({k, v.dump()});
+            if (!written.contains(k) && k != "targetTriangles" && k != "sourceTriangles" && k != "bakeDetail" &&
+                k != "bakeLost")
+                s.extra.push_back({k, v.dump()});
     } catch (const json::exception& e) {
         fail(what + ": " + e.what());
     } catch (const std::runtime_error& e) {
@@ -1884,6 +1921,107 @@ void bakeSurfaceDetail(RgbaImage& base, const DetailMaps& maps) {
             v = (unsigned char)std::clamp(std::lround(v * shade), 0L, 255L);
         }
     }
+}
+
+LostDetailStats bakeLostDetail(RgbaImage& px, const Mesh& hi, const Mesh& lo, const std::vector<int>& submeshes) {
+    LostDetailStats st;
+    const int w = px.w, h = px.h;
+    if (w <= 0 || h <= 0 || px.rgba.size() < size_t(w) * size_t(h) * 4) return st;
+    // Up and to the left as seen from the front (+Z): the .mesh mirrors X, so
+    // the viewer's left is +X.
+    const float ll = std::sqrt(0.4f * 0.4f + 0.5f * 0.5f + 1.0f);
+    const Vec3 L{0.4f / ll, 0.5f / ll, 1.0f / ll};
+    const size_t texels = size_t(w) * size_t(h);
+    std::vector<unsigned char> count(texels, 0);  // `lo` triangles over each texel, up to 255
+    std::vector<float> dlo(texels, 0), dhi(texels, 0);
+    std::vector<unsigned char> hit(texels, 0);
+    // Calls put(texel, unit normal) for each texel centre a triangle of
+    // `submeshes` covers. Corners in fixed point (a 256th of a texel), with a
+    // tie rule for centres on an edge, so a shared edge is drawn once.
+    auto draw = [&](const Mesh& m, auto&& put) {
+        if (m.uv.size() != m.positions.size() || m.normals.size() != m.positions.size()) return;
+        constexpr int64_t kSub = 256;
+        for (int si : submeshes) {
+            if (si < 0 || size_t(si) >= m.submeshes.size()) continue;
+            const std::vector<int>& sm = m.submeshes[size_t(si)];
+            for (size_t i = 0; i + 2 < sm.size(); i += 3) {
+                int v[3] = {sm[i], sm[i + 1], sm[i + 2]};
+                int64_t X[3], Y[3];
+                bool outside = false;
+                for (int c = 0; c < 3; c++) {
+                    const Vec2 uv = m.uv[size_t(v[c])];
+                    if (!(uv.x >= 0 && uv.x <= 1 && uv.y >= 0 && uv.y <= 1)) outside = true;
+                    X[c] = std::llround(double(uv.x) * w * kSub);
+                    Y[c] = std::llround((1.0 - double(uv.y)) * h * kSub);  // v up, rows down
+                }
+                if (outside) {
+                    st.skippedUv++;
+                    continue;
+                }
+                int64_t area = (X[1] - X[0]) * (Y[2] - Y[0]) - (Y[1] - Y[0]) * (X[2] - X[0]);
+                if (area == 0) continue;
+                if (area < 0) std::swap(X[1], X[2]), std::swap(Y[1], Y[2]), std::swap(v[1], v[2]), area = -area;
+                // Edge e runs from corner e+1 to e+2; a centre exactly on it is
+                // inside for one of the two triangles sharing it.
+                int64_t bias[3];
+                for (int e = 0; e < 3; e++) {
+                    const int64_t dx = X[(e + 2) % 3] - X[(e + 1) % 3], dy = Y[(e + 2) % 3] - Y[(e + 1) % 3];
+                    bias[e] = dy > 0 || (dy == 0 && dx < 0) ? 0 : -1;
+                }
+                const int64_t minX = std::min({X[0], X[1], X[2]}), maxX = std::max({X[0], X[1], X[2]});
+                const int64_t minY = std::min({Y[0], Y[1], Y[2]}), maxY = std::max({Y[0], Y[1], Y[2]});
+                const int x0 = std::max(0, int(std::ceil(double(minX - kSub / 2) / kSub)));
+                const int x1 = std::min(w - 1, int(std::floor(double(maxX - kSub / 2) / kSub)));
+                const int y0 = std::max(0, int(std::ceil(double(minY - kSub / 2) / kSub)));
+                const int y1 = std::min(h - 1, int(std::floor(double(maxY - kSub / 2) / kSub)));
+                const Vec3 n0 = m.normals[size_t(v[0])], n1 = m.normals[size_t(v[1])], n2 = m.normals[size_t(v[2])];
+                for (int y = y0; y <= y1; y++)
+                    for (int x = x0; x <= x1; x++) {
+                        const int64_t sx = x * kSub + kSub / 2, sy = y * kSub + kSub / 2;
+                        int64_t E[3];
+                        bool in = true;
+                        for (int e = 0; e < 3 && in; e++) {
+                            const int a = (e + 1) % 3, b = (e + 2) % 3;
+                            E[e] = (X[b] - X[a]) * (sy - Y[a]) - (Y[b] - Y[a]) * (sx - X[a]);
+                            in = E[e] + bias[e] >= 0;
+                        }
+                        if (!in) continue;
+                        const float w0 = float(double(E[0]) / double(area)), w1 = float(double(E[1]) / double(area)),
+                                    w2 = float(double(E[2]) / double(area));
+                        const Vec3 n{w0 * n0.x + w1 * n1.x + w2 * n2.x, w0 * n0.y + w1 * n1.y + w2 * n2.y,
+                                     w0 * n0.z + w1 * n1.z + w2 * n2.z};
+                        const float len = std::sqrt(dot(n, n));
+                        if (len > 1e-12f) put(size_t(y) * size_t(w) + size_t(x), Vec3{n.x / len, n.y / len, n.z / len});
+                    }
+            }
+        }
+    };
+    draw(lo, [&](size_t t, Vec3 n) {
+        if (count[t] < 255) count[t]++;
+        dlo[t] = dot(n, L);
+    });
+    draw(hi, [&](size_t t, Vec3 n) {
+        if (count[t] != 1) return;
+        dhi[t] = dot(n, L);
+        hit[t] = 1;
+    });
+    for (size_t t = 0; t < texels; t++) {
+        if (count[t] == 0) continue;
+        st.covered++;
+        if (count[t] > 1) {
+            st.overlapped++;
+            continue;
+        }
+        if (!hit[t]) continue;
+        st.baked++;
+        const float shade = std::clamp(1 + (dhi[t] - dlo[t]) / L.z, 0.0f, 1.6f);
+        if (shade == 1) continue;
+        for (int c = 0; c < 3; c++) {
+            unsigned char& b = px.rgba[t * 4 + size_t(c)];
+            b = (unsigned char)std::clamp(std::lround(b * shade), 0L, 255L);
+        }
+    }
+    return st;
 }
 
 void bakeSurfaceDetailFile(const fs::path& base, const DetailFiles& maps, const fs::path& out, std::vector<std::string>& warnings) {

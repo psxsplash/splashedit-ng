@@ -64,9 +64,10 @@ static int usage() {
                  "  --pcm writes the 16-bit mono WAV the encoder starts from, before resampling\n"
                  "usage: splashpack-cli import <model.glb|model.gltf|model.fbx|model.obj|model.blend> --project <dir>\n"
                  "    [--scale <f>] [--up file|y|z] [--normals import|recompute] [--smoothing <deg>] [--merge]\n"
-                 "    [--triangles <n>]\n"
+                 "    [--triangles <n>] [--bake-lost]\n"
                  "  writes models/<name>.mesh and its textures into the project, as the editor does;\n"
-                 "  the settings start from <model>.import.json beside the model when there is one\n"
+                 "  the settings start from <model>.import.json beside the model when there is one;\n"
+                 "  --bake-lost shades the textures with the detail simplifying to --triangles removed\n"
                  "usage: splashpack-cli import-clips <file> --project <dir> --model <models/name.ext>\n"
                  "  writes the file's animations for the skeleton of models/<name>.mesh, by joint name and with\n"
                  "  the model's import settings, into models/<name>/clips/<file>/, as the editor's Add clips does\n"
@@ -358,6 +359,7 @@ static int importCmd(int argc, char** argv) {
             else if (a == "--scale" && more) s.scale = std::strtof(argv[++i], nullptr);
             else if (a == "--smoothing" && more) s.smoothingAngle = std::strtof(argv[++i], nullptr);
             else if (a == "--merge") s.mergeMeshes = true;
+            else if (a == "--bake-lost") s.bakeLost = true;
             else if (a == "--triangles" && more) { const int t = std::atoi(argv[++i]); s.targetTriangles = t > 0 ? t : 0; }
             else if (a == "--up" && more) {
                 std::string v = argv[++i];

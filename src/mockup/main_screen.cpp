@@ -11065,6 +11065,17 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                                                       splash::budgetBand(share));
                     }
                 }
+                ImRect lv = irow("libakelost", "Bake lost detail",
+                                 "Shade the texture with the detail that simplifying removed. Best on hard-surface models. "
+                                 "Used with a Triangles target.");
+                const ImRect lt(ImVec2(lv.Min.x, lv.GetCenter().y - 8), ImVec2(lv.Min.x + 30, lv.GetCenter().y + 8));
+                nameRect("ibakelost", lt);  // --click @ibakelost
+                if (toggle("ibakelost", lt, cur.bakeLost)) {
+                    splash::ImportSettings next = ip.settings;
+                    next.bakeLost = !next.bakeLost;
+                    apply(next);
+                }
+                scriptLine("import.bakelost", std::string("import bake lost detail: ") + (cur.bakeLost ? "on" : "off"));
                 ImRect mv = irow("limerge", "Merge meshes",
                                  "On makes each placed copy of the model one object drawing a single mesh. Off keeps the file's parts as "
                                  "child objects. Changing it rebuilds the copies already in the scene.");

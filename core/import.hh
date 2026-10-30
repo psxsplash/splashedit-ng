@@ -93,6 +93,10 @@ struct ImportSettings {
     // texture written (see bakeSurfaceDetail): psxsplash lights per vertex,
     // so the texture is the only place that detail can stay. Saved only on.
     bool bakeDetail = false;
+    // With a targetTriangles: the shading the simplified mesh lost against
+    // the full one baked into each base colour texture (see bakeLostDetail).
+    // Saved only on.
+    bool bakeLost = false;
     ExtraKeys extra;
 };
 
@@ -129,6 +133,31 @@ struct DetailFiles {
 };
 void bakeSurfaceDetailFile(const std::filesystem::path& base, const DetailFiles& maps, const std::filesystem::path& out,
                            std::vector<std::string>& warnings);
+
+// What bakeLostDetail did to one texture.
+struct LostDetailStats {
+    int baked = 0;       // texels given a shade (exactly 1 included)
+    int covered = 0;     // texels at least one `lo` triangle covers
+    int overlapped = 0;  // texels more than one `lo` triangle covers, left as they were
+    int skippedUv = 0;   // triangles (of `hi` and `lo`) with a UV outside 0 to 1, left out
+};
+// The detail simplifying `hi` into `lo` removed, baked into `px`, the base
+// colour texture of `submeshes` (indices into both meshes' submeshes, which
+// simplifyToTriangles keeps in order). Both meshes' triangles are drawn into
+// the texture at its size (texel centres, UV bottom-left origin, rows top-down
+// as stb_image reads them, shared edges drawn once) for the interpolated
+// normal of each; a texel is multiplied by 1 + (n_hi.L - n_lo.L) / L.z
+// (clamped to 0 to 1.6), L the lamp up and to the left in front of the
+// model: (0.4, 0.5, 1) in the .mesh's left-handed space, which is glTF's
+// (-0.4, 0.5, 1) with X mirrored. Alpha is kept. A texel no `hi` triangle
+// covers, or that not exactly one `lo` triangle covers (mirrored or tiled
+// UVs), stays as it was; so does every texel when hi == lo. Triangles with a
+// UV outside 0 to 1 are left out.
+LostDetailStats bakeLostDetail(RgbaImage& px, const Mesh& hi, const Mesh& lo, const std::vector<int>& submeshes);
+// Every corner's normal from the faces around its position within `degrees`
+// of its own face's: what importing does with Normals::Recompute and to a
+// simplified mesh.
+void recomputeNormals(Mesh& mesh, float degrees);
 
 // models/crate.fbx -> models/crate.fbx.import.json
 std::filesystem::path importSettingsPath(const std::filesystem::path& model);
