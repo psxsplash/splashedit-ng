@@ -331,7 +331,8 @@ struct State {
         // CD music files as typed or picked: [0] is disc track 2. Unity keeps
         // this list in its editor preferences, not in the project.
         std::vector<std::string> cdTracks;
-        std::string listedFor;         // the source `scenes` was read for
+        bool bakeDetail = false;       // normal and occlusion maps baked into textures
+        std::string listedFor;        // the source `scenes` was read for
         std::future<splash::unity::ImportReport> running;
         std::filesystem::path runningDest;
         std::optional<splash::unity::ImportReport> result;  // set: the report page

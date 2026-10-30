@@ -71,7 +71,7 @@ static int usage() {
                  "  writes the file's animations for the skeleton of models/<name>.mesh, by joint name and with\n"
                  "  the model's import settings, into models/<name>/clips/<file>/, as the editor's Add clips does\n"
                  "usage: splashpack-cli import-unity <unityProject> <destDir> [--scenes Name1,Name2,...]\n"
-                 "    [--cd-track N=<audio file>]...\n"
+                 "    [--cd-track N=<audio file>]... [--bake-detail]\n"
                  "  makes a new project in <destDir> (new or empty) from the scenes of a Unity SplashEdit\n"
                  "  project, in the order given (default: every scene with a PSXSceneExporter, in Build\n"
                  "  Settings order, then by name); prints what it did not bring over and a summary line,\n"
@@ -79,6 +79,7 @@ static int usage() {
                  "  --cd-track gives CD music track N (2 and up, no gaps; Audio.PlayCDDA(N) plays it): Unity\n"
                  "    keeps that list in its editor preferences, not in the project; the files are copied\n"
                  "    into <destDir>/music and listed in disc.json\n"
+                 "  --bake-detail bakes each material's _BumpMap and _OcclusionMap into its texture\n"
                  "usage: splashpack-cli resave <in.scene|in.mesh> <out>\n"
                  "  loads and saves a scene or mesh file\n"
                  "usage: splashpack-cli luac <in.lua> -o <out.luac>\n"
@@ -298,6 +299,8 @@ static int importUnity(int argc, char** argv) {
                 if (c > p) opt.scenes.push_back(list.substr(p, c - p));
                 p = c + 1;
             }
+        } else if (a == "--bake-detail") {
+            opt.bakeDetail = true;
         } else if (a == "--cd-track" && i + 1 < argc) {
             // N=path: disc track N (2 and up) plays that audio file.
             const std::string v = argv[++i];

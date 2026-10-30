@@ -109,6 +109,13 @@ check('the imported scene is open', any(l.startswith('status: Imported 1 scene f
 check('the imported objects are in the tree', {'tree.Parent', 'tree.Cube', 'tree.Quad', 'tree.RenamedLamp'} <= controls(lines),
       sorted(c for c in controls(lines) if c.startswith('tree.')))
 
+# Bake surface detail is off until switched on, and the switch is drawn.
+lines, _ = run(OPEN + typed('unity.source', mini) + typed('unity.dest', os.path.join(work, 'baked')) + click('unity.bake') + AWAY +
+               ['--shot', os.path.join(shots, 'unityimport-bake.png'), '--wait', '2'], os.path.join(work, 'bake.png'))
+bake = [l for l in lines if l.startswith('unity bake surface detail:')]
+check('Bake surface detail starts off and the switch turns it on', bake[:1] == ['unity bake surface detail: off'] and
+      bake[-1:] == ['unity bake surface detail: on'], bake)
+
 # The imported scene's UI tab draws the canvases the game starts with: hud, not
 # the loading screen's canvas (hud_loading), which psxsplash draws alone while
 # the scene loads; picked, the loading canvas is drawn alone.

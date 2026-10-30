@@ -2842,6 +2842,17 @@ static void unityImportModal(State& st, editor::Document& doc, ImVec2 size) {
             ui.cdTracks.emplace_back();
         y += size::field + 6 + space::md;
 
+        // Normal and occlusion maps have nowhere to go on the PS1 but the texture.
+        text(dl, ImVec2(o.x, y + 2), f.medium, type::body, color::text, "Bake surface detail");
+        const char* bakeNote = "Each material's normal and occlusion maps baked into its texture as light and shade.";
+        const ImVec2 bkn = measure(f.regular, type::caption, bakeNote);
+        const ImRect bt(ImVec2(o.x + inner - 30, y + 2), ImVec2(o.x + inner, y + 18));
+        text(dl, ImVec2(bt.Min.x - space::sm - bkn.x, y + 4), f.regular, type::caption, color::textFaint, bakeNote);
+        nameRect("unity.bake", bt);  // --click @unity.bake
+        if (toggle("unity.bake", bt, ui.bakeDetail) && !busy) ui.bakeDetail = !ui.bakeDetail;
+        scriptLine("unity.bake", std::string("unity bake surface detail: ") + (ui.bakeDetail ? "on" : "off"));
+        y += 24 + space::md;
+
         // What Import will do, or why it is off.
         std::vector<std::string> chosen;
         for (const auto& row : ui.scenes)
@@ -2898,6 +2909,7 @@ static void unityImportModal(State& st, editor::Document& doc, ImVec2 size) {
             ui.error.clear();
             splash::unity::ImportOptions opt;
             opt.scenes = chosen;
+            opt.bakeDetail = ui.bakeDetail;
             for (size_t k = 0; k < ui.cdTracks.size(); ++k) opt.cdTracks.push_back({int(k) + 2, trimmedPath(ui.cdTracks[k])});
             ui.runningDest = fromUtf8(dest);
             ui.running = std::async(std::launch::async, [src = fromUtf8(source), d = ui.runningDest, opt] {
@@ -10955,6 +10967,17 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                     apply(next);
                 }
                 scriptLine("import.units", std::string("import convert units: ") + (cur.convertUnits ? "on" : "off"));
+                ImRect dv = irow("libake", "Bake surface detail",
+                                 "Bake each material's normal map and ambient occlusion map into its texture as light and shade. "
+                                 "The PS1 lights per vertex, so the texture is the only place that detail can stay.");
+                const ImRect dt(ImVec2(dv.Min.x, dv.GetCenter().y - 8), ImVec2(dv.Min.x + 30, dv.GetCenter().y + 8));
+                nameRect("ibake", dt);  // --click @ibake
+                if (toggle("ibake", dt, cur.bakeDetail)) {
+                    splash::ImportSettings next = ip.settings;
+                    next.bakeDetail = !next.bakeDetail;
+                    apply(next);
+                }
+                scriptLine("import.bake", std::string("import bake surface detail: ") + (cur.bakeDetail ? "on" : "off"));
                 const splash::UpAxis ups[3] = {splash::UpAxis::File, splash::UpAxis::YUp, splash::UpAxis::ZUp};
                 const char* upNames[3] = {"From file", "Y up", "Z up"};
                 int upCur = (int)(std::find(std::begin(ups), std::end(ups), cur.up) - std::begin(ups));

@@ -15092,6 +15092,229 @@ splash::Scene mini(splash::unity::ImportReport& r, const char* out) {
 }
 }  // namespace unitytest
 
+// ImportSettings::bakeDetail: normal and occlusion maps baked into the base
+// colour texture (#215).
+namespace baketest {
+namespace fs = std::filesystem;
+using Px = std::array<int, 4>;
+void png(const fs::path& file, int w, int h, const std::function<Px(int, int)>& f) {
+    splash::Image img;
+    img.width = w, img.height = h;
+    img.pixels.resize(size_t(w) * h);
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++) {
+            const Px c = f(x, y);  // y = 0 the top row, as the file has it
+            img.pixels[size_t(h - 1 - y) * w + x] = {c[0] / 255.f, c[1] / 255.f, c[2] / 255.f, c[3] / 255.f};
+        }
+    splash::savePng(img, file);
+}
+std::string bytes(const fs::path& f) {
+    std::ifstream in(f, std::ios::binary);
+    return {std::istreambuf_iterator<char>(in), {}};
+}
+splash::RgbaImage pixels(const fs::path& f) {
+    const std::string b = bytes(f);
+    return splash::decodeRgba(std::vector<unsigned char>(b.begin(), b.end())).value_or(splash::RgbaImage{});
+}
+int at(const splash::RgbaImage& im, int x, int y, int c) {
+    return im.w ? im.rgba[(size_t(y) * im.w + x) * 4 + c] : -1;
+}
+// A normal encoded as a normal map texel.
+Px encode(float x, float y, float z) {
+    const float l = std::sqrt(x * x + y * y + z * z);
+    auto e = [&](float v) { return int(std::lround((v / l + 1) * 0.5f * 255)); };
+    return {e(x), e(y), e(z), 255};
+}
+// The shade the bake gives that texel, from its bytes.
+float shadeOf(Px c) {
+    float n[3] = {2 * c[0] / 255.f - 1, 2 * c[1] / 255.f - 1, 2 * c[2] / 255.f - 1};
+    const float l = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+    return std::clamp((-0.4f * n[0] + 0.5f * n[1] + n[2]) / l, 0.0f, 1.6f);
+}
+// models/<dir>/q.gltf: one quad per material, each material a JSON object
+// whose texture indices name `images` in order.
+void quad(const fs::path& dir, const std::vector<std::string>& images, const std::vector<std::string>& materials) {
+    fs::create_directories(dir);
+    std::string bin;
+    auto put = [&](const void* p, size_t n) { bin.append(static_cast<const char*>(p), n); };
+    const float pos[12] = {0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0}, uv[8] = {0, 1, 1, 1, 1, 0, 0, 0};
+    const uint16_t idx[6] = {0, 1, 2, 0, 2, 3};
+    put(pos, sizeof pos), put(uv, sizeof uv), put(idx, sizeof idx);
+    std::ofstream(dir / "q.bin", std::ios::binary) << bin;
+    std::string prims, mats, texs, imgs;
+    for (size_t i = 0; i < materials.size(); i++) {
+        prims += std::string(i ? "," : "") + R"({"attributes":{"POSITION":0,"TEXCOORD_0":1},"indices":2,"material":)" + std::to_string(i) + "}";
+        mats += (i ? "," : "") + materials[i];
+    }
+    for (size_t i = 0; i < images.size(); i++) {
+        texs += std::string(i ? "," : "") + R"({"source":)" + std::to_string(i) + "}";
+        imgs += std::string(i ? "," : "") + R"({"uri":")" + images[i] + "\"}";
+    }
+    std::ofstream(dir / "q.gltf") << R"({"asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],"nodes":[{"mesh":0}],)"
+                                  << R"("meshes":[{"primitives":[)" << prims << "]}],\"materials\":[" << mats << "],\"textures\":[" << texs
+                                  << "],\"images\":[" << imgs << R"(],"buffers":[{"uri":"q.bin","byteLength":)" << bin.size()
+                                  << R"(}],"bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":48},{"buffer":0,"byteOffset":48,"byteLength":32},)"
+                                  << R"({"buffer":0,"byteOffset":80,"byteLength":12}],"accessors":[)"
+                                  << R"({"bufferView":0,"componentType":5126,"count":4,"type":"VEC3","min":[0,0,0],"max":[1,1,0]},)"
+                                  << R"({"bufferView":1,"componentType":5126,"count":4,"type":"VEC2"},)"
+                                  << R"({"bufferView":2,"componentType":5123,"count":6,"type":"SCALAR"}]})";
+}
+// Imports dir/q.gltf into a fresh project dir/<as>; the texture of material `name`.
+fs::path imported(const fs::path& dir, const char* as, bool bake, const std::string& name = {}, splash::ImportedModel* model = nullptr) {
+    const fs::path proj = dir / as;
+    fs::remove_all(proj);
+    fs::create_directories(proj);
+    splash::ImportSettings s;
+    s.bakeDetail = bake;
+    splash::ImportedModel m = splash::importModel(dir / "q.gltf", proj, s);
+    fs::path tex;
+    for (size_t i = 0; i < m.materials.size(); i++)
+        if (tex.empty() && (name.empty() || m.materialNames[i] == name) && !m.materials[i].texture.empty()) tex = proj / m.materials[i].texture;
+    if (model) *model = m;
+    return tex;
+}
+const char* kBase = R"({"pbrMetallicRoughness":{"baseColorTexture":{"index":0}}})";
+}  // namespace baketest
+
+// (a) A flat normal map, at any scale, leaves the texture byte-identical.
+void testBakeDetailFlat() {
+    using namespace baketest;
+    const fs::path dir = g_outDir / "bakeflat";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    png(dir / "base.png", 16, 16, [](int x, int y) { return Px{x * 16 + y, 255 - x * 16, y * 16 + 7, 200 + x}; });
+    png(dir / "flat.png", 16, 16, [](int, int y) { return y < 8 ? Px{128, 128, 255, 255} : Px{127, 127, 255, 255}; });
+    quad(dir, {"base.png"}, {kBase});
+    const std::string plain = bytes(imported(dir, "plain", true));
+    quad(dir, {"base.png", "flat.png"}, {R"({"pbrMetallicRoughness":{"baseColorTexture":{"index":0}},"normalTexture":{"index":1,"scale":10}})"});
+    const fs::path flat = imported(dir, "flat", true);
+    CHECK(!plain.empty() && bytes(flat) == plain);
+}
+
+// (b) A map tilted toward the light brightens a mid grey by the shade, one
+// tilted away darkens it; resampled when its size differs.
+void testBakeDetailShade() {
+    using namespace baketest;
+    for (const Px tilt : {encode(-0.4f, 0.5f, 1), encode(0.4f, -0.5f, 1)}) {
+        splash::RgbaImage base{8, 8, std::vector<unsigned char>(8 * 8 * 4, 128)};
+        splash::RgbaImage normal{4, 4, {}};
+        for (int i = 0; i < 16; i++) normal.rgba.insert(normal.rgba.end(), {(unsigned char)tilt[0], (unsigned char)tilt[1], (unsigned char)tilt[2], 255});
+        splash::bakeSurfaceDetail(base, {&normal, 1, nullptr, 0, 1});
+        const int want = int(std::lround(128 * shadeOf(tilt)));
+        CHECK(std::abs(at(base, 3, 5, 0) - want) <= 1 && std::abs(at(base, 7, 0, 2) - want) <= 1 && at(base, 3, 5, 3) == 128);
+        CHECK(tilt[0] < 128 ? want >= 150 : want <= 66);
+    }
+}
+
+// (c) Off, a material's normal map changes nothing; the sidecar keeps the setting.
+void testBakeDetailOff() {
+    using namespace baketest;
+    const fs::path dir = g_outDir / "bakeoff";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    png(dir / "base.png", 8, 8, [](int x, int y) { return Px{x * 30, y * 30, 128, 255}; });
+    png(dir / "bump.png", 8, 8, [](int, int) { return encode(-0.4f, 0.5f, 1); });
+    quad(dir, {"base.png"}, {kBase});
+    const std::string plain = bytes(imported(dir, "plain", false));
+    quad(dir, {"base.png", "bump.png"}, {R"({"pbrMetallicRoughness":{"baseColorTexture":{"index":0}},"normalTexture":{"index":1}})"});
+    CHECK(!plain.empty() && bytes(imported(dir, "off", false)) == plain);
+    CHECK(bytes(imported(dir, "on", true)) != plain);
+    const fs::path model = dir / "m.gltf";
+    CHECK(!splash::loadImportSettings(model).bakeDetail);
+    splash::ImportSettings s;
+    s.bakeDetail = true;
+    splash::saveImportSettings(model, s);
+    CHECK(bytes(splash::importSettingsPath(model)).find("\"bakeDetail\": true") != std::string::npos);
+    const splash::ImportSettings back = splash::loadImportSettings(model);
+    CHECK(back.bakeDetail && back.extra.empty());
+    splash::saveImportSettings(model, {});
+    CHECK(bytes(splash::importSettingsPath(model)).find("bakeDetail") == std::string::npos);
+}
+
+// (d) glTF normalTexture and occlusionTexture (red, strength), and a Unity
+// material's _BumpMap and _OcclusionMap (green, _OcclusionStrength).
+void testBakeDetailGltf() {
+    using namespace baketest;
+    const fs::path dir = g_outDir / "bakegltf";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    const Px tilt = encode(-0.4f, 0.5f, 1);
+    png(dir / "base.png", 8, 8, [](int, int) { return Px{128, 128, 128, 255}; });
+    png(dir / "bump.png", 8, 8, [&](int, int y) { return y < 4 ? tilt : Px{128, 128, 255, 255}; });
+    png(dir / "occ.png", 8, 8, [](int x, int) { return x < 4 ? Px{0, 255, 255, 255} : Px{255, 0, 0, 255}; });
+    quad(dir, {"base.png", "bump.png", "occ.png"},
+         {R"({"pbrMetallicRoughness":{"baseColorTexture":{"index":0}},"normalTexture":{"index":1},)"
+          R"("occlusionTexture":{"index":2,"strength":0.5}})"});
+    splash::ImportedModel m;
+    const splash::RgbaImage px = pixels(imported(dir, "on", true, {}, &m));
+    const int lit = int(std::lround(128 * shadeOf(tilt)));
+    CHECK(at(px, 6, 6, 0) == 128 && at(px, 1, 6, 1) == 64);  // flat: as it was, and halved
+    CHECK(std::abs(at(px, 6, 1, 2) - lit) <= 1 && std::abs(at(px, 1, 1, 0) - lit / 2) <= 1 && lit > 140);
+    CHECK(m.warnings.empty());
+    // A map that does not decode is a warning, the texture written unbaked.
+    std::ofstream(dir / "bump.png", std::ios::binary) << "not an image";
+    const fs::path bad = imported(dir, "bad", true, {}, &m);
+    CHECK(at(pixels(bad), 1, 1, 0) == 64 && m.warnings.size() == 1);
+}
+
+void testBakeDetailUnity() {
+    using namespace baketest;
+    const fs::path proj = g_outDir / "bakeunity", dest = g_outDir / "bakeunity-out";
+    fs::remove_all(proj), fs::remove_all(dest);
+    fs::create_directories(dest);
+    fs::copy(unitytest::kMini, proj, fs::copy_options::recursive);
+    const fs::path tex = proj / "Assets" / "Textures";
+    const Px tilt = encode(-0.4f, 0.5f, 1);
+    png(tex / "checker.png", 8, 8, [](int, int) { return Px{128, 128, 128, 255}; });
+    png(tex / "bump.png", 8, 8, [&](int, int y) { return y < 4 ? tilt : Px{128, 128, 255, 255}; });
+    png(tex / "occ.png", 8, 8, [](int x, int) { return x < 4 ? Px{255, 0, 255, 255} : Px{0, 255, 0, 255}; });
+    for (const char* n : {"bump", "occ"})
+        std::ofstream(tex / (std::string(n) + ".png.meta")) << "fileFormatVersion: 2\nguid: b10000000000000000000000000000" << (n[0] == 'b' ? "02" : "03")
+                                                            << "\nTextureImporter:\n  serializedVersion: 13\n";
+    std::ofstream(proj / "Assets" / "Materials" / "Checker.mat")
+        << "%YAML 1.1\n%TAG !u! tag:unity3d.com,2011:\n--- !u!21 &2100000\nMaterial:\n  m_Name: Checker\n  m_SavedProperties:\n"
+           "    m_TexEnvs:\n"
+           "    - _BumpMap:\n        m_Texture: {fileID: 2800000, guid: b1000000000000000000000000000002, type: 3}\n"
+           "    - _MainTex:\n        m_Texture: {fileID: 2800000, guid: b1000000000000000000000000000001, type: 3}\n"
+           "    - _OcclusionMap:\n        m_Texture: {fileID: 2800000, guid: b1000000000000000000000000000003, type: 3}\n"
+           "    m_Floats:\n    - _BumpScale: 1\n    - _OcclusionStrength: 0.5\n"
+           "    m_Colors:\n    - _Color: {r: 1, g: 0.5, b: 0.25, a: 1}\n";
+    splash::unity::ImportReport r;
+    splash::unity::ImportOptions o;
+    o.bakeDetail = true;
+    const splash::Scene s =
+        splash::unity::convertScene(proj, splash::unity::indexGuids(proj), proj / "Assets" / "Scenes" / "Mini.unity", dest, r, o);
+    const splash::Object* q = unitytest::findObj(s.objects, "Quad");
+    const std::string t = q && q->mesh && q->mesh->materials.size() == 1 ? q->mesh->materials[0].texture : "";
+    CHECK(t == "textures/checker_detail.png");
+    const splash::RgbaImage px = pixels(dest / t);
+    const int lit = int(std::lround(128 * shadeOf(tilt)));
+    CHECK(at(px, 6, 6, 0) == 128 && at(px, 1, 6, 1) == 64);
+    CHECK(std::abs(at(px, 6, 1, 2) - lit) <= 1 && std::abs(at(px, 1, 1, 0) - lit / 2) <= 1);
+    // The plain copy stays for what uses the image itself.
+    CHECK(bytes(dest / "textures" / "checker.png") == bytes(tex / "checker.png"));
+}
+
+// (e) One base image under a bumped and a plain material: two files, the
+// plain one the base as it is.
+void testBakeDetailDedupe() {
+    using namespace baketest;
+    const fs::path dir = g_outDir / "bakededupe";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    png(dir / "base.png", 8, 8, [](int x, int y) { return Px{x * 30, y * 30, 128, 255}; });
+    png(dir / "bump.png", 8, 8, [](int, int) { return encode(-0.4f, 0.5f, 1); });
+    quad(dir, {"base.png"}, {kBase});
+    const std::string plain = bytes(imported(dir, "plain", true));
+    quad(dir, {"base.png", "bump.png"},
+         {R"({"name":"Bumped","pbrMetallicRoughness":{"baseColorTexture":{"index":0}},"normalTexture":{"index":1}})",
+          R"({"name":"Plain","pbrMetallicRoughness":{"baseColorTexture":{"index":0}}})"});
+    splash::ImportedModel m;
+    const fs::path bumped = imported(dir, "two", true, "Bumped", &m), flat = imported(dir, "two2", true, "Plain");
+    CHECK(m.textures.size() == 2 && bumped.filename() == "q_0.png");
+    CHECK(bytes(flat) == plain && bytes(bumped) != plain && !bytes(bumped).empty());
+}
+
 void testUnityYaml() {
     using namespace splash::unity;
     const char* text =
@@ -17975,6 +18198,12 @@ int main(int argc, char** argv) {
     testClipLoopImportAndEdit();
     testSkinClipSources();
     testImportSettings();
+    testBakeDetailFlat();
+    testBakeDetailShade();
+    testBakeDetailOff();
+    testBakeDetailGltf();
+    testBakeDetailUnity();
+    testBakeDetailDedupe();
     testSimplifyToTriangles();
     testImportTargetTriangles();
     testModelImports();
