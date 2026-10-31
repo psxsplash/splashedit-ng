@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <iterator>
 #include <cctype>
 #include <cfloat>
@@ -5959,10 +5960,11 @@ static void sceneOverlays(ImDrawList* dl, viewport::Ps1View& view, ImVec2 mn, Im
 static std::string fmtShort(float v, int decimals);
 
 // The Paint tool in the Scene view (#199): its settings bar at `at` (colour,
-// radius, strength, falloff, Fill; named paint.*), the brush circle on the
+// radius, strength, falloff, Fill, and under it a row with Bake occlusion and
+// its distance and strength (#305); named paint.*), the brush circle on the
 // selected mesh under the cursor, strokes and Ctrl+click sampling. Scripted
-// checks read "vpaint:" lines: the brush when it changes, each stroke, fill
-// and sample.
+// checks read "vpaint:" lines: the brush when it changes, each stroke, fill,
+// sample and occlusion bake.
 static void paintTool(State& st, ImDrawList* dl, viewport::Ps1View& view, ImRect r, ImVec2 at, editor::Document& doc, int chrome,
                       int scene) {
     Fonts& f = fonts();
@@ -5979,12 +5981,21 @@ static void paintTool(State& st, ImDrawList* dl, viewport::Ps1View& view, ImRect
     float lw[3];
     for (int i = 0; i < 3; ++i) lw[i] = measure(f.medium, type::caption, labels[i]).x;
     const float colW = 92, fillW = buttonWidth(icon::paintBucket, "Fill");
+    const char* aoLabels[2] = {"Distance", "Strength"};
+    const float aoLw[2] = {measure(f.medium, type::caption, aoLabels[0]).x, measure(f.medium, type::caption, aoLabels[1]).x};
+    const float bakeW = buttonWidth(icon::sun, "Bake occlusion");
     // colour, then a label and field each, then Fill.
     const float barW = pad + colW + pad + (pad * 2 + fw) * 3 + lw[0] + lw[1] + lw[2] + pad * 2 + fillW + pad;
     const ImRect bar(at, at + ImVec2(barW, h));
     dl->AddRectFilled(bar.Min, bar.Max, rgb(0x0e1014, 210), radius::button + 2);
     dl->AddRect(bar.Min, bar.Max, rgb(0xffffff, 14), radius::button + 2);
     nameRect("paint.bar", bar);
+    // Under it, the occlusion bake: its button, then distance and strength.
+    const float aoBarW = pad + bakeW + pad + (pad * 2 + fw) * 2 + aoLw[0] + aoLw[1] + pad;
+    const ImRect aoBar(ImVec2(at.x, bar.Max.y + 4), ImVec2(at.x + aoBarW, bar.Max.y + 4 + h));
+    dl->AddRectFilled(aoBar.Min, aoBar.Max, rgb(0x0e1014, 210), radius::button + 2);
+    dl->AddRect(aoBar.Min, aoBar.Max, rgb(0xffffff, 14), radius::button + 2);
+    nameRect("paint.aobar", aoBar);
     float x = bar.Min.x + pad;
     const float fy = bar.Min.y + (h - size::field) / 2;
     const std::array<float, 3> cf{brush.color[0] / 255.f, brush.color[1] / 255.f, brush.color[2] / 255.f};
@@ -6035,6 +6046,43 @@ static void paintTool(State& st, ImDrawList* dl, viewport::Ps1View& view, ImRect
             const int n = editor::fillPaint(doc, targets, brush.color);
             if (namedRectsOn()) std::printf("vpaint: fill %d %s\n", n, hex(brush.color).c_str()), std::fflush(stdout);
         }
+        x += fillW + pad;
+    }
+    // The occlusion bake's row: the button, then its distance and strength.
+    editor::OcclusionBake& ao = st.paintAo;
+    {
+        // button() names its rect by its id: paint.aobake.
+        const ImVec2 bp(aoBar.Min.x + pad, aoBar.Min.y + (h - size::field - 6) / 2);
+        if (button("paint.aobake", bp, icon::sun, "Bake occlusion", ButtonKind::Secondary, nullptr,
+                   "Darkens the selected meshes where the scene's geometry closes in around them (ambient occlusion), "
+                   "multiplied into the colours they show now: they become Painted, one undo step")) {
+            const auto t0 = std::chrono::steady_clock::now();
+            const int n = editor::bakeOcclusion(doc, targets, ao);
+            const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+            if (namedRectsOn())
+                std::printf("vpaint: aobake %d distance %.3f strength %.3f rays %d ms %.1f\n", n, double(ao.distance),
+                            double(ao.strength), ao.rays, ms),
+                    std::fflush(stdout);
+        }
+    }
+    float ax = aoBar.Min.x + pad + bakeW + pad;
+    const float afy = aoBar.Min.y + (h - size::field) / 2;
+    float* aoValues[2] = {&ao.distance, &ao.strength};
+    const char* aoIds[2] = {"paintaodist", "paintaostrength"};
+    const char* aoNames[2] = {"paint.aodist", "paint.aostrength"};
+    const char* aoTips[2] = {"Bake occlusion: how far away, in metres, geometry still shades a vertex",
+                             "Bake occlusion: how dark a fully enclosed vertex gets, 0 changes nothing, 1 takes it to black"};
+    for (int i = 0; i < 2; ++i) {
+        ax += pad;
+        text(dl, ImVec2(ax, aoBar.Min.y + (h - type::caption) / 2 - 1), f.medium, type::caption, color::textDim, aoLabels[i]);
+        ax += aoLw[i] + pad;
+        const ImRect fr(ImVec2(ax, afy), ImVec2(ax + fw, afy + size::field));
+        nameRect(aoNames[i], fr);
+        float nv = *aoValues[i];
+        if (numberField(aoIds[i], fr, fmtShort(nv, 2).c_str(), i == 0 ? "m" : nullptr, 0, nullptr, &nv).changed)
+            *aoValues[i] = i == 0 ? std::clamp(nv, 0.1f, 20.f) : std::clamp(nv, 0.f, 1.f);
+        tooltip(aoTips[i]);
+        ax += fw;
     }
     if (namedRectsOn()) {
         static std::string last;
@@ -6069,7 +6117,7 @@ static void paintTool(State& st, ImDrawList* dl, viewport::Ps1View& view, ImRect
     const bool active = g.ActiveId == wid;
     if (active) ImGui::KeepAliveID(wid);
     std::optional<editor::PaintHit> hit;
-    if (r.Contains(io.MousePos) && !bar.Contains(io.MousePos)) {
+    if (r.Contains(io.MousePos) && !bar.Contains(io.MousePos) && !aoBar.Contains(io.MousePos)) {
         viewport::Vec3 ro, rd;
         view.ray(io.MousePos, r.Min, r.GetSize(), &ro, &rd);
         hit = editor::paintHit(doc, targets, {ro.x, ro.y, -ro.z}, {rd.x, rd.y, -rd.z});
