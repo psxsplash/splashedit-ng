@@ -699,7 +699,7 @@ Transform trsOf(const Aff& a) {
 }
 
 constexpr size_t kMaxJoints = 64;  // SKINMESH_MAX_BONES in psxsplash skinmesh.hh
-constexpr size_t kMaxClips = 16;   // SKINMESH_MAX_CLIPS
+constexpr size_t kMaxClips = kSkinMaxClips;   // SKINMESH_MAX_CLIPS
 
 // Turns what a reader found into the .mesh space, before the settings: the
 // skeleton onto every sink whose vertices one skin moves, and the clips.
