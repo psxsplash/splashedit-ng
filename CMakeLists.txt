@@ -117,6 +117,7 @@ add_library(splasheditdoc STATIC
     src/editor/tv_preview.cpp
     src/editor/unirom.cpp
     src/editor/ui_canvas.cpp
+    src/editor/vertex_ao.cpp
     src/editor/vertex_paint.cpp)
 target_include_directories(splasheditdoc PUBLIC src)
 # src/editor/psxsplash.d.lua (tools/gen_lua_api.py) goes into the editor as

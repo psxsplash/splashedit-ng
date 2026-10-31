@@ -440,6 +440,7 @@ struct State {
     // The Paint tool (tool 4, #199): brush settings (not saved) and the stroke in progress.
     editor::PaintBrush paintBrush;
     editor::PaintStroke paintStroke;
+    editor::OcclusionBake paintAo;  // the bar's Bake occlusion settings (#305), not saved either
 
     // Lua files open in the script editor, as tabs beside the Scene and UI.
     ui::ScriptTabs scripts;

@@ -60,6 +60,7 @@
 #include "editor/timeline.hh"
 #include "editor/tv_preview.hh"
 #include "editor/unirom.hh"
+#include "editor/vertex_ao.hh"
 #include "editor/vertex_paint.hh"
 #include "audio.hh"
 #include "blend.hh"
@@ -12973,6 +12974,170 @@ void testVertexPaintMismatch() {
     CHECK(!d.paintMismatch(*d.object({0})->mesh) && !d.hasWarning(*d.object({0})));
 }
 
+namespace {
+
+// A closed box from `lo` to `hi`: four vertices and an outward normal per face.
+splash::Mesh aoBox(splash::Vec3 lo, splash::Vec3 hi) {
+    splash::Mesh m;
+    std::vector<int> tris;
+    for (int axis = 0; axis < 3; axis++)
+        for (int side = 0; side < 2; side++) {
+            const int u = (axis + 1) % 3, v = (axis + 2) % 3;
+            const int base = int(m.positions.size());
+            for (int k = 0; k < 4; k++) {
+                float c[3];
+                c[axis] = side ? hi[axis] : lo[axis];
+                c[u] = (k & 1) ? hi[u] : lo[u];
+                c[v] = (k & 2) ? hi[v] : lo[v];
+                m.positions.push_back({c[0], c[1], c[2]});
+                float n[3] = {0, 0, 0};
+                n[axis] = side ? 1.f : -1.f;
+                m.normals.push_back({n[0], n[1], n[2]});
+            }
+            tris.insert(tris.end(), {base, base + 1, base + 3, base, base + 3, base + 2});
+        }
+    m.submeshes = {tris};
+    return m;
+}
+
+std::vector<editor::AoTriangle> aoTriangles(const splash::Mesh& m, splash::Vec3 at = {}) {
+    std::vector<editor::AoTriangle> out;
+    for (const std::vector<int>& sub : m.submeshes)
+        for (size_t k = 0; k + 2 < sub.size(); k += 3)
+            out.push_back({m.positions[size_t(sub[k])] + at, m.positions[size_t(sub[k + 1])] + at, m.positions[size_t(sub[k + 2])] + at});
+    return out;
+}
+
+}  // namespace
+
+// The occlusion kernel (#305): an open plane hides nothing; in a corner of a
+// floor and two walls the corner is darker than the foot of one wall, which
+// is darker than the open floor; the same input gives the same output.
+void testVertexAoKernel() {
+    // (a) A vertex on an open plane, and one on its edge, see the whole sky.
+    const std::vector<editor::AoTriangle> plane = aoTriangles(paintGrid(11, 10));
+    const std::vector<float> open = editor::ambientOcclusion(plane, {{0, 0, 0}, {5, 0, 5}, {1.3f, 0, -2.7f}},
+                                                             {{0, 1, 0}, {0, 1, 0}, {0, 1, 0}}, 2.0f);
+    CHECK(open.size() == 3);
+    for (float a : open) CHECK(std::fabs(a - 1.f) <= 1e-6f);
+    // Facing down into the plane from half a metre over it, far enough to reach it: all but the grazing rays meet it.
+    const std::vector<float> down = editor::ambientOcclusion(plane, {{0, 0.5f, 0}}, {{0, -1, 0}}, 10.0f);
+    CHECK(down.size() == 1 && down[0] < 0.05f);
+
+    // (b) Floor 0..4 on x and z; solid walls behind x = 0 and z = 0, 3 m high.
+    std::vector<editor::AoTriangle> corner = aoTriangles(paintGrid(5, 4), {2, 0, 2});
+    for (const editor::AoTriangle& t : aoTriangles(aoBox({-0.2f, 0, -0.2f}, {0, 3, 4}))) corner.push_back(t);
+    for (const editor::AoTriangle& t : aoTriangles(aoBox({-0.2f, 0, -0.2f}, {4, 3, 0}))) corner.push_back(t);
+    const std::vector<splash::Vec3> at{{0, 0, 0}, {0, 0, 2}, {3.5f, 0, 3.5f}};
+    const std::vector<splash::Vec3> up(3, {0, 1, 0});
+    const std::vector<float> ao = editor::ambientOcclusion(corner, at, up, 2.0f);
+    std::printf("vertex ao corner %.4f wall foot %.4f open floor %.4f\n", double(ao[0]), double(ao[1]), double(ao[2]));
+    CHECK(ao.size() == 3);
+    CHECK(ao[0] < ao[1] && ao[1] < ao[2]);
+    // Roughly what the walls' share of the cosine-weighted hemisphere is: a quarter open in the corner, half at one wall.
+    CHECK(ao[0] > 0.15f && ao[0] < 0.45f);
+    CHECK(ao[1] > 0.4f && ao[1] < 0.7f);
+    CHECK(std::fabs(ao[2] - 1.f) <= 1e-6f);  // 3.5 m from both walls, past the 2 m reach
+    // A longer reach takes in more of the walls' height.
+    const std::vector<float> far = editor::ambientOcclusion(corner, at, up, 10.0f);
+    CHECK(far[1] <= ao[1] && far[2] < 1.f);
+
+    // (c) The same input twice: the same output, bit for bit.
+    CHECK(editor::ambientOcclusion(corner, at, up, 2.0f) == ao);
+    CHECK(editor::ambientOcclusion(corner, at, up, 2.0f, 64) == editor::ambientOcclusion(corner, at, up, 2.0f, 64));
+    // No rays, or a zero normal: open.
+    CHECK(editor::ambientOcclusion(corner, at, up, 2.0f, 0) == std::vector<float>(3, 1.f));
+    CHECK(editor::ambientOcclusion(corner, {{0, 0, 0}}, {{0, 0, 0}}, 2.0f) == std::vector<float>(1, 1.f));
+}
+
+// Bake occlusion on a document (#305): a grid with a wall along one edge
+// darkens near the wall and not far from it, goes Painted with a full layer,
+// in one undo step; terrains and skinned meshes are refused as targets and
+// skinned meshes do not occlude.
+void testVertexAoBake() {
+    const fs::path dir = g_outDir / "vertexao";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    splash::saveMesh(paintGrid(11, 10), dir / "grid.mesh");      // x, z -5..5
+    splash::saveMesh(aoBox({-5, 0, 5}, {5, 2, 5.3f}), dir / "wall.mesh");  // along the far edge, z 5
+    splash::Scene s;
+    s.objects.push_back(paintObject("Grid", 0, splash::VertexColorMode::Flat));
+    splash::Object wall = named("Wall", 0);
+    wall.mesh.emplace();
+    wall.mesh->mesh = "wall.mesh";
+    wall.mesh->materials.push_back({});
+    s.objects.push_back(wall);
+    s.objects.push_back(paintLamp());
+    splash::Object skinned = paintObject("Skinned", 0, splash::VertexColorMode::Flat);
+    skinned.transform.position = {0, 0.5f, 0};  // half a metre over the grid: would close it in if it occluded
+    skinned.skin.emplace();
+    s.objects.push_back(skinned);
+    splash::Object terrain = named("Terrain", 40);
+    splash::TerrainComponent& t = terrain.terrain.emplace();
+    t.sizeX = t.sizeZ = 10;
+    splash::initTerrain(t, 4);
+    terrain.mesh.emplace().materials.resize(1);
+    s.objects.push_back(terrain);
+    editor::Document d;
+    d.reset(s, dir);
+    CHECK(editor::paintRefusal(d, {0}).empty());
+
+    // (d) It darkens, by the wall only, and is one undo step.
+    const std::vector<editor::Rgb> before = editor::currentPaint(d, {0});
+    CHECK(before.size() == 121 && before[0] == editor::Rgb({40, 90, 200}));
+    const size_t history = d.historySize();
+    editor::OcclusionBake o;
+    CHECK(editor::bakeOcclusion(d, {{0}}, o) == 1);
+    CHECK(d.historySize() == history + 1);
+    CHECK(d.object({0})->mesh->vertexColors == splash::VertexColorMode::Painted);
+    const std::vector<editor::Rgb> baked = d.object({0})->mesh->paint;
+    CHECK(baked.size() == 121);
+    int darker = 0, brighter = 0;
+    for (size_t i = 0; i < baked.size(); i++)
+        for (size_t ch = 0; ch < 3; ch++) darker += baked[i][ch] < before[i][ch], brighter += baked[i][ch] > before[i][ch];
+    CHECK(darker > 0 && brighter == 0);
+    // The row at the wall's foot (z 5) loses about half its sky: 1 - 0.6 * 0.5 of blue 200 is about 140.
+    const size_t foot = 10 * 11 + 5, open = 2 * 11 + 5;  // (0, 5) and (0, -3), 8 m from the wall
+    if (baked.size() == 121)
+        std::printf("vertex ao bake foot %d %d %d open %d %d %d\n", baked[foot][0], baked[foot][1], baked[foot][2], baked[open][0],
+                    baked[open][1], baked[open][2]);
+    CHECK(baked.size() == 121 && baked[foot][2] < 170 && baked[foot][2] > 110);
+    CHECK(baked.size() == 121 && baked[open] == before[open]);  // nothing within 2 m: the skinned mesh above does not occlude
+    // Asked again it multiplies in again, its own step.
+    CHECK(editor::bakeOcclusion(d, {{0}}, o) == 1 && d.historySize() == history + 2);
+    CHECK(baked.size() == 121 && d.object({0})->mesh->paint[foot][2] < baked[foot][2]);
+    CHECK(d.undo() && d.object({0})->mesh->paint == baked);
+    CHECK(d.undo());
+    CHECK(d.object({0})->mesh->vertexColors == splash::VertexColorMode::Flat && d.object({0})->mesh->paint.empty());
+    CHECK(editor::currentPaint(d, {0}) == before);
+    // From a painted layer: one undo puts that exact layer back.
+    CHECK(editor::fillPaint(d, {{0}}, {100, 150, 250}) == 1);
+    const std::vector<editor::Rgb> filled = d.object({0})->mesh->paint;
+    const size_t h2 = d.historySize();
+    editor::OcclusionBake strong;
+    strong.strength = 1;
+    strong.distance = 3;
+    CHECK(editor::bakeOcclusion(d, {{0}}, strong) == 1 && d.historySize() == h2 + 1);
+    CHECK(d.object({0})->mesh->paint[foot][2] < 150);
+    CHECK(d.undo() && d.object({0})->mesh->paint == filled && d.object({0})->mesh->vertexColors == splash::VertexColorMode::Painted);
+    // Strength 0 changes nothing.
+    editor::OcclusionBake none;
+    none.strength = 0;
+    CHECK(editor::bakeOcclusion(d, {{0}}, none) == 0 && d.historySize() == h2 + 1);
+
+    // (e) Terrains and skinned meshes are not targets; the others in the list still bake.
+    CHECK(!editor::paintRefusal(d, {3}).empty() && !editor::paintRefusal(d, {4}).empty());
+    CHECK(editor::bakeOcclusion(d, {{3}, {4}}, o) == 0);
+    CHECK(d.object({3})->mesh->paint.empty() && d.object({4})->mesh->paint.empty());
+    CHECK(d.object({3})->mesh->vertexColors == splash::VertexColorMode::Flat);
+    CHECK(editor::bakeOcclusion(d, {{3}, {0}, {4}}, o) == 1 && d.object({3})->mesh->paint.empty());
+    CHECK(d.undo());
+    // A terrain occludes: lifted a metre over the grid, it closes the open vertex in.
+    d.edit({4}, [](splash::Object& ob) { ob.transform.position = {0, 1, 0}; });
+    CHECK(editor::bakeOcclusion(d, {{0}}, o) == 1);
+    CHECK(d.object({0})->mesh->paint[open][2] < 150);
+}
+
 // couldBe4bpp over every material: true only when each textured material's
 // texture reads and fits 16 colours, and together they shrink at 4 bpp.
 void testMaterials4bpp() {
@@ -18454,6 +18619,8 @@ int main(int argc, char** argv) {
     testVertexPaintStroke();
     testVertexPaintMulti();
     testVertexPaintMismatch();
+    testVertexAoKernel();
+    testVertexAoBake();
     testMaterials4bpp();
     testMaterials4bppGroup();
     testUvOffsetSlots();
