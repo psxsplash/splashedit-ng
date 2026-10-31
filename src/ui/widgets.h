@@ -129,7 +129,16 @@ FieldEdit vec3Field(const char* id, ImRect r, const char* x, const char* y, cons
 // `field` with the text starting at `textX` and ending before `textRight`.
 enum class TextEdit { Inactive, Editing, Commit, Cancel };
 void beginTextEdit(const char* id, const std::string& initial);
+// As above, with what to do with the typed text if the field stops being
+// drawn while it is being edited (the selection changed under it, its panel
+// closed): textEditNewFrame() calls `orphanCommit` with the text, when it
+// differs from `initial`, on the frame after the one that did not draw it.
+// Without it such an edit is dropped.
+void beginTextEdit(const char* id, const std::string& initial, std::function<void(const std::string&)> orphanCommit);
 bool textEditing(const char* id);
+// Once a frame, right after ImGui::NewFrame(): an edit whose textEdit() was not
+// called during the frame before is committed (see beginTextEdit) or dropped.
+void textEditNewFrame();
 // `maxLen` caps what can be typed, in bytes (at most 255). `charFilter`, when
 // given, sees each typed character (ImGuiInputTextFlags_CallbackCharFilter):
 // it may change EventChar, or return 1 to drop it.

@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <string>
 #include <unordered_map>
 
@@ -457,17 +458,44 @@ struct TextEditState {
     ImGuiID id = 0;
     char buf[256] = {};
     int frames = 0;
+    // Whether beginTextEdit or textEdit saw this edit during the current frame.
+    bool drawn = false;
+    std::string initial;
+    std::function<void(const std::string&)> orphanCommit;
 };
 static TextEditState& textState() {
     static TextEditState s;
     return s;
 }
 
-void beginTextEdit(const char* id, const std::string& initial) {
+static void endTextEdit(TextEditState& s) {
+    s.id = 0;
+    s.orphanCommit = nullptr;
+}
+
+void beginTextEdit(const char* id, const std::string& initial) { beginTextEdit(id, initial, nullptr); }
+
+void beginTextEdit(const char* id, const std::string& initial, std::function<void(const std::string&)> orphanCommit) {
     TextEditState& s = textState();
     s.id = ImGui::GetID(id);
     std::snprintf(s.buf, sizeof s.buf, "%s", initial.c_str());
     s.frames = 0;
+    s.drawn = true;
+    s.initial = s.buf;
+    s.orphanCommit = std::move(orphanCommit);
+}
+
+void textEditNewFrame() {
+    TextEditState& s = textState();
+    if (s.id != 0 && !s.drawn) {
+        // Its field was not drawn last frame: it will not commit by itself.
+        std::function<void(const std::string&)> commit = std::move(s.orphanCommit);
+        const std::string typed = s.buf;
+        const bool changed = typed != s.initial;
+        endTextEdit(s);
+        if (commit && changed) commit(typed);
+    }
+    s.drawn = false;
 }
 
 bool textEditing(const char* id) { return textState().id != 0 && textState().id == ImGui::GetID(id); }
@@ -476,12 +504,13 @@ TextEdit textEdit(const char* id, ImRect field, ImFont* font, float size, float 
                   size_t maxLen, ImGuiInputTextCallback charFilter) {
     TextEditState& s = textState();
     if (s.id == 0 || s.id != ImGui::GetID(id)) return TextEdit::Inactive;
+    s.drawn = true;
     ImDrawList* dl = ImGui::GetWindowDrawList();
     // A focused well: the field colours with an accent border.
     dl->AddRectFilled(field.Min, field.Max, color::field, radius::field);
     dl->AddRect(field.Min, field.Max, color::accent, radius::field);
     if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
-        s.id = 0;
+        endTextEdit(s);
         return TextEdit::Cancel;
     }
     // Frame padding puts ImGui's text exactly where the static text sits.
@@ -516,7 +545,7 @@ TextEdit textEdit(const char* id, ImRect field, ImFont* font, float size, float 
     ++s.frames;
     if (enter || deactivated || tabbed || (s.frames > 2 && !active)) {
         *out = s.buf;
-        s.id = 0;
+        endTextEdit(s);
         return TextEdit::Commit;
     }
     return TextEdit::Editing;

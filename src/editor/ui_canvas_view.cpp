@@ -1202,10 +1202,26 @@ void CanvasView::inspector(ImDrawList* dl, ImRect r, float y, editor::Document& 
     fontFields.clear();
     ImGui::PushID("uicanvasinspector");
     ImGui::PushClipRect(ImVec2(r.Min.x, y), ImVec2(r.Max.x, r.Max.y - 1), true);
-    if (sel.canvas >= 0 && uic::selectedElements(doc).size() > 1) multiInspector(dl, r, y, doc);
-    else if (sel.canvas >= 0 && sel.element >= 0) elementInspector(dl, r, y, doc);
-    else if (sel.canvas >= 0) canvasInspector(dl, r, y, doc);
-    else textCentered(dl, ImRect(ImVec2(r.Min.x, y), r.Max), fonts().regular, type::body, color::textFaint, "No canvas");
+    // The ids inside are those of what is shown (#303): a field being edited
+    // when the selection changes is another id from the same field of the
+    // newly shown element, so its typed text cannot be committed there.
+    if (sel.canvas >= 0 && uic::selectedElements(doc).size() > 1) {
+        std::string ids = "multi." + std::to_string(sel.canvas);
+        for (int i : uic::selectedElements(doc)) ids += "." + std::to_string(i);
+        ImGui::PushID(ids.c_str());
+        multiInspector(dl, r, y, doc);
+        ImGui::PopID();
+    } else if (sel.canvas >= 0 && sel.element >= 0) {
+        ImGui::PushID(("element." + std::to_string(sel.canvas) + "." + std::to_string(sel.element)).c_str());
+        elementInspector(dl, r, y, doc);
+        ImGui::PopID();
+    } else if (sel.canvas >= 0) {
+        ImGui::PushID(("canvas." + std::to_string(sel.canvas)).c_str());
+        canvasInspector(dl, r, y, doc);
+        ImGui::PopID();
+    } else {
+        textCentered(dl, ImRect(ImVec2(r.Min.x, y), r.Max), fonts().regular, type::body, color::textFaint, "No canvas");
+    }
     ImGui::PopClipRect();
     ImGui::PopID();
 }
@@ -1230,8 +1246,14 @@ struct Rows {
     void gap() { y += space::md; }
 };
 
-// An editable text well; true with `out` set when an edit is committed.
-bool textField(const char* id, ImRect field, const std::string& value, const char* placeholder, std::string* out) {
+// What a text field commits: the typed text, applied to what the edit began on.
+using Commit = std::function<void(const std::string&)>;
+
+// An editable text well; `commit` gets a changed value when the edit commits,
+// also when the field stops being drawn first (the selection moved on, #303):
+// it applies the text to what was being edited when typing began. True on the
+// frame of a normal commit.
+bool textField(const char* id, ImRect field, const std::string& value, const char* placeholder, const Commit& commit) {
     Fonts& f = fonts();
     ImDrawList* dl = ImGui::GetWindowDrawList();
     std::string typed;
@@ -1245,14 +1267,28 @@ bool textField(const char* id, ImRect field, const std::string& value, const cha
         dl->AddText(f.regular, type::body, ImVec2(field.Min.x + space::sm, field.GetCenter().y - type::body * 0.5f - 1),
                     empty ? color::textFaint : color::text, empty ? placeholder : value.c_str());
         ImGui::PopClipRect();
-        if (h.clicked) beginTextEdit(id, value);
+        if (h.clicked) beginTextEdit(id, value, commit);
         return false;
     }
     if (res == TextEdit::Commit && typed != value) {
-        *out = typed;
+        commit(typed);
         return true;
     }
     return false;
+}
+
+// A Commit for element `e` of canvas `c`: `apply` runs only while that is
+// still the same kind of element in the same project, so a commit that comes
+// late (the edit's field was not drawn) never lands on another one.
+Commit forElement(editor::Document& doc, int c, int e, std::function<void(editor::Document&, const std::string&)> apply) {
+    const splash::UIElementType type = doc.scene().canvases[size_t(c)].elements[size_t(e)].type;
+    return [&doc, c, e, type, root = doc.projectRoot(), apply = std::move(apply)](const std::string& typed) {
+        if (doc.projectRoot() != root) return;
+        const auto& cvs = doc.scene().canvases;
+        if (c < 0 || size_t(c) >= cvs.size() || e < 0 || size_t(e) >= cvs[size_t(c)].elements.size()) return;
+        if (cvs[size_t(c)].elements[size_t(e)].type != type) return;
+        apply(doc, typed);
+    };
 }
 
 // A colour well with a picker under it. Edits merge under `key` until the picker lets go.
@@ -1301,10 +1337,10 @@ void CanvasView::elementInspector(ImDrawList* dl, ImRect r, float y, editor::Doc
     const ImU32 tc = typeColor(e.type);
     dl->AddRectFilled(ic.Min, ic.Max, (tc & 0x00ffffffu) | (34u << IM_COL32_A_SHIFT), radius::card);
     textCentered(dl, ic, f.medium, type::icon + 3, tc, typeIcon(e.type));
-    std::string name;
-    if (textField("uiname", ImRect(ImVec2(ic.Max.x + space::md, rows.y), ImVec2(x1 - 30 - space::md, rows.y + 22)), e.name, "(unnamed)",
-                  &name))
-        uic::editElement(doc, c, ei, [&](UIElement& el) { el.name = name; });
+    textField("uiname", ImRect(ImVec2(ic.Max.x + space::md, rows.y), ImVec2(x1 - 30 - space::md, rows.y + 22)), e.name, "(unnamed)",
+              forElement(doc, c, ei, [c, ei](editor::Document& d, const std::string& name) {
+                  uic::editElement(d, c, ei, [&](UIElement& el) { el.name = name; });
+              }));
     char where[128];
     std::snprintf(where, sizeof where, "%s in %s, %d of %d", uic::typeName(e.type), cv.name.c_str(), ei + 1, int(cv.elements.size()));
     text(dl, ImVec2(ic.Max.x + space::md, rows.y + 25), f.regular, type::caption, color::textFaint, where);
@@ -1438,12 +1474,21 @@ void CanvasView::elementInspector(ImDrawList* dl, ImRect r, float y, editor::Doc
                                       "the string table (View > Strings)."
                                     : "ASCII, at most 63 bytes. Lua's UI.SetText changes it while playing.";
             ImRect tf = rows.row("ltext", keyed ? ("Text (" + stab.languages[size_t(plang)].id + ")").c_str() : "Text", tip);
+            nameRect("ui.text", tf);  // scripted tests
             const std::string shownText = keyed ? *stab.text(e.textKey, plang) : e.text;
-            std::string t;
             if (keyed) {
-                if (textField("text", tf, shownText, "(empty)", &t)) strs.setText(e.textKey, plang, t);
-            } else if (textField("text", tf, e.text, "(empty)", &t)) {
-                uic::editElement(doc, c, ei, [&](UIElement& el) { el.text = t; });
+                // The key's text: only while the element still uses that key.
+                textField("text", tf, shownText, "(empty)",
+                          forElement(doc, c, ei, [c, ei, key = e.textKey, plang](editor::Document& d, const std::string& t) {
+                              if (d.scene().canvases[size_t(c)].elements[size_t(ei)].textKey != key) return;
+                              editor::StringsDoc& sd = editor::projectStrings();
+                              if (plang < 0 || size_t(plang) >= sd.table().languages.size()) return;
+                              sd.setText(key, plang, t);
+                          }));
+            } else {
+                textField("text", tf, e.text, "(empty)", forElement(doc, c, ei, [c, ei](editor::Document& d, const std::string& t) {
+                              uic::editElement(d, c, ei, [&](UIElement& el) { el.text = t; });
+                          }));
             }
             // No font of its own: its canvas's default font, else the system
             // font. With a canvas default there is no way to pick the system
@@ -1611,7 +1656,9 @@ void CanvasView::elementInspector(ImDrawList* dl, ImRect r, float y, editor::Doc
                 textureField.rect.ClipWith(ImRect(dl->GetClipRectMin(), dl->GetClipRectMax()));
                 textureField.canvas = c, textureField.element = ei;
                 nameRect("ui.texbrowse", browse);
-                if (textField("tex", tfield, e.texture, "textures/hud.png", &p)) uic::editElement(doc, c, ei, [&](UIElement& el) { el.texture = p; });
+                textField("tex", tfield, e.texture, "textures/hud.png", forElement(doc, c, ei, [c, ei](editor::Document& d, const std::string& p) {
+                              uic::editElement(d, c, ei, [&](UIElement& el) { el.texture = p; });
+                          }));
                 if (iconButton("texbrowse", browse, icon::folderOpen, false, "Pick an image")) {
                     {
                         std::lock_guard<std::mutex> lock(g_texMutex);
@@ -1742,9 +1789,11 @@ void CanvasView::canvasInspector(ImDrawList* dl, ImRect r, float y, editor::Docu
     ImRect ic(ImVec2(x0, rows.y), ImVec2(x0 + 40, rows.y + 40));
     dl->AddRectFilled(ic.Min, ic.Max, rgb(0x5ccfe0, 34), radius::card);
     textCentered(dl, ic, f.medium, type::icon + 3, rgb(0x5ccfe0), icon::layoutTemplate);
-    std::string name;
-    if (textField("cvname", ImRect(ImVec2(ic.Max.x + space::md, rows.y), ImVec2(x1, rows.y + 22)), cv.name, "(unnamed)", &name))
-        uic::editCanvas(doc, c, [&](UICanvas& x) { x.name = name; });
+    textField("cvname", ImRect(ImVec2(ic.Max.x + space::md, rows.y), ImVec2(x1, rows.y + 22)), cv.name, "(unnamed)",
+              [&doc, c, root = doc.projectRoot()](const std::string& name) {
+                  if (doc.projectRoot() != root || c < 0 || size_t(c) >= doc.scene().canvases.size()) return;
+                  uic::editCanvas(doc, c, [&](UICanvas& x) { x.name = name; });
+              });
     char where[96];
     std::snprintf(where, sizeof where, "UI canvas %d of %d, %d elements", c + 1, int(doc.scene().canvases.size()), int(cv.elements.size()));
     text(dl, ImVec2(ic.Max.x + space::md, rows.y + 25), f.regular, type::caption, color::textFaint, where);
@@ -1911,14 +1960,16 @@ void CanvasView::fontsSection(ImDrawList* dl, float x0, float x1, float* yp, edi
         // Name: text elements refer to the font by it, so a rename renames theirs.
         ImRect nf = rows.row("lfname", "Name", "What text elements pick the font by. Renaming it renames it in every text element that uses it.");
         nameRect(id + ".name", nf);
-        std::string typed;
-        if (textField("fname", nf, uf.name, "(unnamed)", &typed)) {
+        // A late commit renames font i only while it still has the name the edit began from.
+        textField("fname", nf, uf.name, "(unnamed)", [this, say, &doc, i, from = uf.name, root = doc.projectRoot()](const std::string& typed) {
+            const std::vector<splash::UIFont>& fonts = doc.scene().fonts;
+            if (doc.projectRoot() != root || i < 0 || size_t(i) >= fonts.size() || fonts[size_t(i)].name != from) return;
             std::string why;
             if (!uic::renameFont(doc, i, typed, &why) && !why.empty()) {
                 notice("Font not renamed: " + why, true);
                 if (reportLayout) say("fonts: rename refused: " + why);
             }
-        }
+        });
 
         // The file: a TTF/OTF rasterised at Size, or a 256-wide bitmap PNG.
         const bool bitmap = !uf.bitmap.empty();
