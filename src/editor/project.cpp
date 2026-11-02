@@ -499,12 +499,12 @@ static splash::MeshComponent modelMesh(const std::string& mesh, const std::vecto
     return m;
 }
 
-// A skin component playing the model's clips, the first 16; none when the
+// A skin component playing the model's clips, the first 32; none when the
 // model has no clips, since psxsplash never draws a skinned mesh without one.
 static std::optional<splash::SkinComponent> modelSkin(const splash::ImportedModel& model) {
     if (model.clips.empty()) return std::nullopt;
     splash::SkinComponent s;
-    s.clips.assign(model.clips.begin(), model.clips.begin() + static_cast<std::ptrdiff_t>(std::min<size_t>(model.clips.size(), 16)));
+    s.clips.assign(model.clips.begin(), model.clips.begin() + static_cast<std::ptrdiff_t>(std::min<size_t>(model.clips.size(), size_t(splash::kSkinMaxClips))));
     return s;
 }
 
@@ -979,7 +979,7 @@ struct Resync {
         next.clips = fresh->clips;
         const std::string sourced = nodePrefix + "clips/";
         for (const std::string& c : o.skin->clips)
-            if ((c.rfind(nodePrefix, 0) != 0 || c.rfind(sourced, 0) == 0) && next.clips.size() < 16) next.clips.push_back(c);
+            if ((c.rfind(nodePrefix, 0) != 0 || c.rfind(sourced, 0) == 0) && next.clips.size() < size_t(splash::kSkinMaxClips)) next.clips.push_back(c);
         if (!project.empty() && o.mesh) refreshSkinSources(project, o.mesh->mesh, next, &problems);
         if (next.clips == o.skin->clips) return false;
         o.skin->clips = std::move(next.clips);
@@ -1141,7 +1141,7 @@ ImportWarning explainImportWarning(const std::string& warning) {
         {"a non-uniform scale", ": ", nullptr},
         {"cubic-spline keys", ": ", nullptr},
         {" animations, a skin plays at most ", ": ",
-         "Keep at most 16 animations in the file (delete unused actions before exporting); the first 16 are on the Skin component, "
+         "Keep at most 32 animations in the file (delete unused actions before exporting); the first 32 are on the Skin component, "
          "swap others in by hand"},
         {"' moves no joint and was left out", nullptr,
          "Key the armature's bones instead of the object, or delete the animation in the modelling tool"},

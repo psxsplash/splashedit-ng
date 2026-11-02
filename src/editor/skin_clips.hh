@@ -27,7 +27,7 @@ struct AddedClips {
     std::vector<std::string> refused;   // "<file>: why", per file left out
     std::vector<std::string> warnings;  // "<file>: warning"
     std::vector<std::string> clips;     // the clips added, project-relative
-    int left = 0;                       // clips that did not fit in the 16
+    int left = 0;                       // clips that did not fit in the 32
 };
 AddedClips addClipSources(Document& doc, const ObjectPath& object, const std::vector<std::filesystem::path>& files);
 
