@@ -1055,7 +1055,11 @@ void writeUi(BinWriter& w, size_t tableOffsetPos, const std::vector<UICanvas>& c
             const UIElement& e = cv.elements[ei];
             std::string name = truncateUtf16(e.name, 24);
             w.u8(uint8_t(e.type));
-            w.u8(e.visible ? 1 : 0);
+            // Flags: bit 0 visible, bits 1-3 the blend code (psxsplash
+            // src/uiblend.hh). Image and Text draw textured and cannot blend
+            // with the UI atlas, so they always carry 0 there.
+            const uint8_t blend = blendable(e.type) ? uint8_t(e.blend) : 0;
+            w.u8(uint8_t((e.visible ? 1 : 0) | (blend << 1)));
             w.u8(uint8_t(name.size()));
             w.u8(0);
             strings.push_back({w.pos(), name});
