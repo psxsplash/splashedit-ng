@@ -261,8 +261,14 @@ std::vector<uint32_t> renderSample(const splash::Scene& scene, Assets& assets, c
 // texel 0 transparent; empty cells, holes, missing brushes and cells past the
 // sheet skipped. *tilemapTiles gets the tiles drawn, -1 when there is no
 // tilemap or no readable tileset.
+// Boxes, progress bars and lines with a blend (UIElement::blend) mix with what
+// is under them by the PS1's math: over something drawn, on its 15-bit colour
+// exactly as the GPU does; over a pixel nothing drew, on 8-bit channels with
+// `backdrop[pixel]` (0xAABBGGRR, w x h; without one, `background`), the
+// element's colour widened from 5 bits, and that pixel comes out opaque.
 std::vector<uint32_t> render(const splash::Scene& scene, const std::vector<bool>& show, Screen s, Assets& assets,
-                             uint32_t background, std::vector<uint8_t>* covered = nullptr, int* tilemapTiles = nullptr);
+                             uint32_t background, std::vector<uint8_t>* covered = nullptr, int* tilemapTiles = nullptr,
+                             const std::vector<uint32_t>* backdrop = nullptr);
 
 }  // namespace uic
 }  // namespace editor

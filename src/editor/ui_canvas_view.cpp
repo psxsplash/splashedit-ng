@@ -40,6 +40,20 @@ namespace {
 
 constexpr ImU32 kGuide = rgb(0xff4fd8);
 
+// The checkerboard under the screen: cells of kChecker screen pixels, the top
+// left one light.
+constexpr int kChecker = 8;
+constexpr ImU32 kCheckerDark = rgb(0x0c0d10), kCheckerLight = rgb(0x16181d);
+
+// That checkerboard as an image of `s` (0xAABBGGRR, as uic::render takes it).
+std::vector<uint32_t> checkerboard(uic::Screen s) {
+    std::vector<uint32_t> px(size_t(std::max(0, s.w)) * size_t(std::max(0, s.h)));
+    for (int y = 0; y < s.h; y++)
+        for (int x = 0; x < s.w; x++)
+            px[size_t(y) * size_t(s.w) + size_t(x)] = ((x / kChecker + y / kChecker) & 1) ? kCheckerDark : kCheckerLight;
+    return px;
+}
+
 // The texture file dialog answers on its own thread; draw() applies it.
 std::mutex g_texMutex;
 std::string g_texPicked;
@@ -470,9 +484,13 @@ void CanvasView::upload(const editor::Document& doc, const std::vector<bool>& sh
                           std::any_of(doc.scene().canvases.begin(), doc.scene().canvases.end(), [](const UICanvas& cv) {
                               return std::any_of(cv.elements.begin(), cv.elements.end(), [](const UIElement& e) { return !e.textKey.empty(); });
                           });
+    // Blended elements mix with the checkerboard the texture is drawn over,
+    // pixel for pixel, so the preview shows what the blend does.
+    const std::vector<uint32_t> under = checkerboard(m_screen);
     std::vector<uint32_t> px =
-        anyKeyed ? uic::render(editor::previewScene(doc.scene(), strs.table(), strs.previewLanguage()), show, m_screen, m_assets, 0, &covered, &tiles)
-                 : uic::render(doc.scene(), show, m_screen, m_assets, 0, &covered, &tiles);
+        anyKeyed ? uic::render(editor::previewScene(doc.scene(), strs.table(), strs.previewLanguage()), show, m_screen, m_assets, 0, &covered,
+                               &tiles, &under)
+                 : uic::render(doc.scene(), show, m_screen, m_assets, 0, &covered, &tiles, &under);
     if (namedRectsOn()) {
         // Scripted runs: the tilemap layer under the canvases, each time it is built.
         std::printf("ui: tilemap layer %s\n", tiles < 0 ? "none" : ("tiles " + std::to_string(tiles)).c_str());
@@ -710,12 +728,12 @@ void CanvasView::canvas(ImDrawList* dl, ImRect r, editor::Document& doc) {
     upload(doc, show);
     ImGui::PushClipRect(area.Min, area.Max, true);
     const ImVec2 o = origin, end = origin + size;
-    const float cell = 8 * scale;
-    dl->AddRectFilled(o, end, rgb(0x0c0d10));
+    const float cell = kChecker * scale;
+    dl->AddRectFilled(o, end, kCheckerDark);
     for (int cy = 0; cy * cell < size.y; cy++)
         for (int cx = (cy & 1); cx * cell < size.x; cx += 2)
             dl->AddRectFilled(ImVec2(o.x + cx * cell, o.y + cy * cell),
-                              ImVec2(std::min(end.x, o.x + (cx + 1) * cell), std::min(end.y, o.y + (cy + 1) * cell)), rgb(0x16181d));
+                              ImVec2(std::min(end.x, o.x + (cx + 1) * cell), std::min(end.y, o.y + (cy + 1) * cell)), kCheckerLight);
     ui::addTextureImage(dl, (ImTextureID)(intptr_t)m_tex, o, end);
     dl->AddRect(o - ImVec2(1, 1), end + ImVec2(1, 1), color::borderStrong);
     if (safeArea) safeAreaGuides(dl, ImRect(o, end));
@@ -1320,6 +1338,36 @@ bool colourRow(editor::Document& doc, Rows& rows, const char* id, const char* la
     return open;
 }
 
+// The Blend row: opaque or one of the PS1's four semi-transparency modes, one
+// undo step per pick. Images and text cannot blend (their texels are opaque),
+// so for them it shows Opaque, greyed, and says why. Scripted tests: the field
+// is ui.blend, its menu rows ui.blend/<label>.
+void blendRow(Rows& rows, editor::Document& doc, int c, int ei, const UIElement& e) {
+    static const char* const kLabels[] = {"Opaque", "50% (half)", "Add", "Subtract", "Add 25%"};
+    const bool can = splash::blendable(e.type);
+    const char* tip = can ? "How it mixes with what is behind it. Opaque covers it. 50% (half) averages the two. "
+                            "Add brightens what is behind it by the colour. Subtract darkens what is behind it by the colour. "
+                            "Add 25% brightens what is behind it by a quarter of the colour."
+                          : "Images and text always draw opaque: the PS1 only blends texels marked semi-transparent, "
+                            "and the UI atlas does not mark them.";
+    ImRect field = rows.row("lblend", "Blend", tip);
+    nameRect("ui.blend", field);
+    if (!can) {
+        Fonts& f = fonts();
+        interact("ui.blend", field);
+        tooltip(tip);
+        rows.dl->AddRectFilled(field.Min, field.Max, color::field, radius::field);
+        rows.dl->AddRect(field.Min, field.Max, color::border, radius::field);
+        text(rows.dl, ImVec2(field.Min.x + space::sm, centerY(f.regular, type::body, field.Min.y, field.Max.y)), f.regular, type::body,
+             color::textFaint, kLabels[0]);
+        return;
+    }
+    const int cur = int(e.blend) <= 4 ? int(e.blend) : 0;
+    const int picked = dropdownMenu("ui.blend", field, nullptr, kLabels[cur], {kLabels[0], kLabels[1], kLabels[2], kLabels[3], kLabels[4]}, cur);
+    if (ImGui::IsItemHovered()) tooltip(tip);
+    if (picked >= 0 && picked != cur) uic::editElement(doc, c, ei, [picked](UIElement& el) { el.blend = splash::UIBlend(picked); });
+}
+
 }  // namespace
 
 void CanvasView::elementInspector(ImDrawList* dl, ImRect r, float y, editor::Document& doc) {
@@ -1725,6 +1773,7 @@ void CanvasView::elementInspector(ImDrawList* dl, ImRect r, float y, editor::Doc
                                   e.type == UIElementType::Image ? "Multiplies the texture by colour/128: #808080 shows it as it is."
                                                                  : "Cut to 15-bit colour on the PS1, as the preview shows.",
                                   e.color, [](UIElement& el, const std::array<float, 3>& v) { el.color = v; }, c, ei);
+        blendRow(rows, doc, c, ei, e);
         rows.gap();
     }
 }

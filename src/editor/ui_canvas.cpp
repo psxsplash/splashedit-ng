@@ -56,7 +56,7 @@ size_t utf16Units(const std::string& s) {
 
 bool sameElement(const UIElement& a, const UIElement& b) {
     return a.type == b.type && a.name == b.name && a.visible == b.visible && a.rect == b.rect && a.anchorMin == b.anchorMin &&
-           a.anchorMax == b.anchorMax && a.color == b.color && a.text == b.text && a.font == b.font && a.textKey == b.textKey && a.from == b.from &&
+           a.anchorMax == b.anchorMax && a.color == b.color && a.blend == b.blend && a.text == b.text && a.font == b.font && a.textKey == b.textKey && a.from == b.from &&
            a.to == b.to && a.background == b.background && a.value == b.value && a.texture == b.texture &&
            a.bitDepth == b.bitDepth && a.cutout == b.cutout && a.sheet == b.sheet && a.cell == b.cell && a.unknown == b.unknown;
 }
@@ -1235,14 +1235,58 @@ namespace {
 
 uint8_t glyphChar(unsigned char c) { return (c < 32 || c > 127) ? uint8_t('?') : uint8_t(c); }
 
+// One channel of a blend, B behind and F the element, clamped to 0..max: the
+// math of psxsplash's uiblend::blendChannel (max 31 there, 5-bit channels).
+int blendChannel(splash::UIBlend b, int back, int front, int max) {
+    int r = front;
+    switch (b) {
+        case splash::UIBlend::Opaque: r = front; break;
+        case splash::UIBlend::Half: r = (back + front) / 2; break;
+        case splash::UIBlend::Add: r = back + front; break;
+        case splash::UIBlend::Subtract: r = back - front; break;
+        case splash::UIBlend::AddQuarter: r = back + front / 4; break;
+    }
+    return std::clamp(r, 0, max);
+}
+
+// An 8-bit channel as the GPU's 5-bit one shows: c5 widened to 8 bits.
+uint32_t widen5(int c5) { return uint32_t((c5 << 3) | (c5 >> 2)); }
+
 struct Frame {
     Screen s;
     std::vector<uint16_t> px;  // 15-bit colour
+    // 0 = nothing drew; 1 = px holds what did; 2 = a blend over the backdrop,
+    // whose colour (8 bits a channel, 0xAABBGGRR) is in `over`.
     std::vector<uint8_t> cov;
+    std::vector<uint32_t> over;
+    // What is behind the pixels nothing drew, for blends: `backdrop` (one
+    // 0xAABBGGRR pixel each) or, without one, `background`.
+    const std::vector<uint32_t>* backdrop = nullptr;
+    uint32_t background = 0;
+    // The blend put() draws with: the element's, for one that can blend.
+    splash::UIBlend blend = splash::UIBlend::Opaque;
     void put(int x, int y, uint16_t c) {
         if (x < 0 || y < 0 || x >= s.w || y >= s.h) return;
-        px[size_t(y) * size_t(s.w) + size_t(x)] = c;
-        cov[size_t(y) * size_t(s.w) + size_t(x)] = 1;
+        const size_t i = size_t(y) * size_t(s.w) + size_t(x);
+        if (blend == splash::UIBlend::Opaque) {
+            px[i] = c;
+            cov[i] = 1;
+        } else if (cov[i] == 1) {
+            // Over something drawn: the GPU's own 5-bit blend, exactly.
+            int ch[3];
+            for (int k = 0; k < 3; k++) ch[k] = blendChannel(blend, (px[i] >> (5 * k)) & 31, (c >> (5 * k)) & 31, 31);
+            px[i] = uint16_t(ch[0] | (ch[1] << 5) | (ch[2] << 10));
+        } else {
+            // Over the backdrop the editor shows (not a PS1 frame): the same
+            // math on 8-bit channels, the element's colour widened from 5 bits.
+            if (over.empty()) over.assign(px.size(), 0);
+            const uint32_t b = cov[i] == 2 ? over[i] : backdrop && i < backdrop->size() ? (*backdrop)[i] : background;
+            uint32_t out = 0xff000000u;
+            for (int k = 0; k < 3; k++)
+                out |= uint32_t(blendChannel(blend, int((b >> (8 * k)) & 0xff), int(widen5((c >> (5 * k)) & 31)), 255)) << (8 * k);
+            over[i] = out;
+            cov[i] = 2;
+        }
     }
     void fill(int x, int y, int w, int h, uint16_t c) {
         const int x0 = std::max(0, x), y0 = std::max(0, y), x1 = std::min(s.w, x + w), y1 = std::min(s.h, y + h);
@@ -1376,8 +1420,11 @@ std::vector<uint32_t> renderSample(const splash::Scene& scene, Assets& assets, c
 }
 
 std::vector<uint32_t> render(const splash::Scene& scene, const std::vector<bool>& show, Screen s, Assets& assets,
-                             uint32_t background, std::vector<uint8_t>* covered, int* tilemapTiles) {
-    Frame f{s, std::vector<uint16_t>(size_t(s.w) * size_t(s.h), 0), std::vector<uint8_t>(size_t(s.w) * size_t(s.h), 0)};
+                             uint32_t background, std::vector<uint8_t>* covered, int* tilemapTiles,
+                             const std::vector<uint32_t>* backdrop) {
+    Frame f{s, std::vector<uint16_t>(size_t(s.w) * size_t(s.h), 0), std::vector<uint8_t>(size_t(s.w) * size_t(s.h), 0), {}};
+    f.backdrop = backdrop;
+    f.background = background;
     // The renderer draws the tiles, then sprites, then the UI: the map is under every canvas.
     if (tilemapTiles) *tilemapTiles = drawTilemap(f, scene, assets);
     std::vector<int> order;
@@ -1395,6 +1442,8 @@ std::vector<uint32_t> render(const splash::Scene& scene, const std::vector<bool>
         for (const UIElement& e : scene.canvases[size_t(c)].elements) {
             if (!e.visible || !e.unknown.empty()) continue;
             const Rect r = drawn(e, s);
+            // Boxes, bars and lines draw with their blend; images and text opaque.
+            f.blend = splash::blendable(e.type) ? e.blend : splash::UIBlend::Opaque;
             switch (e.type) {
                 case UIElementType::Box: f.fill(r.x, r.y, r.w, r.h, flat(e.color)); break;
                 case UIElementType::Progress: {
@@ -1447,14 +1496,19 @@ std::vector<uint32_t> render(const splash::Scene& scene, const std::vector<bool>
         }
     // System-font text goes out after the ordering table, queued from the
     // front-most element back, so the back-most one ends up on top.
+    f.blend = splash::UIBlend::Opaque;
     for (auto it = systemText.rbegin(); it != systemText.rend(); ++it) drawSystemText(f, it->x, it->y, *it->text, it->col);
 
     std::vector<uint32_t> out(f.px.size(), background);
     for (size_t i = 0; i < f.px.size(); i++) {
         if (!f.cov[i]) continue;
-        auto ex = [](int c5) { return uint32_t((c5 << 3) | (c5 >> 2)); };
+        if (f.cov[i] == 2) {
+            out[i] = f.over[i];
+            f.cov[i] = 1;
+            continue;
+        }
         const uint16_t w = f.px[i];
-        out[i] = 0xff000000u | (ex((w >> 10) & 31) << 16) | (ex((w >> 5) & 31) << 8) | ex(w & 31);
+        out[i] = 0xff000000u | (widen5((w >> 10) & 31) << 16) | (widen5((w >> 5) & 31) << 8) | widen5(w & 31);
     }
     if (covered) *covered = std::move(f.cov);
     return out;
