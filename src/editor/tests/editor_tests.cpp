@@ -1245,6 +1245,86 @@ void testRuntimeLuaScan() {
     CHECK(both.find("load and loadstring of Lua text fail with") != std::string::npos);
 }
 
+// UI.DrawTexturedTriangle, Sprite.Create and Sprite.SheetIndex with a literal
+// sheet name: the scan finds those calls and only those, and the warning
+// names a sheet the scene does not have, once per call and name.
+void testSpriteSheetRefScan() {
+    auto refs = [](const std::string& src) {
+        std::vector<std::string> out;
+        for (const splash::SheetNameRef& r : splash::spriteSheetRefs(src)) out.push_back(r.call + ":" + r.name + ":" + std::to_string(r.line));
+        return out;
+    };
+    using V = std::vector<std::string>;
+    CHECK(refs("UI.DrawTexturedTriangle(\"hud\", {0,0}, {8,0}, {0,8}, {0,0}, {8,0}, {0,8})\n") ==
+          V({"UI.DrawTexturedTriangle:hud:1"}));
+    CHECK(refs("-- x\nlocal s = Sprite.Create('hero')\nlocal i = Sprite.SheetIndex ( \"fx\" )\n") ==
+          V({"Sprite.Create:hero:2", "Sprite.SheetIndex:fx:3"}));
+    CHECK(refs("Sprite.Create(\"a\\\"b\")") == V({"Sprite.Create:a\"b:1"}));
+    // Not literal names: computed, a variable, an index, nothing.
+    CHECK(refs("Sprite.Create(\"he\" .. \"ro\")\nSprite.Create(name)\nSprite.Create(0)\nSprite.Create()\n").empty());
+    CHECK(refs("UI.DrawTexturedTriangle(sheets[1], p, p, p, uv, uv, uv)\n").empty());
+    // Not the calls: strings, comments, fields, other functions.
+    CHECK(refs("print('Sprite.Create(\"x\")')\n-- UI.DrawTexturedTriangle(\"x\")\n--[[ Sprite.Create(\"y\") ]]\n").empty());
+    CHECK(refs("t.Sprite.Create(\"x\")\nUI.DrawTriangle(\"x\")\nSprite.Destroy(\"x\")\nMySprite.Create(\"x\")\n").empty());
+
+    const std::vector<std::string> sheets = {"hero", "fx"};
+    CHECK(splash::spriteSheetRefWarnings("a.lua", splash::spriteSheetRefs("Sprite.Create('hero') UI.DrawTexturedTriangle('fx')"), sheets)
+              .empty());
+    const std::vector<std::string> w = splash::spriteSheetRefWarnings(
+        "scripts/hud.lua",
+        splash::spriteSheetRefs("UI.DrawTexturedTriangle('ghost')\nUI.DrawTexturedTriangle('ghost')\nSprite.Create('ghost')\n"), sheets);
+    CHECK(w.size() == 2);
+    if (w.size() == 2) {
+        CHECK(w[0] == "scripts/hud.lua line 1: UI.DrawTexturedTriangle(\"ghost\"): the scene has no sprite sheet named 'ghost'; "
+                      "the console draws a magenta triangle instead");
+        CHECK(w[1].rfind("scripts/hud.lua line 3: Sprite.Create(\"ghost\"): the scene has no sprite sheet named 'ghost'; it returns -1", 0) == 0);
+    }
+    const std::vector<std::string> none = splash::spriteSheetRefWarnings("b.lua", splash::spriteSheetRefs("Sprite.Create('x')"), {});
+    CHECK(none.size() == 1 && none[0].find("add one in the scene inspector's Sprite sheets") != std::string::npos);
+}
+
+// The warning reaches the export: a script naming a missing sheet warns, the
+// same script with the sheet in the scene does not.
+void testSpriteSheetRefExport() {
+    namespace fs = std::filesystem;
+    const fs::path src = SPLASHEDIT_SOURCE_DIR;
+    const fs::path dir = g_outDir / "sheet_ref_export";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir / "scripts", ec);
+    fs::copy_file(src / "tests" / "sprite" / "hero.png", dir / "hero.png", ec);
+    std::ofstream(dir / "scripts/hud.lua", std::ios::binary)
+        << "function onUpdate(self)\n  UI.DrawTexturedTriangle(\"hud\", {0,0}, {8,0}, {0,8}, {0,0}, {8,0}, {0,8})\n"
+           "  UI.DrawTexturedTriangle(\"hero\", {0,0}, {8,0}, {0,8}, {0,0}, {8,0}, {0,8})\nend\n";
+    splash::Scene sc;
+    splash::Object o;
+    o.name = "Hud";
+    o.script = splash::ScriptComponent{"scripts/hud.lua", {}};
+    sc.objects = {o};
+    splash::SpriteSheet hero;
+    hero.name = "hero";
+    hero.texture = "hero.png";
+    sc.spriteSheets = {hero};
+    auto count = [&](const splash::ExportResult& r, const std::string& name) {
+        size_t n = 0;
+        for (const std::string& w : r.warnings)
+            if (w.find("no sprite sheet named '" + name + "'") != std::string::npos) n++;
+        return n;
+    };
+    splash::ExportResult a = splash::exportSplashpack(sc, dir, dir / "a.splashpack");
+    for (const std::string& e : a.errors) std::fprintf(stderr, "sheet ref export: %s\n", e.c_str());
+    CHECK(a.ok());
+    CHECK(count(a, "hud") == 1 && count(a, "hero") == 0);
+    bool line = false;
+    for (const std::string& w : a.warnings) line = line || w.rfind("scripts/hud.lua line 2: UI.DrawTexturedTriangle(\"hud\")", 0) == 0;
+    CHECK(line);
+    splash::SpriteSheet hud = hero;
+    hud.name = "hud";
+    sc.spriteSheets.push_back(hud);
+    splash::ExportResult b = splash::exportSplashpack(sc, dir, dir / "b.splashpack");
+    CHECK(b.ok() && count(b, "hud") == 0);
+}
+
 // The scan reaches Problems: the live export (what the Problems popup lists)
 // warns about a script that loads Lua text, and not about one that does not.
 void testRuntimeLuaProblem() {
@@ -19181,6 +19261,8 @@ int main(int argc, char** argv) {
     testObjectRamBudget();
     testScriptWithoutMesh();
     testRuntimeLuaScan();
+    testSpriteSheetRefScan();
+    testSpriteSheetRefExport();
     testRuntimeLuaProblem();
     testWorldStreamPlan();
     testWorldStreamExport();

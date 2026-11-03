@@ -12,6 +12,7 @@ struct Tok {
     enum Kind { Name, Punct, Other } kind;
     std::string text;
     int line;
+    std::string value;  // a quoted string literal's contents; empty for anything else
 };
 
 bool isNameStart(char c) { return std::isalpha(static_cast<unsigned char>(c)) || c == '_'; }
@@ -61,16 +62,22 @@ std::vector<Tok> tokens(const std::string& s) {
             out.push_back({Tok::Other, "string", at});
         } else if (c == '"' || c == '\'') {
             const int at = line;
+            std::string value;
             i++;
             while (i < s.size() && s[i] != c && s[i] != '\n') {
                 if (s[i] == '\\' && i + 1 < s.size()) {
                     if (s[i + 1] == '\n') line++;
                     i++;
+                    // The common escapes; anything rarer keeps its character.
+                    const char e = s[i];
+                    value += e == 'n' ? '\n' : e == 't' ? '\t' : e;
+                } else {
+                    value += s[i];
                 }
                 i++;
             }
             if (i < s.size() && s[i] == c) i++;
-            out.push_back({Tok::Other, "string", at});
+            out.push_back({Tok::Other, "string", at, std::move(value)});
         } else if (isNameStart(c)) {
             const size_t b = i;
             while (i < s.size() && isNameChar(s[i])) i++;
@@ -172,6 +179,45 @@ std::vector<RuntimeLuaUse> runtimeLuaUses(const std::string& source) {
     uses.erase(std::remove_if(uses.begin(), uses.end(), [&](const RuntimeLuaUse& u) { return own.count(u.name) != 0; }),
                uses.end());
     return uses;
+}
+
+std::vector<SheetNameRef> spriteSheetRefs(const std::string& source) {
+    struct Call {
+        const char* table;
+        const char* name;
+    };
+    static const Call kCalls[] = {{"UI", "DrawTexturedTriangle"}, {"Sprite", "Create"}, {"Sprite", "SheetIndex"}};
+    const std::vector<Tok> t = tokens(source);
+    std::vector<SheetNameRef> refs;
+    for (long k = 0; k + 4 < long(t.size()); k++) {
+        if (t[size_t(k)].kind != Tok::Name || isPunct(t, k - 1, ".") || isPunct(t, k - 1, ":")) continue;
+        for (const Call& c : kCalls) {
+            if (!isWord(t, k, c.table) || !isPunct(t, k + 1, ".") || !isWord(t, k + 2, c.name) || !isPunct(t, k + 3, "("))
+                continue;
+            // Only a first argument that is one quoted literal: f("a" .. b) is computed.
+            const Tok& a = t[size_t(k + 4)];
+            const bool literal = a.kind == Tok::Other && a.text == "string" && (isPunct(t, k + 5, ",") || isPunct(t, k + 5, ")"));
+            if (literal) refs.push_back({std::string(c.table) + "." + c.name, a.value, a.line});
+        }
+    }
+    return refs;
+}
+
+std::vector<std::string> spriteSheetRefWarnings(const std::string& script, const std::vector<SheetNameRef>& refs,
+                                                const std::vector<std::string>& sheets) {
+    std::vector<std::string> out;
+    std::set<std::string> said;
+    for (const SheetNameRef& r : refs) {
+        if (std::find(sheets.begin(), sheets.end(), r.name) != sheets.end() || !said.insert(r.call + "\n" + r.name).second)
+            continue;
+        std::string w = script + " line " + std::to_string(r.line) + ": " + r.call + "(\"" + r.name +
+                        "\"): the scene has no sprite sheet named '" + r.name + "'";
+        if (r.call == "UI.DrawTexturedTriangle") w += "; the console draws a magenta triangle instead";
+        else if (r.call == "Sprite.Create") w += "; it returns -1 on the console";
+        else w += "; it returns -1";
+        out.push_back(w + (sheets.empty() ? " (add one in the scene inspector's Sprite sheets)" : ""));
+    }
+    return out;
 }
 
 std::string runtimeLuaWarning(const std::string& script, const std::vector<RuntimeLuaUse>& uses) {
