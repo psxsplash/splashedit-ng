@@ -44,6 +44,7 @@ struct PsxTexture {
     bool hasPalette = false;
     std::vector<uint16_t> palette;
     std::string paletteGroup;  // Material::paletteGroup it converted with; part of its identity
+    bool semiTransparent = false;  // STP set by setSemiTransparent; part of its identity
 
     // Placement, filled by the VRAM packer.
     uint8_t packingX = 0, packingY = 0;  // inside the atlas; X in words
@@ -63,6 +64,14 @@ std::vector<uint16_t> buildPalette(const std::vector<const Image*>& images, BitD
 // same depth and cutout); convertTexture(img, depth, cutout) is this with
 // buildPalette({&img}, depth, cutout).
 PsxTexture convertTexture(const Image& img, BitDepth depth, bool cutout, const std::vector<uint16_t>& palette);
+
+// Sets STP (bit 15) on every word the texture draws: each non-transparent
+// texel of a 16 bpp texture, each CLUT colour of a 4/8 bpp one. The
+// transparent word 0x0000 (and CLUT padding) stays 0. The GPU blends a
+// textured texel only when its STP is set and the primitive is semi-
+// transparent; on an opaque primitive STP changes nothing (nothing in
+// psxsplash sets the mask bit, GP0 E6).
+void setSemiTransparent(PsxTexture& t);
 
 // The members of a palette group as the exporter finds them: every distinct
 // texture of an active object's textured material whose paletteGroup is

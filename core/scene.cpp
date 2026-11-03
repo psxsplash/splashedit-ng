@@ -744,6 +744,7 @@ json writeSpriteSheet(const SpriteSheet& s) {
               {"cellWidth", s.cellW},
               {"cellHeight", s.cellH},
               {"anims", anims}};
+    if (s.semiTransparent) j["semiTransparent"] = true;
     putExtras(j, s.extra);
     return j;
 }
@@ -757,6 +758,7 @@ SpriteSheet readSpriteSheet(const json& j) {
     s.bitDepth = BitDepth(bd);
     s.cellW = j.value("cellWidth", s.cellW);
     s.cellH = j.value("cellHeight", s.cellH);
+    s.semiTransparent = j.value("semiTransparent", false);
     for (const json& aj : j.value("anims", json::array())) s.anims.push_back(readSpriteAnim(aj));
     s.extra = extrasOf(j, writeSpriteSheet(s));
     return s;

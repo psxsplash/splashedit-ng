@@ -506,6 +506,9 @@ struct SpriteSheet {
     std::string texture;  // project-relative image
     BitDepth bitDepth = BitDepth::Bpp4;
     int cellW = 16, cellH = 16;
+    // STP on every drawn texel (16 bpp) or CLUT colour (4/8 bpp), so a
+    // blended UI.DrawTexturedTriangle blends it; opaque drawing is unchanged.
+    bool semiTransparent = false;
     std::vector<SpriteAnim> anims;
     ExtraKeys extra;
     bool operator==(const SpriteSheet&) const = default;

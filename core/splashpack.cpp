@@ -2319,6 +2319,7 @@ static ExportResult exportSplashpackBaked(const Scene& scene, const fs::path& ro
                     continue;
                 }
                 textureStore.back().source = s.texture;
+                if (s.semiTransparent) setSemiTransparent(textureStore.back());
                 spriteTextures[i] = &textureStore.back();
             }
     }
