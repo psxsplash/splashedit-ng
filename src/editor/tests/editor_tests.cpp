@@ -11861,6 +11861,206 @@ void testUiRender() {
 // match it pixel for pixel in 15-bit colour: both Inter fonts (the body text
 // lighter than its colour, the GPU's tint doubling), the system font, the
 // progress bar, the image, the line and the anchored boxes.
+// ---- Per-element UI blend (#312)
+
+const splash::UIBlend kAllBlends[] = {splash::UIBlend::Opaque, splash::UIBlend::Half, splash::UIBlend::Add,
+                                      splash::UIBlend::Subtract, splash::UIBlend::AddQuarter};
+
+// The scene file keeps each mode under "blend" and writes nothing for Opaque.
+void testUiBlendSaveLoad() {
+    namespace fs = std::filesystem;
+    const fs::path dir = g_outDir / "uiblend";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    auto slurp = [](const fs::path& f) {
+        std::ifstream in(f, std::ios::binary);
+        return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    };
+    auto count = [](const std::string& text, const std::string& what) {
+        int n = 0;
+        for (size_t at = text.find(what); at != std::string::npos; at = text.find(what, at + 1)) n++;
+        return n;
+    };
+    splash::Scene sc;
+    splash::UICanvas cv;
+    cv.name = "hud";
+    for (int i = 0; i < 5; i++) {
+        splash::UIElement e = uiBox(("b" + std::to_string(i)).c_str(), i * 20, 0, 16, 16);
+        e.blend = kAllBlends[i];
+        cv.elements.push_back(e);
+    }
+    sc.canvases.push_back(cv);
+    splash::saveScene(sc, dir / "blend.scene");
+    const std::string text = slurp(dir / "blend.scene");
+    CHECK(count(text, "\"blend\"") == 4);
+    CHECK(text.find("\"opaque\"") == std::string::npos);
+    for (const char* name : {"\"half\"", "\"add\"", "\"subtract\"", "\"addQuarter\""}) CHECK(count(text, name) == 1);
+    const splash::Scene back = splash::loadScene(dir / "blend.scene");
+    CHECK(back.canvases.size() == 1 && back.canvases[0].elements.size() == 5);
+    if (back.canvases.size() == 1 && back.canvases[0].elements.size() == 5)
+        for (int i = 0; i < 5; i++) {
+            const splash::UIElement& e = back.canvases[0].elements[size_t(i)];
+            CHECK(e.blend == kAllBlends[i] && e.extra.empty());
+        }
+    // A scene of only opaque elements has no "blend" at all.
+    splash::Scene plain = sc;
+    for (splash::UIElement& e : plain.canvases[0].elements) e.blend = splash::UIBlend::Opaque;
+    splash::saveScene(plain, dir / "plain.scene");
+    CHECK(slurp(dir / "plain.scene").find("blend") == std::string::npos);
+    // An explicit "opaque" reads as Opaque, is not kept as an unknown key and
+    // is not written back.
+    {
+        std::string t = slurp(dir / "blend.scene");
+        const size_t at = t.find("\"half\"");
+        CHECK(at != std::string::npos);
+        if (at != std::string::npos) t.replace(at, std::strlen("\"half\""), "\"opaque\"");
+        std::ofstream(dir / "explicit.scene", std::ios::binary) << t;
+    }
+    const splash::Scene ex = splash::loadScene(dir / "explicit.scene");
+    CHECK(ex.canvases[0].elements[1].blend == splash::UIBlend::Opaque && ex.canvases[0].elements[1].extra.empty());
+    splash::saveScene(ex, dir / "explicit2.scene");
+    CHECK(count(slurp(dir / "explicit2.scene"), "\"blend\"") == 3);
+    // A name this build does not know fails the load rather than reading as opaque.
+    {
+        std::string t = slurp(dir / "blend.scene");
+        const size_t at = t.find("\"subtract\"");
+        if (at != std::string::npos) t.replace(at, std::strlen("\"subtract\""), "\"multiply\"");
+        std::ofstream(dir / "bad.scene", std::ios::binary) << t;
+    }
+    bool threw = false;
+    try {
+        splash::loadScene(dir / "bad.scene");
+    } catch (const std::exception&) {
+        threw = true;
+    }
+    CHECK(threw);
+}
+
+// The element flags byte: bit 0 visible, bits 1-3 the blend code, and only
+// for boxes, progress bars and lines (psxsplash src/uiblend.hh).
+void testUiBlendExport() {
+    namespace fs = std::filesystem;
+    const fs::path project = fs::path(SPLASHEDIT_SOURCE_DIR) / "examples" / "courtyard";
+    const fs::path dir = g_outDir / "uiblend";
+    fs::create_directories(dir);
+    splash::Scene sc = splash::loadScene(project / "courtyard.scene");
+    sc.canvases.clear();
+    sc.fonts.clear();
+    splash::UICanvas cv;
+    cv.name = "hud";
+    splash::UIElement box = uiBox("box", 0, 0, 40, 40);
+    box.blend = splash::UIBlend::Subtract;
+    splash::UIElement line;
+    line.type = splash::UIElementType::Line;
+    line.name = "line";
+    line.visible = false;
+    line.to = {50, 50};
+    line.blend = splash::UIBlend::Add;
+    splash::UIElement image = uiBox("image", 50, 0, 16, 16);
+    image.type = splash::UIElementType::Image;
+    image.blend = splash::UIBlend::Half;
+    splash::UIElement bar = uiBox("bar", 0, 60, 100, 8);
+    bar.type = splash::UIElementType::Progress;
+    bar.blend = splash::UIBlend::AddQuarter;
+    splash::UIElement text = uiBox("text", 0, 80, 100, 16);
+    text.type = splash::UIElementType::Text;
+    text.text = "hi";
+    text.blend = splash::UIBlend::Add;
+    splash::UIElement plain = uiBox("plain", 0, 100, 8, 8);
+    cv.elements = {box, line, image, bar, text, plain};
+    sc.canvases.push_back(cv);
+    const splash::ExportResult r = splash::exportSplashpack(sc, project, dir / "blend.splashpack");
+    CHECK(r.ok());
+    for (const std::string& e : r.errors) std::fprintf(stderr, "  export error: %s\n", e.c_str());
+    std::ifstream in(dir / "blend.splashpack", std::ios::binary);
+    const std::string b((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    CHECK(b.size() > 100);
+    if (b.size() <= 100) return;
+    const int canvases = uint8_t(b[92]) | (uint8_t(b[93]) << 8), fonts = uint8_t(b[94]);
+    CHECK(canvases == 1 && fonts == 0);
+    const size_t table = size_t(roomtest::rd32(b, 96)) + size_t(fonts) * 112;
+    CHECK(table + 12 <= b.size() && uint8_t(b[table + 6]) == 6);
+    if (table + 12 > b.size()) return;
+    const size_t data = size_t(roomtest::rd32(b, table));
+    CHECK(data + 6 * 48 <= b.size());
+    if (data + 6 * 48 > b.size()) return;
+    auto flags = [&](int i) { return int(uint8_t(b[data + size_t(i) * 48 + 1])); };
+    CHECK(flags(0) == 0x07);  // visible Box, Subtract (3 << 1 | 1)
+    CHECK(flags(1) == 0x04);  // hidden Line, Add (2 << 1)
+    CHECK(flags(2) == 0x01);  // visible Image: never blends
+    CHECK(flags(3) == 0x09);  // visible Progress, AddQuarter (4 << 1 | 1)
+    CHECK(flags(4) == 0x01);  // visible Text: never blends
+    CHECK(flags(5) == 0x01);  // visible Box, Opaque: as before blending
+}
+
+// Picking a blend in the inspector is one undo step, like the Colour edit;
+// picking the one it has is none.
+void testUiBlendEdit() {
+    using namespace editor::uic;
+    editor::Document d;
+    d.reset(uiScene());
+    CHECK(editElement(d, 0, 0, [](splash::UIElement& e) { e.blend = splash::UIBlend::Half; }));
+    CHECK(d.historySize() == 1 && d.scene().canvases[0].elements[0].blend == splash::UIBlend::Half);
+    CHECK(!editElement(d, 0, 0, [](splash::UIElement& e) { e.blend = splash::UIBlend::Half; }) && d.historySize() == 1);
+    CHECK(d.undo() && d.scene().canvases[0].elements[0].blend == splash::UIBlend::Opaque);
+    CHECK(d.redo() && d.scene().canvases[0].elements[0].blend == splash::UIBlend::Half);
+}
+
+// The canvas preview blends with the GPU's math: over a drawn element on its
+// 15-bit colour, over the backdrop on 8-bit channels; images stay opaque.
+void testUiBlendRender() {
+    using namespace editor::uic;
+    const Screen s;
+    // An opaque box at 0..99 x 0..49 of 15-bit (16, 8, 4), then one box per
+    // mode half over it (x 0..19 over it, 100..119 over the backdrop).
+    splash::Scene sc;
+    splash::UICanvas cv;
+    cv.name = "hud";
+    splash::UIElement under = uiBox("under", 0, 0, 100, 50);
+    under.color = {16 * 8 / 255.0f, 8 * 8 / 255.0f, 4 * 8 / 255.0f};
+    cv.elements.push_back(under);
+    for (int i = 1; i < 5; i++) {
+        splash::UIElement e = uiBox(("b" + std::to_string(i)).c_str(), 80, i * 10 - 10, 40, 10);
+        e.color = {20 * 8 / 255.0f, 4 * 8 / 255.0f, 31 * 8 / 255.0f};  // 15-bit (20, 4, 31)
+        e.blend = kAllBlends[i];
+        cv.elements.push_back(e);
+    }
+    splash::UIElement img = uiBox("img", 200, 0, 10, 10);
+    img.type = splash::UIElementType::Image;
+    img.blend = splash::UIBlend::Half;
+    cv.elements.push_back(img);
+    sc.canvases.push_back(cv);
+    Assets assets;
+    assets.refresh(g_outDir, 0);
+    std::vector<uint32_t> backdrop(320u * 240u, 0xff406080u);  // 8-bit (0x80, 0x60, 0x40), 0xAABBGGRR
+    std::vector<uint8_t> cov;
+    const std::vector<uint32_t> px = render(sc, {true}, s, assets, 0, &cov, nullptr, &backdrop);
+    auto at = [&](int x, int y) { return px[size_t(y) * 320 + size_t(x)]; };
+    auto ex = [](int c5) { return uint32_t((c5 << 3) | (c5 >> 2)); };
+    auto rgb5 = [&](int r, int g, int b) { return 0xff000000u | (ex(b) << 16) | (ex(g) << 8) | ex(r); };
+    auto rgb8 = [](int r, int g, int b) {
+        auto c = [](int v) { return uint32_t(std::clamp(v, 0, 255)); };
+        return 0xff000000u | (c(b) << 16) | (c(g) << 8) | c(r);
+    };
+    // Over the drawn box, B = (16, 8, 4), F = (20, 4, 31), 5-bit, clamped at 0..31.
+    CHECK(at(90, 5) == rgb5(18, 6, 17));    // Half: (B + F) / 2
+    CHECK(at(90, 15) == rgb5(31, 12, 31));  // Add: B + F
+    CHECK(at(90, 25) == rgb5(0, 4, 0));     // Subtract: B - F
+    CHECK(at(90, 35) == rgb5(21, 9, 11));   // AddQuarter: B + F / 4
+    // Over the backdrop, B = (0x80, 0x60, 0x40), F = F widened: (165, 33, 255).
+    const int fr = int(ex(20)), fg = int(ex(4)), fb = int(ex(31));
+    CHECK(at(110, 5) == rgb8((0x80 + fr) / 2, (0x60 + fg) / 2, (0x40 + fb) / 2));
+    CHECK(at(110, 15) == rgb8(0x80 + fr, 0x60 + fg, 0x40 + fb));
+    CHECK(at(110, 25) == rgb8(0x80 - fr, 0x60 - fg, 0x40 - fb));
+    CHECK(at(110, 35) == rgb8(0x80 + fr / 4, 0x60 + fg / 4, 0x40 + fb / 4));
+    CHECK(cov[size_t(5) * 320 + 110] == 1);
+    // Nothing drew outside: the background, not the backdrop.
+    CHECK(at(300, 200) == 0u && cov[size_t(200) * 320 + 300] == 0);
+    // Without a backdrop, `background` is what is behind.
+    const std::vector<uint32_t> nb = render(sc, {true}, s, assets, 0xff406080u);
+    CHECK(nb[size_t(25) * 320 + 110] == rgb8(0x80 - fr, 0x60 - fg, 0x40 - fb));
+}
+
 void testUiMatchesRuntime() {
     using namespace editor::uic;
     const std::filesystem::path dir = std::filesystem::path(SPLASHEDIT_SOURCE_DIR) / "tests" / "ui";
@@ -19182,6 +19382,10 @@ int main(int argc, char** argv) {
     testUiMultiSelect();
     testUiProblems();
     testUiRender();
+    testUiBlendSaveLoad();
+    testUiBlendExport();
+    testUiBlendEdit();
+    testUiBlendRender();
     testUiMatchesRuntime();
     testLoaderPack();
     testExportCanvasDefaultFont();
