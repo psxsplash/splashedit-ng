@@ -40,6 +40,8 @@ std::string linkSettings(bool server, uint16_t port) {
            p + "}}}\n";
 }
 
+std::string noLinkSettings() { return "{\"emulator\":{\"Debug\":{\"SIO1Server\":false,\"SIO1Client\":false}}}\n"; }
+
 std::string captureDirLua(const fs::path& dir) {
     // A long bracket at a level no path holds, so nothing in it needs escaping.
     return "-- SplashEdit: this console's frame capture files live in its own directory.\n"
@@ -55,7 +57,7 @@ static bool writeText(const fs::path& file, const std::string& text, std::string
     return false;
 }
 
-bool prepareConsole(const fs::path& dir, bool server, uint16_t port, std::string* error) {
+bool prepareConsole(const fs::path& dir, bool server, uint16_t port, std::string* error, bool sio1) {
     std::error_code ec;
     fs::create_directories(dir, ec);
     if (ec) {
@@ -63,7 +65,7 @@ bool prepareConsole(const fs::path& dir, bool server, uint16_t port, std::string
         return false;
     }
     for (const char* stale : {"capture.flag", "capture.gpd", "capture.err", "capture.gpd.part"}) fs::remove(dir / stale, ec);
-    return writeText(dir / "pcsx.json", linkSettings(server, port), error) &&
+    return writeText(dir / "pcsx.json", sio1 ? linkSettings(server, port) : noLinkSettings(), error) &&
            writeText(dir / "capturedir.lua", captureDirLua(dir), error);
 }
 

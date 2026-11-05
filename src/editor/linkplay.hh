@@ -22,6 +22,9 @@ std::filesystem::path consoleDir(const std::filesystem::path& playDir, int index
 // there (emulator.Debug), in its default Protobuf mode: console 1 listens on
 // `port` (SIO1Server), console 2 connects to 127.0.0.1:`port` (SIO1Client).
 std::string linkSettings(bool server, uint16_t port);
+// The pcsx.json for a relayed console whose game reaches the relay over
+// PCDRV tcp:// (redux -pcdrvnet): SIO1 neither server nor client.
+std::string noLinkSettings();
 
 // Lua for a -dofile before framecapture.lua: it points the capture at `dir`
 // (SplashEditCaptureDir) instead of the shared PCdrv directory, so each
@@ -30,7 +33,8 @@ std::string captureDirLua(const std::filesystem::path& dir);
 
 // Writes `dir`/pcsx.json and `dir`/capturedir.lua (creating `dir`) and clears
 // an earlier session's capture files. False with `error` set if it cannot.
-bool prepareConsole(const std::filesystem::path& dir, bool server, uint16_t port, std::string* error);
+// With `sio1` false the pcsx.json is noLinkSettings().
+bool prepareConsole(const std::filesystem::path& dir, bool server, uint16_t port, std::string* error, bool sio1 = true);
 
 // A TCP port nothing listens on now, picked by the system; 0 if none.
 uint16_t pickLinkPort();

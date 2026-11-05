@@ -207,6 +207,20 @@ void SioDecoder::feed(const uint8_t* data, size_t n, std::vector<uint8_t>& out) 
     m_buf.erase(m_buf.begin(), m_buf.begin() + std::ptrdiff_t(at));
 }
 
+// ---- the two wires ----
+
+const char* wireName(Wire w) { return w == Wire::Raw ? "tcp" : "sio1"; }
+
+void WireCodec::decode(const uint8_t* data, size_t n, std::vector<uint8_t>& psnl) {
+    if (m_wire == Wire::Raw) psnl.insert(psnl.end(), data, data + n);
+    else m_sio.feed(data, n, psnl);
+}
+
+void WireCodec::encode(const uint8_t* data, size_t n, std::vector<uint8_t>& out) const {
+    if (m_wire == Wire::Raw) out.insert(out.end(), data, data + n);
+    else encodeSio(data, n, out);
+}
+
 // ---- payloads ----
 
 std::optional<HelloPayload> parseHello(const std::vector<uint8_t>& b) {
@@ -339,12 +353,13 @@ std::vector<uint8_t> buildSnapshot(std::vector<std::pair<uint8_t, Avatar>> membe
 
 // ---- Hub ----
 
-int Hub::connect(double now) {
+int Hub::connect(double now, Wire wire) {
     const int id = m_nextConn++;
     Session& s = m_sessions[id];
     s.id = id;
     Connection& c = m_conns[id];
     c.index = id;
+    c.wire = wire;
     c.connectedAt = c.lastSeen = now;
     return id;
 }
@@ -744,11 +759,11 @@ static int sendFlags() { return 0; }
 struct Relay::Impl {
     mutable std::mutex mu;  // hub
     Hub hub;
-    Sock listener = kNoSock;
+    Sock listener = kNoSock, rawListener = kNoSock;
     struct Conn {
         Sock sock = kNoSock;
         int id = 0;
-        SioDecoder decoder;
+        WireCodec codec;
         std::vector<uint8_t> out;
         bool dead = false;
     };
@@ -760,17 +775,70 @@ struct Relay::Impl {
     double now() const { return std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count(); }
 };
 
+// A non-blocking listener on 127.0.0.1:`port` (0: the system picks), or
+// kNoSock with `why` set. `reuse`: a port a closed connection of the last
+// session still holds (TIME_WAIT) can be bound again, but never one another
+// server listens on: SO_REUSEADDR does that on Linux only (BSD and macOS let
+// it share a port someone holds on 0.0.0.0), SO_EXCLUSIVEADDRUSE on Windows.
+static Sock listenOn(uint16_t port, bool reuse, uint16_t* bound, std::string* why) {
+#ifdef SOCK_CLOEXEC
+    Sock s = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, IPPROTO_TCP);
+#else
+    Sock s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+#endif
+    if (s == kNoSock) {
+        *why = "cannot open a socket";
+        return kNoSock;
+    }
+    if (reuse) {
+        int one = 1;
+#if defined(_WIN32)
+        setsockopt(s, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, reinterpret_cast<const char*>(&one), sizeof one);
+#elif defined(__linux__)
+        setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+#else
+        (void)one;
+#endif
+    }
+    sockaddr_in a;
+    std::memset(&a, 0, sizeof a);
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    a.sin_port = htons(port);
+    if (bind(s, reinterpret_cast<const sockaddr*>(&a), sizeof a) != 0 || listen(s, 16) != 0) {
+#ifdef _WIN32
+        const bool inUse = WSAGetLastError() == WSAEADDRINUSE || WSAGetLastError() == WSAEACCES;
+#else
+        const bool inUse = errno == EADDRINUSE;
+#endif
+        *why = "cannot listen on 127.0.0.1" + (port ? ":" + std::to_string(port) : std::string()) +
+               (inUse ? ": another program (a psnl_server?) holds the port" : "");
+        closeSock(s);
+        return kNoSock;
+    }
+    sockaddr_in b;
+    socklen_t n = sizeof b;
+    if (getsockname(s, reinterpret_cast<sockaddr*>(&b), &n) != 0) {
+        *why = "has no port";
+        closeSock(s);
+        return kNoSock;
+    }
+    *bound = ntohs(b.sin_port);
+    nonBlocking(s);
+    return s;
+}
+
 Relay::Relay() : m(std::make_unique<Impl>()) {}
 
 Relay::~Relay() { stop(); }
 
-bool Relay::start(std::string* error) {
+bool Relay::start(std::string* error, std::optional<uint16_t> rawPort, std::string* rawError) {
     stop();
     m = std::make_unique<Impl>();
+    m_rawPort = 0;
+    if (rawError) rawError->clear();
     auto fail = [&](const std::string& what) {
         if (error) *error = what;
-        if (m->listener != kNoSock) closeSock(m->listener);
-        m->listener = kNoSock;
         return false;
     };
 #ifdef _WIN32
@@ -778,24 +846,13 @@ bool Relay::start(std::string* error) {
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return fail("Winsock did not start");
     m->wsa = true;
 #endif
-#ifdef SOCK_CLOEXEC
-    m->listener = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, IPPROTO_TCP);
-#else
-    m->listener = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-#endif
-    if (m->listener == kNoSock) return fail("cannot open a socket for the relay");
-    sockaddr_in a;
-    std::memset(&a, 0, sizeof a);
-    a.sin_family = AF_INET;
-    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    a.sin_port = 0;
-    if (bind(m->listener, reinterpret_cast<const sockaddr*>(&a), sizeof a) != 0 || listen(m->listener, 16) != 0)
-        return fail("the relay cannot listen on 127.0.0.1");
-    sockaddr_in b;
-    socklen_t n = sizeof b;
-    if (getsockname(m->listener, reinterpret_cast<sockaddr*>(&b), &n) != 0) return fail("the relay has no port");
-    m_port = ntohs(b.sin_port);
-    nonBlocking(m->listener);
+    std::string why;
+    m->listener = listenOn(0, false, &m_port, &why);
+    if (m->listener == kNoSock) return fail("the relay " + why);
+    if (rawPort) {
+        m->rawListener = listenOn(*rawPort, true, &m_rawPort, &why);
+        if (m->rawListener == kNoSock && rawError) *rawError = "the relay's raw PSNL port " + why;
+    }
     m_accepted = 0;
     m_stop = false;
     m_running = true;
@@ -814,7 +871,8 @@ void Relay::stop() {
         if (c.sock != kNoSock) closeSock(c.sock);
     m->conns.clear();
     if (m->listener != kNoSock) closeSock(m->listener);
-    m->listener = kNoSock;
+    if (m->rawListener != kNoSock) closeSock(m->rawListener);
+    m->listener = m->rawListener = kNoSock;
 #ifdef _WIN32
     if (m->wsa) WSACleanup();
     m->wsa = false;
@@ -826,10 +884,14 @@ void Relay::run() {
     std::vector<uint8_t> buf(4096), data;
     while (!m_stop) {
         fds.clear();
-        PollFd l{};
-        l.fd = m->listener;
-        l.events = POLLIN;
-        fds.push_back(l);
+        for (Sock ls : {m->listener, m->rawListener}) {
+            if (ls == kNoSock) continue;
+            PollFd l{};
+            l.fd = ls;
+            l.events = POLLIN;
+            fds.push_back(l);
+        }
+        const size_t base = fds.size();  // conn i is fds[base + i]
         for (const Impl::Conn& c : m->conns) {
             PollFd p{};
             p.fd = c.sock;
@@ -837,13 +899,16 @@ void Relay::run() {
             fds.push_back(p);
         }
         pollFds(fds.data(), fds.size(), 5);
-        // New consoles, in the order they connect.
-        for (;;) {
+        // New consoles, in the order they connect (Play waits for console k
+        // before starting k + 1, so the order across both ports is theirs).
+        for (const Wire wire : {Wire::Sio, Wire::Raw}) for (;;) {
+            const Sock ls = wire == Wire::Raw ? m->rawListener : m->listener;
+            if (ls == kNoSock) break;
             // Close-on-exec from the start: Play may be starting a console on another thread.
 #if defined(SOCK_CLOEXEC) && defined(__linux__)
-            Sock s = accept4(m->listener, nullptr, nullptr, SOCK_CLOEXEC);
+            Sock s = accept4(ls, nullptr, nullptr, SOCK_CLOEXEC);
 #else
-            Sock s = accept(m->listener, nullptr, nullptr);
+            Sock s = accept(ls, nullptr, nullptr);
 #endif
             if (s == kNoSock) break;
             nonBlocking(s);
@@ -854,9 +919,10 @@ void Relay::run() {
 #endif
             Impl::Conn c;
             c.sock = s;
+            c.codec = WireCodec(wire);
             {
                 std::lock_guard<std::mutex> lock(m->mu);
-                c.id = m->hub.connect(m->now());
+                c.id = m->hub.connect(m->now(), wire);
             }
             m->conns.push_back(std::move(c));
             ++m_accepted;
@@ -864,13 +930,13 @@ void Relay::run() {
         const double now = m->now();
         for (size_t i = 0; i < m->conns.size(); ++i) {
             Impl::Conn& c = m->conns[i];
-            const short re = i + 1 < fds.size() ? fds[i + 1].revents : short(0);
+            const short re = base + i < fds.size() ? fds[base + i].revents : short(0);
             if (!(re & (POLLIN | POLLHUP | POLLERR))) continue;
             for (;;) {
                 const auto got = recv(c.sock, reinterpret_cast<char*>(buf.data()), int(buf.size()), 0);
                 if (got > 0) {
                     data.clear();
-                    c.decoder.feed(buf.data(), size_t(got), data);
+                    c.codec.decode(buf.data(), size_t(got), data);
                     if (!data.empty()) {
                         std::lock_guard<std::mutex> lock(m->mu);
                         m->hub.receive(c.id, data.data(), data.size(), now);
@@ -894,7 +960,7 @@ void Relay::run() {
         }
         for (auto& [id, bytes] : out)
             for (Impl::Conn& c : m->conns)
-                if (c.id == id && !c.dead) encodeSio(bytes.data(), bytes.size(), c.out);
+                if (c.id == id && !c.dead) c.codec.encode(bytes.data(), bytes.size(), c.out);
         for (Impl::Conn& c : m->conns) {
             if (std::find(closed.begin(), closed.end(), c.id) != closed.end()) c.dead = true;
             while (!c.dead && !c.out.empty()) {

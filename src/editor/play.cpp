@@ -240,6 +240,38 @@ std::string engineLoaderNote(const fs::path& exe, bool disc) {
     return {};
 }
 
+bool hasPcdrvNet(const fs::path& file) {
+    static const std::string needle = "probe:net";
+    std::ifstream in(file, std::ios::binary);
+    if (!in) return false;
+    // In pieces: a redux binary is tens of megabytes. Each piece keeps the
+    // last bytes of the one before, so the name is found across a cut.
+    std::string window;
+    std::vector<char> buf(1 << 20);
+    while (in) {
+        in.read(buf.data(), std::streamsize(buf.size()));
+        const std::streamsize got = in.gcount();
+        if (got <= 0) break;
+        window.append(buf.data(), size_t(got));
+        if (window.find(needle) != std::string::npos) return true;
+        if (window.size() >= needle.size()) window.erase(0, window.size() - (needle.size() - 1));
+    }
+    return false;
+}
+
+RelayWire relayWire(const PlayTools& t) {
+    RelayWire w;
+    const fs::path engine = engineFor(t);
+    if (!hasPcdrvNet(engine)) return w;  // an engine from before the socket: SIO1, as always
+    if (!hasPcdrvNet(t.redux)) {
+        w.note = utf8(engine.filename()) + " can reach the relay over PCDRV tcp://, but " + utf8(t.redux.filename()) +
+                 " has no -pcdrvnet, so the consoles link over SIO1 instead.";
+        return w;
+    }
+    w.pcdrvNet = true;
+    return w;
+}
+
 // "The psxsplash build", naming the overlays it is asked to have.
 static std::string engineWhat(const PlayTools& t) {
     std::string s = "The psxsplash build";
@@ -498,13 +530,14 @@ splash::ExportResult reloadForPlay(const splash::Scene& scene, const fs::path& p
 }
 
 std::vector<std::string> reduxCommand(const PlayTools& t, const fs::path& dir, const fs::path& captureScript,
-                                      const fs::path& console) {
+                                      const fs::path& console, bool pcdrvNet) {
     std::vector<std::string> a = {utf8(t.redux), "-run", "-fastboot", "-no-ui", "-shmdisplay"};
     if (!t.bios.empty()) {
         a.push_back("-bios");
         a.push_back(utf8(t.bios));
     }
     a.insert(a.end(), {"-loadexe", utf8(engineFor(t)), "-pcdrv", "-pcdrvbase", utf8(dir)});
+    if (pcdrvNet) a.push_back("-pcdrvnet");
     if (!console.empty()) a.insert(a.end(), {"-portable", utf8(console)});
     if (!captureScript.empty() && !console.empty()) a.insert(a.end(), {"-dofile", utf8(console / "capturedir.lua")});
     if (!captureScript.empty()) a.insert(a.end(), {"-dofile", utf8(captureScript)});

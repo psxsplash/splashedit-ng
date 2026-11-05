@@ -1,6 +1,10 @@
 // Play's relay: a PSNL server inside the editor, so Play can run 3 to 10
-// linked consoles (each a pcsx-redux) with nothing else installed. Every
-// console is redux's SIO1 client to it. It is a port of the default relay
+// linked consoles (each a pcsx-redux) with nothing else installed. A console
+// reaches it as redux's SIO1 client (protobuf, on a port the system picks)
+// or, when its psxsplash and redux have the PCDRV socket (psxsplash#121,
+// redux -pcdrvnet), as a raw PSNL stream on psnl_server's raw port, 6699,
+// where psxsplash's Net.Connect() looks by default. Both wires feed the same
+// rooms. It is a port of the default relay
 // mode of psnl_server (the Python reference server): rooms by scene hash,
 // slots 1..10 (slot 0 is the relay itself, which is in no game), reliable
 // Events acked and fanned out, ObjectState and AppData relayed, Ping
@@ -109,6 +113,36 @@ class SioDecoder {
     std::vector<uint8_t> m_buf;
 };
 
+// ---- the two wires ----
+//
+// Sio: redux's SIO1 client, the protobuf above. Raw: the PSNL bytes
+// themselves on a TCP stream, as psxsplash writes them through PCDRV
+// tcp://host:port (redux -pcdrv -pcdrvnet) and psnl_server's raw port reads
+// them. PSNL frames delimit themselves, so the raw wire passes bytes as they
+// are and the hub's FrameParser finds the frames however TCP cuts or joins
+// them, past any garbage.
+enum class Wire : uint8_t { Sio, Raw };
+// "sio1" or "tcp".
+const char* wireName(Wire w);
+inline constexpr uint16_t kRawPort = 6699;  // psxsplash's PcdrvSocket::c_defaultServer is 127.0.0.1:6699
+
+// One connection's wire: the PSNL bytes in what it received, and PSNL bytes
+// as that wire sends them.
+class WireCodec {
+  public:
+    explicit WireCodec(Wire wire = Wire::Sio) : m_wire(wire) {}
+    Wire wire() const { return m_wire; }
+    // Appends the PSNL bytes in `n` received bytes to `psnl`.
+    void decode(const uint8_t* data, size_t n, std::vector<uint8_t>& psnl);
+    // Appends `n` PSNL bytes as this wire sends them to `out`.
+    void encode(const uint8_t* data, size_t n, std::vector<uint8_t>& out) const;
+    const SioDecoder& sio() const { return m_sio; }
+
+  private:
+    Wire m_wire;
+    SioDecoder m_sio;
+};
+
 // ---- payloads ----
 
 struct HelloPayload {  // <IHHII magic, protoVersion, reserved, sceneHash, tiebreak
@@ -175,6 +209,7 @@ struct Packet {
 // of a Play is the relay's connection k).
 struct Connection {
     int index = 0;
+    Wire wire = Wire::Sio;  // how it reached the relay
     uint8_t slot = kNoSlot;
     int room = 0;  // 0: none
     uint8_t authority = kNoSlot;  // its room's authority slot
@@ -191,8 +226,8 @@ inline constexpr size_t kPacketLog = 4096;
 
 class Hub {
   public:
-    // A new connection; its index (1, 2, ...).
-    int connect(double now);
+    // A new connection over `wire` (only recorded: the hub speaks PSNL); its index (1, 2, ...).
+    int connect(double now, Wire wire = Wire::Sio);
     // PSNL bytes connection `conn` sent.
     void receive(int conn, const uint8_t* data, size_t n, double now);
     // The connection is gone: it leaves its room.
@@ -259,8 +294,10 @@ class Hub {
 
 // ---- the server ----
 
-// Listens on 127.0.0.1 at a port the system picks and runs a Hub on its own
-// thread. Thread safe.
+// Listens on 127.0.0.1 at a port the system picks for SIO1 clients and, when
+// asked, on a raw port for PSNL streams (Wire::Raw), and runs one Hub for
+// both on its own thread. Connections are numbered in the order they are
+// accepted, whichever port. Thread safe.
 class Relay {
   public:
     Relay();
@@ -268,12 +305,17 @@ class Relay {
     Relay(const Relay&) = delete;
     Relay& operator=(const Relay&) = delete;
 
-    // False with `error` set if it cannot listen.
-    bool start(std::string* error);
+    // False with `error` set if it cannot listen. With `rawPort` (0: one the
+    // system picks) it also listens there for raw PSNL streams; when it cannot
+    // (another server holds the port) it still starts, rawPort() is 0 and
+    // `rawError` says why.
+    bool start(std::string* error, std::optional<uint16_t> rawPort = std::nullopt, std::string* rawError = nullptr);
     // Closes every connection and the listener. What it routed stays readable.
     void stop();
     bool running() const { return m_running; }
     uint16_t port() const { return m_port; }
+    // The raw PSNL port it listens on, 0 when none.
+    uint16_t rawPort() const { return m_rawPort; }
     // Connections accepted since start().
     int accepted() const { return m_accepted; }
     // Seconds since start(), the clock of Connection and Packet times.
@@ -291,7 +333,7 @@ class Relay {
     std::thread m_thread;
     std::atomic<bool> m_running{false}, m_stop{false};
     std::atomic<int> m_accepted{0};
-    uint16_t m_port = 0;
+    uint16_t m_port = 0, m_rawPort = 0;
 };
 
 // The Network view's filter: packet types shown (bit t for type t) and the
