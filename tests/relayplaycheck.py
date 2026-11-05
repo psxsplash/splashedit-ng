@@ -20,11 +20,30 @@
 # and SPLASHEDIT_PSXSPLASH (a development psxsplash with Net.*), and
 # SPLASHEDIT_BIOS if that redux has none; without them it says so and passes.
 # Not in CI: CI's checks never get a real pcsx-redux. Runs 3 pcsx-redux at once.
-# usage: python3 relayplaycheck.py <splashedit> [screenshot prefix]   (needs a display: xvfb-run -a)
+#
+# --wire tcp: the engine and redux have the PCDRV socket (psxsplash#121,
+# redux -pcdrvnet), so Play must start the consoles with -pcdrvnet and SIO1
+# off, and all three must reach the relay's raw port (6699) over PCDRV
+# tcp://. --wire sio1: an engine (or redux) without it, so they must come as
+# redux's SIO1 clients, as before. Without --wire the wire is not checked.
+# --note TEXT: Play fell back to SIO1 and must say why (a redux without
+# -pcdrvnet, or port 6699 held by another server).
+# usage: python3 relayplaycheck.py <splashedit> [screenshot prefix] [--wire tcp|sio1] [--note TEXT]   (needs a display: xvfb-run -a)
 import json, os, re, shutil, subprocess, sys, tempfile
 
-editor = os.path.abspath(sys.argv[1])
-shots = os.path.abspath(sys.argv[2]) if len(sys.argv) > 2 else None
+argv = sys.argv[1:]
+wire = note = None
+if '--wire' in argv:
+    i = argv.index('--wire')
+    wire = argv[i + 1]
+    del argv[i:i + 2]
+    assert wire in ('tcp', 'sio1'), wire
+if '--note' in argv:  # Play must say why it fell back: a 'play: relay note:' with this text
+    i = argv.index('--note')
+    note = argv[i + 1]
+    del argv[i:i + 2]
+editor = os.path.abspath(argv[0])
+shots = os.path.abspath(argv[1]) if len(argv) > 1 else None
 here = os.path.dirname(os.path.abspath(__file__))
 example = os.path.join(here, '..', 'examples', 'courtyard')
 fails = 0
@@ -92,6 +111,11 @@ ENV = dict(os.environ, TMPDIR=tmp, TMP=tmp, TEMP=tmp)
 net = (shots + '-network.png') if shots else os.path.join(work, 'network.png')
 args = [editor, '--size', '1600x960', '--project', project, '--scene', scene, '--play-settings', cfg,
         '--wait', '30', '--key', 'f5', '--wait-play', '--wait', '1500']
+if wire == 'tcp':
+    # Over PCDRV tcp:// a console reaches the relay only when its game calls
+    # Net.Connect(), after boot and scene load, not when redux starts; and
+    # console k + 1 starts only once console k has, so the three take longer.
+    args += ['--wait', '4000']
 if shots:
     args += ['--shot', shots + '-grid.png']
 # Console 2's output, filtered to the events it got; then the Network view.
@@ -178,9 +202,27 @@ check('hiding Snapshots hides them', any(l.startswith('net: shown') for l in out
 try:
     with open(os.path.join(tmp, 'splashedit-play', 'console3', 'pcsx.json')) as fh:
         d = json.load(fh)['emulator']['Debug']
-    check('console 3 is a client of the relay', d['SIO1Client'] and not d['SIO1Server'] and d['SIO1Clienthost'] == '127.0.0.1', d)
+    if wire == 'tcp':
+        check('console 3 has SIO1 off (it reaches the relay over PCDRV tcp://)', not d['SIO1Client'] and not d['SIO1Server'], d)
+    else:
+        check('console 3 is a client of the relay', d['SIO1Client'] and not d['SIO1Server'] and d['SIO1Clienthost'] == '127.0.0.1', d)
 except (OSError, KeyError, ValueError) as e:
-    check('console 3 is a client of the relay', False, e)
+    check('console 3 has its link settings', False, e)
+if wire:
+    lines_out = out.splitlines()
+    said = [l for l in play if l.startswith('play: relay wire ')]
+    want = 'play: relay wire tcp, raw port 6699' if wire == 'tcp' else 'play: relay wire sio1'
+    check('Play picks the %s wire' % wire, said == [want], said + [l for l in play if l.startswith('play: relay note')])
+    if wire == 'tcp':
+        check('consoles 2 and 3 start with -pcdrvnet beside the raw port',
+              len([l for l in play if re.match(r'play: console [23] started, relay port \d+ tcp 6699$', l)]) == 2, play)
+    notes = [l for l in play if l.startswith('play: relay note: ')]
+    if note:
+        check('Play says why: %s' % note, any(note in l for l in notes), notes)
+    else:
+        check('Play has nothing to explain', not notes, notes)
+    wires = [l for l in lines_out if l.startswith('net: wires')]
+    check('the relay took all three over %s' % wire, ('net: wires 1:%s 2:%s 3:%s' % (wire, wire, wire)) in wires, wires[-3:])
 status = [l for l in out.splitlines() if l.startswith('playstatus: ')]
 check('the status bar says 3 via the relay', any('3 linked consoles via the relay' in l for l in status), status[-3:])
 check('stopping Play stops them all', status and not status[-1].startswith('playstatus: pcsx-redux running'), status[-2:])
