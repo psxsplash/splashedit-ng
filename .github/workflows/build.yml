@@ -151,6 +151,7 @@ jobs:
           "$py" tests/playercheck.py "$cli"
           "$py" tests/discmoviecheck.py "$cli"
           "$py" tests/cddacheck.py "$cli"
+          "$py" tests/archivecheck.py "$cli"
           "$py" tests/templatecheck.py "$cli"
           "$py" tests/samplecheck.py "$cli"
           "$py" tests/bvhstatscheck.py "$cli"
