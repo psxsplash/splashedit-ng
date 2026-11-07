@@ -97,9 +97,11 @@ static int usage() {
                  "  compiled, as Play stores it (the bundled engines have no Lua compiler), so --lua-bytecode\n"
                  "  changes nothing here\n"
                  "usage: splashpack-cli disc <scene>... --engine <psxsplash.ps-exe> -o <out.bin> [--project <dir>]\n"
-                 "    [--licence <file|psxsplash|none>] [--volume <name>] [--track <audio file>]...\n"
+                 "    [--licence <file|psxsplash|none>] [--volume <name>] [--track <audio file>]... [--archive]\n"
                  "  builds a bootable disc image (.bin + .cue) of the scenes, numbered in the order given\n"
                  "  (the game starts in the first); the engine is a LOADER=cdrom build\n"
+                 "  --archive writes the scenes' files into one LZ4 archive at LBA 23 instead, for a\n"
+                 "    LOADER=archive engine (the same image runs over PCdrv as psxsplash.bin)\n"
                  "  with --project, the volume, licence and music tracks come from <dir>/disc.json; the options\n"
                  "    override it\n"
                  "  --licence writes sectors 0-15 from a licence file (12 or 16 sectors of 2336, 2352 or\n"
@@ -737,11 +739,13 @@ static int discCmd(int argc, char** argv) {
     std::vector<std::string> scenePaths;
     std::string outPath, project, engine, licence, volume;
     std::vector<std::string> tracks;
-    bool hasLicence = false, hasVolume = false;
+    bool hasLicence = false, hasVolume = false, archive = false;
     for (int i = 2; i < argc; i++) {
         std::string a = argv[i];
         if (a == "-o" && i + 1 < argc)
             outPath = argv[++i];
+        else if (a == "--archive")
+            archive = true;
         else if (a == "--licence" && i + 1 < argc) {
             licence = argv[++i];
             hasLicence = true;
@@ -788,8 +792,10 @@ static int discCmd(int argc, char** argv) {
         }
         if (hasVolume) disc.volume = volume;
         if (!tracks.empty()) disc.tracks = tracks;
-        splash::DiscResult r = splash::exportDisc(ptrs, root, engine, outPath, names.front(), names,
-                                                     splash::readVramSettings(root / "vram.json"), disc);
+        const splash::VramSettings vram = splash::readVramSettings(root / "vram.json");
+        splash::DiscResult r = archive ? splash::exportArchiveDisc(ptrs, root, engine, outPath, names.front(), names,
+                                                                   vram, disc)
+                                       : splash::exportDisc(ptrs, root, engine, outPath, names.front(), names, vram, disc);
         for (auto& m : r.exported.warnings) std::fprintf(stderr, "warning: %s\n", m.c_str());
         for (auto& m : r.exported.errors) std::fprintf(stderr, "error: %s\n", m.c_str());
         if (!r.exported.ok()) return 1;
