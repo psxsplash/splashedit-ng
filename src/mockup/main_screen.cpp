@@ -7385,6 +7385,19 @@ static void spriteSheetsSection(ImDrawList* dl, editor::Document& doc, float x0,
                         g.cells() > 255 ? color::warn : color::textFaint);
             nameRect("scene.spritegrid", ImRect(ImVec2(x0 + space::sm + lw, top - 2), ImVec2(x1 - space::sm, y)));
         }
+        {
+            const ImRect sr = row("lspritesemi", "Semi-transparent",
+                                  "On: UI.DrawTexturedTriangle with a blend (\"half\", \"add\", \"subtract\", \"addQuarter\") "
+                                  "blends this sheet's texels. The PS1 blends a texel only when its STP bit is set, so with "
+                                  "this off a blended textured triangle draws opaque. Opaque drawing (sprites, tiles, "
+                                  "unblended triangles) looks the same either way; transparent texels stay transparent.");
+            const ImRect sw(ImVec2(sr.Min.x, sr.GetCenter().y - 8), ImVec2(sr.Min.x + 30, sr.GetCenter().y + 8));
+            nameRect("scene.spritesemi", sw);
+            if (toggle("spritesemi", sw, s.semiTransparent)) {
+                const bool v = !s.semiTransparent;
+                edit([v](splash::SpriteSheet& e) { e.semiTransparent = v; });
+            }
+        }
 
         // Animations: a row each, then the selected one's fields.
         y += space::xs;

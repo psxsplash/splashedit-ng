@@ -1350,6 +1350,86 @@ void testRuntimeLuaScan() {
     CHECK(both.find("load and loadstring of Lua text fail with") != std::string::npos);
 }
 
+// UI.DrawTexturedTriangle, Sprite.Create and Sprite.SheetIndex with a literal
+// sheet name: the scan finds those calls and only those, and the warning
+// names a sheet the scene does not have, once per call and name.
+void testSpriteSheetRefScan() {
+    auto refs = [](const std::string& src) {
+        std::vector<std::string> out;
+        for (const splash::SheetNameRef& r : splash::spriteSheetRefs(src)) out.push_back(r.call + ":" + r.name + ":" + std::to_string(r.line));
+        return out;
+    };
+    using V = std::vector<std::string>;
+    CHECK(refs("UI.DrawTexturedTriangle(\"hud\", {0,0}, {8,0}, {0,8}, {0,0}, {8,0}, {0,8})\n") ==
+          V({"UI.DrawTexturedTriangle:hud:1"}));
+    CHECK(refs("-- x\nlocal s = Sprite.Create('hero')\nlocal i = Sprite.SheetIndex ( \"fx\" )\n") ==
+          V({"Sprite.Create:hero:2", "Sprite.SheetIndex:fx:3"}));
+    CHECK(refs("Sprite.Create(\"a\\\"b\")") == V({"Sprite.Create:a\"b:1"}));
+    // Not literal names: computed, a variable, an index, nothing.
+    CHECK(refs("Sprite.Create(\"he\" .. \"ro\")\nSprite.Create(name)\nSprite.Create(0)\nSprite.Create()\n").empty());
+    CHECK(refs("UI.DrawTexturedTriangle(sheets[1], p, p, p, uv, uv, uv)\n").empty());
+    // Not the calls: strings, comments, fields, other functions.
+    CHECK(refs("print('Sprite.Create(\"x\")')\n-- UI.DrawTexturedTriangle(\"x\")\n--[[ Sprite.Create(\"y\") ]]\n").empty());
+    CHECK(refs("t.Sprite.Create(\"x\")\nUI.DrawTriangle(\"x\")\nSprite.Destroy(\"x\")\nMySprite.Create(\"x\")\n").empty());
+
+    const std::vector<std::string> sheets = {"hero", "fx"};
+    CHECK(splash::spriteSheetRefWarnings("a.lua", splash::spriteSheetRefs("Sprite.Create('hero') UI.DrawTexturedTriangle('fx')"), sheets)
+              .empty());
+    const std::vector<std::string> w = splash::spriteSheetRefWarnings(
+        "scripts/hud.lua",
+        splash::spriteSheetRefs("UI.DrawTexturedTriangle('ghost')\nUI.DrawTexturedTriangle('ghost')\nSprite.Create('ghost')\n"), sheets);
+    CHECK(w.size() == 2);
+    if (w.size() == 2) {
+        CHECK(w[0] == "scripts/hud.lua line 1: UI.DrawTexturedTriangle(\"ghost\"): the scene has no sprite sheet named 'ghost'; "
+                      "the console draws a magenta triangle instead");
+        CHECK(w[1].rfind("scripts/hud.lua line 3: Sprite.Create(\"ghost\"): the scene has no sprite sheet named 'ghost'; it returns -1", 0) == 0);
+    }
+    const std::vector<std::string> none = splash::spriteSheetRefWarnings("b.lua", splash::spriteSheetRefs("Sprite.Create('x')"), {});
+    CHECK(none.size() == 1 && none[0].find("add one in the scene inspector's Sprite sheets") != std::string::npos);
+}
+
+// The warning reaches the export: a script naming a missing sheet warns, the
+// same script with the sheet in the scene does not.
+void testSpriteSheetRefExport() {
+    namespace fs = std::filesystem;
+    const fs::path src = SPLASHEDIT_SOURCE_DIR;
+    const fs::path dir = g_outDir / "sheet_ref_export";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir / "scripts", ec);
+    fs::copy_file(src / "tests" / "sprite" / "hero.png", dir / "hero.png", ec);
+    std::ofstream(dir / "scripts/hud.lua", std::ios::binary)
+        << "function onUpdate(self)\n  UI.DrawTexturedTriangle(\"hud\", {0,0}, {8,0}, {0,8}, {0,0}, {8,0}, {0,8})\n"
+           "  UI.DrawTexturedTriangle(\"hero\", {0,0}, {8,0}, {0,8}, {0,0}, {8,0}, {0,8})\nend\n";
+    splash::Scene sc;
+    splash::Object o;
+    o.name = "Hud";
+    o.script = splash::ScriptComponent{"scripts/hud.lua", {}};
+    sc.objects = {o};
+    splash::SpriteSheet hero;
+    hero.name = "hero";
+    hero.texture = "hero.png";
+    sc.spriteSheets = {hero};
+    auto count = [&](const splash::ExportResult& r, const std::string& name) {
+        size_t n = 0;
+        for (const std::string& w : r.warnings)
+            if (w.find("no sprite sheet named '" + name + "'") != std::string::npos) n++;
+        return n;
+    };
+    splash::ExportResult a = splash::exportSplashpack(sc, dir, dir / "a.splashpack");
+    for (const std::string& e : a.errors) std::fprintf(stderr, "sheet ref export: %s\n", e.c_str());
+    CHECK(a.ok());
+    CHECK(count(a, "hud") == 1 && count(a, "hero") == 0);
+    bool line = false;
+    for (const std::string& w : a.warnings) line = line || w.rfind("scripts/hud.lua line 2: UI.DrawTexturedTriangle(\"hud\")", 0) == 0;
+    CHECK(line);
+    splash::SpriteSheet hud = hero;
+    hud.name = "hud";
+    sc.spriteSheets.push_back(hud);
+    splash::ExportResult b = splash::exportSplashpack(sc, dir, dir / "b.splashpack");
+    CHECK(b.ok() && count(b, "hud") == 0);
+}
+
 // The scan reaches Problems: the live export (what the Problems popup lists)
 // warns about a script that loads Lua text, and not about one that does not.
 void testRuntimeLuaProblem() {
@@ -15302,6 +15382,146 @@ void testTileBrushColour() {
     CHECK(d.redo() && d.scene().tilemap->brushes[1].color == (std::array<float, 3>{0.5f, 0.5f, 0.5f}));
 }
 
+// A sheet's Semi-transparent option: STP (bit 15) on every drawn CLUT colour
+// (4/8 bpp) or texel (16 bpp) in the exported VRAM, transparent words left 0,
+// the colours and indices otherwise unchanged; written to the scene only when on.
+void testSpriteSheetSemiTransparent() {
+    using namespace roomtest;
+    const fs::path src = SPLASHEDIT_SOURCE_DIR;
+    const fs::path project = g_outDir / "sprites_stp";
+    fs::remove_all(project);
+    fs::create_directories(project);
+    fs::copy(src / "tests" / "sprite", project, fs::copy_options::recursive);
+    splash::Scene scene = splash::loadScene(project / "sprite.scene");
+    scene.objects.clear();  // just the sheets
+    CHECK(scene.spriteSheets.size() == 2);
+    if (scene.spriteSheets.size() != 2) return;
+
+    // JSON: off writes nothing, on round-trips.
+    {
+        splash::Scene s = scene;
+        splash::saveScene(s, project / "off.scene");
+        CHECK(readAll(project / "off.scene").find("semiTransparent") == std::string::npos);
+        s.spriteSheets[1].semiTransparent = true;
+        splash::saveScene(s, project / "on.scene");
+        const std::string on = readAll(project / "on.scene");
+        CHECK(on.find("\"semiTransparent\": true") != std::string::npos && on.find("semiTransparent") == on.rfind("semiTransparent"));
+        splash::Scene back = splash::loadScene(project / "on.scene");
+        CHECK(!back.spriteSheets[0].semiTransparent && back.spriteSheets[1].semiTransparent && back.spriteSheets == s.spriteSheets);
+    }
+
+    struct Out {
+        std::vector<uint16_t> vram;
+        std::vector<splash::ExportStats::TexturePlacement> textures;
+    };
+    auto run = [&](const splash::Scene& s, const char* name) {
+        splash::ExportResult r = splash::exportSplashpack(s, project, project / (std::string(name) + ".splashpack"));
+        for (const std::string& e : r.errors) std::fprintf(stderr, "stp export: %s\n", e.c_str());
+        CHECK(r.ok());
+        return Out{vramFromFile(project / (std::string(name) + ".vram")), r.stats.textures};
+    };
+    auto placed = [&](const Out& o, const char* file) {
+        for (const auto& t : o.textures)
+            if (fs::path(t.source).filename() == file) return t;
+        CHECK(!"sheet texture placed");
+        return splash::ExportStats::TexturePlacement{};
+    };
+    // The CLUT's words, or a 16 bpp texture's texels.
+    auto words = [&](const Out& o, const char* file) {
+        std::vector<uint16_t> w;
+        const auto t = placed(o, file);
+        if (o.vram.empty()) return w;
+        if (t.clutLength)
+            for (int k = 0; k < t.clutLength; k++) w.push_back(o.vram[size_t(t.clutY) * 1024 + size_t(t.clutX + k)]);
+        else
+            for (int y = 0; y < t.height; y++)
+                for (int x = 0; x < t.width; x++) w.push_back(o.vram[size_t(t.y + y) * 1024 + size_t(t.x + x)]);
+        return w;
+    };
+    // Paletted texels (the indices), which the option must not touch.
+    auto indices = [&](const Out& o, const char* file) {
+        std::vector<uint16_t> w;
+        const auto t = placed(o, file);
+        const int ww = t.bitDepth == 4 ? t.width / 4 : t.bitDepth == 8 ? t.width / 2 : t.width;
+        if (!o.vram.empty())
+            for (int y = 0; y < t.height; y++)
+                for (int x = 0; x < ww; x++) w.push_back(o.vram[size_t(t.y + y) * 1024 + size_t(t.x + x)]);
+        return w;
+    };
+    // `on` is `off` with STP added to every non-zero word; zeros stay zero.
+    auto stpOf = [&](const std::vector<uint16_t>& off, const std::vector<uint16_t>& on, bool wantZero) {
+        bool same = off.size() == on.size() && !off.empty(), anyClear = false, anyZero = false;
+        for (size_t i = 0; same && i < off.size(); i++) {
+            anyClear = anyClear || (off[i] != 0 && !(off[i] & 0x8000));
+            anyZero = anyZero || off[i] == 0;
+            same = off[i] == 0 ? on[i] == 0 : on[i] == (off[i] | 0x8000);
+        }
+        return same && anyClear && (!wantZero || anyZero);
+    };
+
+    splash::Scene stp = scene;
+    for (splash::SpriteSheet& s : stp.spriteSheets) s.semiTransparent = true;
+    const Out off = run(scene, "off"), on = run(stp, "on");
+    CHECK(!off.vram.empty() && !on.vram.empty());
+    // 4 bpp hero and 8 bpp fx: the CLUT; entry 0 is the cutout's transparent word.
+    for (const char* file : {"hero.png", "fx.png"}) {
+        const std::vector<uint16_t> a = words(off, file), b = words(on, file);
+        CHECK(placed(off, file).clutLength > 0);
+        CHECK(!a.empty() && a[0] == 0 && !b.empty() && b[0] == 0);
+        CHECK(stpOf(a, b, true));
+        CHECK(indices(off, file) == indices(on, file));
+    }
+    // Only the sheet with the option changes.
+    {
+        splash::Scene one = scene;
+        one.spriteSheets[0].semiTransparent = true;
+        const Out o = run(one, "one");
+        CHECK(stpOf(words(off, "hero.png"), words(o, "hero.png"), true));
+        CHECK(words(off, "fx.png") == words(o, "fx.png"));
+    }
+    // Two sheets on one image, one with the option: two textures, not one
+    // deduplicated (the packer keys on the option too).
+    {
+        splash::Scene two = scene;
+        splash::SpriteSheet copy = two.spriteSheets[0];
+        copy.name = "hero_stp";
+        copy.anims.clear();
+        copy.semiTransparent = true;
+        two.spriteSheets.push_back(copy);
+        const Out o = run(two, "two");
+        std::vector<std::vector<uint16_t>> cluts;
+        for (const auto& t : o.textures)
+            if (fs::path(t.source).filename() == "hero.png" && t.clutLength && !o.vram.empty()) {
+                std::vector<uint16_t> w;
+                for (int k = 0; k < t.clutLength; k++) w.push_back(o.vram[size_t(t.clutY) * 1024 + size_t(t.clutX + k)]);
+                cluts.push_back(w);
+            }
+        CHECK(cluts.size() == 2);
+        if (cluts.size() == 2) CHECK(stpOf(cluts[0], cluts[1], true) || stpOf(cluts[1], cluts[0], true));
+    }
+    // 16 bpp: the texels, transparent ones left 0.
+    {
+        splash::Scene d16 = scene, d16on = stp;
+        d16.spriteSheets[1].bitDepth = d16on.spriteSheets[1].bitDepth = splash::BitDepth::Bpp16;
+        const Out a = run(d16, "off16"), b = run(d16on, "on16");
+        CHECK(placed(a, "fx.png").clutLength == 0);
+        CHECK(stpOf(words(a, "fx.png"), words(b, "fx.png"), true));
+    }
+    // The texture conversion itself.
+    {
+        splash::PsxTexture t;
+        t.hasPalette = true;
+        t.palette = {0, 0x001f, 0x8000, 0x7fff, 0, 0};
+        t.imageData = {0x1234};
+        splash::setSemiTransparent(t);
+        CHECK(t.palette == std::vector<uint16_t>({0, 0x801f, 0x8000, 0xffff, 0, 0}) && t.imageData[0] == 0x1234 && t.semiTransparent);
+        splash::PsxTexture d;
+        d.imageData = {0, 0x03e0, 0x8000};
+        splash::setSemiTransparent(d);
+        CHECK(d.imageData == std::vector<uint16_t>({0, 0x83e0, 0x8000}));
+    }
+}
+
 // Direction sets: Sprite.SetFacingFromYaw(sprite, "walk_s", n, yaw) plays the
 // animation facingFromYaw(yaw, n) places after walk_s in the exported table,
 // so a set is n animations named in increasing-yaw order, one after another.
@@ -19708,6 +19928,8 @@ int main(int argc, char** argv) {
     testObjectRamBudget();
     testScriptWithoutMesh();
     testRuntimeLuaScan();
+    testSpriteSheetRefScan();
+    testSpriteSheetRefExport();
     testRuntimeLuaProblem();
     testWorldStreamPlan();
     testWorldStreamExport();
@@ -19886,6 +20108,7 @@ int main(int argc, char** argv) {
     testUvOffsetSlots();
     testSceneNetworkId();
     testSpriteSheets();
+    testSpriteSheetSemiTransparent();
     testTilemapModel();
     testTilemapExport();
     testTilemapEdits();

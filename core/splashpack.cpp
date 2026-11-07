@@ -2319,6 +2319,7 @@ static ExportResult exportSplashpackBaked(const Scene& scene, const fs::path& ro
                     continue;
                 }
                 textureStore.back().source = s.texture;
+                if (s.semiTransparent) setSemiTransparent(textureStore.back());
                 spriteTextures[i] = &textureStore.back();
             }
     }
@@ -2463,6 +2464,8 @@ static ExportResult exportSplashpackBaked(const Scene& scene, const fs::path& ro
     // The paths' library: loaded at boot like every Lua file, on no object.
     if (gen && !gen->library.empty()) addLua(gen->library);
     std::vector<std::string> luaData, luaSources;
+    std::vector<std::string> sheetNames;
+    for (const SpriteSheet& sh : scene.spriteSheets) sheetNames.push_back(sh.name);
     for (const std::string& p : luaFiles) {
         try {
             std::string src;
@@ -2482,6 +2485,8 @@ static ExportResult exportSplashpackBaked(const Scene& scene, const fs::path& ro
             // The bundled engines have no Lua compiler: text loaded at run time fails there.
             std::string runtime = runtimeLuaWarning(p, runtimeLuaUses(src));
             if (!runtime.empty()) res.warnings.push_back(std::move(runtime));
+            // A literal sheet name the scene does not have: magenta or -1 on the console.
+            for (std::string& w : spriteSheetRefWarnings(p, spriteSheetRefs(src), sheetNames)) res.warnings.push_back(std::move(w));
             luaSources.push_back(src);
             if (options.luaBytecode) {
                 std::vector<uint8_t> bc = compileLua(src, p);
