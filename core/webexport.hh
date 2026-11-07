@@ -5,7 +5,7 @@
 // The build uses threads, which need the page cross-origin isolated. A host
 // that sends Cross-Origin-Opener-Policy: same-origin and
 // Cross-Origin-Embedder-Policy: require-corp gets that directly; on one that
-// cannot (GitHub Pages, itch.io) enable-threads.js, a service worker, adds
+// cannot (GitHub Pages) enable-threads.js, a service worker, adds
 // the headers and reloads the page once. Service workers only run on https
 // or localhost: opened as a file:// or over plain http from elsewhere the
 // page does not start the emulator, and says so in place of "Loading...".
