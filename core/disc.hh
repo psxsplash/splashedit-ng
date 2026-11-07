@@ -232,6 +232,41 @@ DiscInfo writeDiscImage(const std::vector<DiscFile>& files, const std::string& v
 // its .cue. Throws as writeDiscImage.
 DiscInfo writeLicenceImage(const std::vector<LicenceSector>& licence, const std::filesystem::path& bin);
 
+// psyqo-paths' archive key for a file name: 64-bit DJB2 (h = h * 33 ^ c from
+// 5381), as psyqo's djb::hash<uint64_t>.
+uint64_t archiveHash(const std::string& name);
+
+// The archive index sits here; psxsplash's archive loader reads it by LBA.
+constexpr uint32_t kArchiveLba = 23;
+// Zero sectors after the data, as PCSX-Redux's authoring writes: a drive
+// seeking near the end of the data overshoots past it.
+constexpr uint32_t kArchiveTail = 9000;
+
+// A file in an archive disc: `name` its key as the engine asks for it
+// ("scene_0.splashpack"); `stored` keeps it uncompressed (streamed files).
+struct ArchiveFile {
+    std::string name;
+    std::vector<uint8_t> data;
+    bool stored = false;
+};
+
+// A disc for psxsplash's archive loader (LOADER=archive), laid out as
+// PCSX-Redux's authoring does: the licence (as writeDiscImage), the PVD at 16,
+// the terminator at 17, path tables at 18-21, the root directory at 22
+// (PSX.EXE and SYSTEM.CNF), then a psyqo-paths archive index ("PSX-ARC1") at
+// kArchiveLba, the entries in `files` order, SYSTEM.CNF, `exe`, and
+// kArchiveTail zero sectors; then the CD-DA `tracks` and the .cue as
+// writeDiscImage. Each entry's sector offset is its absolute LBA (the index
+// is opened by LBA). An entry is LZ4 (block, HC) compressed and padded at its
+// front to end on a sector, unless it is `stored` or that saves no sector.
+// Throws std::runtime_error when a file is 2 MiB or larger, an entry is over
+// 1023 sectors, the LZ4 decompression margin does not fit the header (4096
+// bytes or more), a name repeats, or on a write error.
+DiscInfo writeArchiveImage(const std::vector<ArchiveFile>& files, const std::vector<uint8_t>& exe,
+                           const std::string& volume, const std::filesystem::path& bin,
+                           const std::vector<LicenceSector>& licence = {},
+                           const std::vector<std::vector<int16_t>>& tracks = {});
+
 // A bootable disc: SYSTEM.CNF, the engine as PSX.EXE, and each scene's files
 // under SCENE<i>/ as SCENE_<i>.SPK, .VRM, .SPU (and .GEO when it streams),
 // where psxsplash's CD-ROM loader opens them; scene 0 is the one the game
