@@ -128,6 +128,15 @@ that scene's own export, and no `SCENE2`.
 
     python3 disccheck.py <splashpack-cli>
 
+`archivecheck.py` builds `disc --archive` of the courtyard and a streamed copy with a CD-DA track
+and a stand-in archive engine, then reads it as psxsplash's archive loader does: the root at LBA 22
+lists SYSTEM.CNF and PSX.EXE, the PSX-ARC1 index at 23 is sorted by DJB2 hash with one entry per
+file `build` exports, at absolute LBAs in load order, each LZ4 (decoded in Python) or stored
+byte-equal to the export, `.geo` stored, the header margin covering LZ4's in-place margin, and 9000
+zero sectors closing the data track. Each export must refuse the other's engine.
+
+    python3 archivecheck.py <splashpack-cli>
+
 `bvhstatscheck.py` exports the courtyard example with `--stats` and reads the
 `bvh nodes=N leaves=L depth=D refs=R` line: nodes and refs must match the splashpack header, refs the
 triangle count, leaves (N + 1) / 2 (every inner node has two children) and the depth at least
