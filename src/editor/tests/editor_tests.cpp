@@ -83,6 +83,7 @@
 #include "budget.hh"
 #include "disc.hh"
 #include "player.hh"
+#include "webexport.hh"
 #include "licencesim.hh"
 #include "licencetmd.hh"
 #include "font.hh"
@@ -1745,10 +1746,12 @@ void testPlay() {
     t.psxsplash = "/x/psxsplash.ps-exe";
     t.disc = "/x/psxsplash-cdrom.ps-exe";
     t.port = "tcp:localhost:6699";
+    t.reduxWeb = fs::path(u8"/opt/rédux/web");
     CHECK(editor::savePlayTools(cfg, t));
     { std::ofstream(cfg, std::ios::app) << "colour=blue\nnot a pair\n"; }
     editor::PlayTools l = editor::loadPlayTools(cfg);
-    CHECK(l.redux == t.redux && l.psxsplash == t.psxsplash && l.bios.empty() && l.disc == t.disc && l.port == t.port);
+    CHECK(l.redux == t.redux && l.psxsplash == t.psxsplash && l.bios.empty() && l.disc == t.disc && l.port == t.port &&
+          l.reduxWeb == t.reduxWeb);
     editor::PlayTools noPort = l;
     noPort.port.clear();
     CHECK(editor::missingHardwareTools(noPort).size() == 2);  // the build is not on disk either
@@ -19668,6 +19671,87 @@ void testStandalonePlayer() {
     CHECK(nodisc.error.find("disc image not found") != std::string::npos && !fs::exists(dir / "out-nodisc"));
 }
 
+// splash::writeWeb with a stand-in pcsx-redux web build: what is copied, the
+// page, a missing file, the folders it refuses and a previous export written over.
+void testWebExport() {
+    namespace fs = std::filesystem;
+    const fs::path dir = g_outDir / "web";
+    fs::remove_all(dir);
+    auto write = [](const fs::path& p, const std::string& text) {
+        fs::create_directories(p.parent_path());
+        std::ofstream(p, std::ios::binary) << text;
+    };
+    auto read = [](const fs::path& p) {
+        std::ifstream in(p, std::ios::binary);
+        return std::string((std::istreambuf_iterator<char>(in)), {});
+    };
+    const fs::path redux = dir / "redux-web", bin = dir / "disc" / "My Game.bin";
+    for (const char* f : splash::kReduxWebFiles) write(redux / f, std::string("web ") + f);
+    write(bin, "raw sectors");
+    write(dir / "disc" / "My Game.cue", "FILE \"My Game.bin\" BINARY\n");
+
+    // Happy path: the build's files, the game, the page and the marker.
+    {
+        const fs::path out = dir / "out";
+        CHECK(splash::writeWeb(bin, redux, out, "Tom & \"Jerry's\" <Game>").empty());
+        bool copied = true;
+        for (const char* f : splash::kReduxWebFiles) copied = copied && read(out / f) == std::string("web ") + f;
+        CHECK(copied);
+        CHECK(read(out / "game" / "My Game.bin") == "raw sectors" &&
+              read(out / "game" / "My Game.cue") == "FILE \"My Game.bin\" BINARY\n");
+        const std::string page = read(out / "index.html");
+        CHECK(page.find("<title>Tom &amp; &quot;Jerry&#39;s&quot; &lt;Game&gt;</title>") != std::string::npos);
+        CHECK(page.find("var cue = \"My Game.cue\";") != std::string::npos);
+        CHECK(page.find("'-kiosk', '-run', '-iso', '/disc/' + cue") != std::string::npos);
+        CHECK(page.find("<script src=\"enable-threads.js\"></script>") < page.find("pcsx-redux.js"));
+        CHECK(read(out / splash::kWebMarker).find("index.html\n") != std::string::npos);
+    }
+    // File names go into the page as JavaScript strings that cannot end the script.
+    {
+        const std::string page = splash::webPage("t", "a\"\\</script>.cue");
+        CHECK(page.find("var cue = \"a\\u0022\\u005c\\u003c/script\\u003e.cue\";") != std::string::npos);
+        CHECK(page.find("</script>.cue") == std::string::npos);
+    }
+    // A web build missing a file: named, nothing written.
+    {
+        const fs::path partial = dir / "partial";
+        for (const char* f : splash::kReduxWebFiles)
+            if (std::string(f) != "pcsx-redux.data") write(partial / f, "x");
+        const std::string e = splash::writeWeb(bin, partial, dir / "out-partial", "My Game");
+        CHECK(e.find("pcsx-redux.data") != std::string::npos && !fs::exists(dir / "out-partial"));
+        const std::string nodisc = splash::writeWeb(dir / "disc" / "gone.bin", redux, dir / "out-nodisc", "My Game");
+        CHECK(nodisc.find("disc image not found") != std::string::npos && !fs::exists(dir / "out-nodisc"));
+    }
+    // webDirError: missing, empty or a web export pass; a file, a folder of
+    // other things or a standalone player do not.
+    {
+        fs::create_directories(dir / "empty");
+        write(dir / "afile", "x");
+        write(dir / "busy" / "notes.txt", "x");
+        write(dir / "player" / splash::kPlayerMarker, "game\n");
+        CHECK(splash::webDirError(dir / "missing").empty() && splash::webDirError(dir / "empty").empty());
+        CHECK(splash::webDirError(dir / "out").empty());
+        CHECK(splash::webDirError(dir / "afile").find("not a folder") != std::string::npos);
+        CHECK(splash::webDirError(dir / "busy").find("holds no web export") != std::string::npos);
+        CHECK(!splash::webDirError(dir / "player").empty());
+        CHECK(splash::writeWeb(bin, redux, dir / "busy", "My Game").find("holds no web export") != std::string::npos &&
+              !fs::exists(dir / "busy" / "index.html"));
+    }
+    // Over a previous export: what it wrote goes, anything else stays.
+    {
+        const fs::path out = dir / "out";
+        write(out / "keep.txt", "mine");
+        const fs::path other = dir / "disc2" / "Other.bin";
+        write(other, "other sectors");
+        write(dir / "disc2" / "Other.cue", "FILE \"Other.bin\" BINARY\n");
+        CHECK(splash::writeWeb(other, redux, out, "Second").empty());
+        CHECK(!fs::exists(out / "game" / "My Game.bin") && read(out / "game" / "Other.bin") == "other sectors");
+        CHECK(read(out / "keep.txt") == "mine");
+        const std::string page = read(out / "index.html");
+        CHECK(page.find("<title>Second</title>") != std::string::npos && page.find("var cue = \"Other.cue\";") != std::string::npos);
+    }
+}
+
 #ifdef _WIN32
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -19895,6 +19979,7 @@ int main(int argc, char** argv) {
     testAudioFormats();
     testDiscMusic();
     testStandalonePlayer();
+    testWebExport();
 #ifdef _WIN32
     testPlayerExeIcon();
 #endif

@@ -69,9 +69,13 @@ std::string seededReduxConfig();
 // The file marking a folder as a player export; it lists what the export wrote.
 inline constexpr const char* kPlayerMarker = ".splashedit-player";
 
-// "" when `out` can take a player: missing, empty, or a player export
-// (kPlayerMarker); else why not.
+// "" when `out` can take an export marked by `marker`: missing, empty, or
+// holding `marker`; else why not, `what` naming the export.
+std::string exportDirError(const std::filesystem::path& out, const char* marker, const std::string& what);
+// "" when `out` can take a player: exportDirError with kPlayerMarker.
 std::string playerDirError(const std::filesystem::path& out);
+// Removes from `out` what its `marker` file lists (names only, no paths).
+void removeExported(const std::filesystem::path& out, const char* marker);
 
 // Writes the player into `out`:
 //   game/<bin and cue>    `bin` and the .cue beside it, under their names;
