@@ -249,6 +249,15 @@ DiscResult exportDisc(const std::vector<const Scene*>& scenes, const std::filesy
                       const std::filesystem::path& engine, const std::filesystem::path& bin, const std::string& title,
                       const std::vector<std::string>& names = {}, const VramSettings& vram = {},
                       const DiscSettings& disc = {});
+// The same disc for psxsplash's archive loader (writeArchiveImage): `engine`
+// must be a LOADER=archive build, and each scene's files go into the archive
+// under their PCdrv names (scene_<i>.loading, .vram, .spu, .splashpack, .geo,
+// the order the engine loads them), .geo stored so it can stream. Settings,
+// music, errors and warnings as exportDisc.
+DiscResult exportArchiveDisc(const std::vector<const Scene*>& scenes, const std::filesystem::path& projectRoot,
+                             const std::filesystem::path& engine, const std::filesystem::path& bin,
+                             const std::string& title, const std::vector<std::string>& names = {},
+                             const VramSettings& vram = {}, const DiscSettings& disc = {});
 // The same for one scene, as scene 0.
 DiscResult exportDisc(const Scene& scene, const std::filesystem::path& projectRoot, const std::filesystem::path& engine,
                       const std::filesystem::path& bin, const std::string& title, const VramSettings& vram = {},
@@ -259,8 +268,9 @@ DiscResult exportDisc(const Scene& scene, const std::filesystem::path& projectRo
 // nothing when the build has one scene.
 std::string sceneTag(size_t index, size_t count, const std::string& name);
 
-// What the engine file is: a CD-ROM build, a PCdrv build, or not a PS-X EXE.
-enum class EngineKind { NotExe, Cdrom, Pcdrv };
+// What the engine file is: a CD-ROM build, a PCdrv build, an archive build
+// (it prints "FileLoader: archive of"), or not a PS-X EXE.
+enum class EngineKind { NotExe, Cdrom, Pcdrv, Archive };
 EngineKind engineKind(const std::vector<uint8_t>& exe);
 
 }  // namespace splash

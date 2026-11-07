@@ -941,6 +941,8 @@ EngineKind engineKind(const std::vector<uint8_t>& exe) {
         size_t n = std::strlen(s);
         return std::search(exe.begin(), exe.end(), s, s + n) != exe.end();
     };
+    // The archive loader keys its files by the PCdrv names, so it goes first.
+    if (has("FileLoader: archive of")) return EngineKind::Archive;
     // Each loader names its files differently (psxsplash src/fileloader.cpp).
     if (has("scene_%d.splashpack")) return EngineKind::Pcdrv;
     return EngineKind::Cdrom;
@@ -953,9 +955,13 @@ std::string sceneTag(size_t index, size_t count, const std::string& name) {
     return tag + ": ";
 }
 
-DiscResult exportDisc(const std::vector<const Scene*>& scenes, const fs::path& projectRoot, const fs::path& engine,
-                      const fs::path& bin, const std::string& title, const std::vector<std::string>& names,
-                      const VramSettings& vram, const DiscSettings& disc) {
+namespace {
+
+// exportDisc and exportArchiveDisc: the same scenes, settings and checks,
+// written as an ISO tree or as an archive.
+DiscResult buildDisc(const std::vector<const Scene*>& scenes, const fs::path& projectRoot, const fs::path& engine,
+                     const fs::path& bin, const std::string& title, const std::vector<std::string>& names,
+                     const VramSettings& vram, const DiscSettings& disc, bool archive) {
     DiscResult r;
     if (scenes.empty()) {
         r.exported.errors.push_back("No scene to put on the disc.");
@@ -973,10 +979,24 @@ DiscResult exportDisc(const std::vector<const Scene*>& scenes, const fs::path& p
             r.exported.errors.push_back(utf8(engine) + " is not a PS-X EXE.");
             return r;
         case EngineKind::Pcdrv:
-            r.exported.errors.push_back(utf8(engine.filename()) +
-                                        " is the PCdrv build of psxsplash; a disc needs the CD-ROM build (LOADER=cdrom)");
+            r.exported.errors.push_back(utf8(engine.filename()) + " is the PCdrv build of psxsplash; a disc needs the " +
+                                        (archive ? "archive build (LOADER=archive)" : "CD-ROM build (LOADER=cdrom)"));
             return r;
         case EngineKind::Cdrom:
+            if (archive) {
+                r.exported.errors.push_back(utf8(engine.filename()) +
+                                            " is the CD-ROM build of psxsplash; an archive disc needs the archive "
+                                            "build (LOADER=archive)");
+                return r;
+            }
+            break;
+        case EngineKind::Archive:
+            if (!archive) {
+                r.exported.errors.push_back(utf8(engine.filename()) +
+                                            " is the archive build of psxsplash (LOADER=archive); write it an archive "
+                                            "disc, or use the CD-ROM build (LOADER=cdrom)");
+                return r;
+            }
             break;
     }
     std::string licenceError;
@@ -1019,8 +1039,11 @@ DiscResult exportDisc(const std::vector<const Scene*>& scenes, const fs::path& p
         opt.vram = vram;
         const char* cnf = kSystemCnf;
         std::vector<DiscFile> files;
-        files.push_back({"SYSTEM.CNF", std::vector<uint8_t>(cnf, cnf + std::strlen(cnf))});
-        files.push_back({"PSX.EXE", std::move(exe)});
+        std::vector<ArchiveFile> entries;
+        if (!archive) {
+            files.push_back({"SYSTEM.CNF", std::vector<uint8_t>(cnf, cnf + std::strlen(cnf))});
+            files.push_back({"PSX.EXE", exe});
+        }
         // Prefab instances filled in from their files as they are now; scene
         // 0's render buffers the build's largest (exportBuild).
         auto spkOf = [&](size_t i) { return tmp / ("scene_" + std::to_string(i) + ".splashpack"); };
@@ -1033,6 +1056,17 @@ DiscResult exportDisc(const std::vector<const Scene*>& scenes, const fs::path& p
             for (const std::string& m : one.warnings) r.exported.warnings.push_back(tag + m);
             if (i == 0) r.exported.stats = std::move(one.stats);
             if (!one.errors.empty()) continue;
+            if (archive) {
+                // Under the names the engine asks for, in the order it loads them.
+                for (const char* kind : {".loading", ".vram", ".spu", ".splashpack", ".geo"}) {
+                    fs::path part = spk;
+                    part.replace_extension(kind);
+                    if (!fs::exists(part)) continue;
+                    // StreamReader reads streamed geometry's sectors as they are.
+                    entries.push_back({utf8(part.filename()), readFile(part), std::strcmp(kind, ".geo") == 0});
+                }
+                continue;
+            }
             const std::string dir = "SCENE" + std::to_string(i) + "/SCENE_" + std::to_string(i);
             fs::path part = spk;
             files.push_back({dir + ".SPK", readFile(spk)});
@@ -1045,7 +1079,8 @@ DiscResult exportDisc(const std::vector<const Scene*>& scenes, const fs::path& p
         }
         if (r.exported.errors.empty()) {
             // The length check needs the layout; write, then drop an over-long image.
-            r.disc = writeDiscImage(files, discVolume(disc.volume, title), bin, licence, music);
+            r.disc = archive ? writeArchiveImage(entries, exe, discVolume(disc.volume, title), bin, licence, music)
+                             : writeDiscImage(files, discVolume(disc.volume, title), bin, licence, music);
             const double minutes = double(r.disc.sectors) / (60.0 * kSectorsPerSecond);
             char len[32];
             std::snprintf(len, sizeof len, "%.1f", minutes);
@@ -1067,6 +1102,21 @@ DiscResult exportDisc(const std::vector<const Scene*>& scenes, const fs::path& p
     }
     fs::remove_all(tmp, ec);
     return r;
+}
+
+}  // namespace
+
+DiscResult exportDisc(const std::vector<const Scene*>& scenes, const fs::path& projectRoot, const fs::path& engine,
+                      const fs::path& bin, const std::string& title, const std::vector<std::string>& names,
+                      const VramSettings& vram, const DiscSettings& disc) {
+    return buildDisc(scenes, projectRoot, engine, bin, title, names, vram, disc, false);
+}
+
+DiscResult exportArchiveDisc(const std::vector<const Scene*>& scenes, const fs::path& projectRoot,
+                             const fs::path& engine, const fs::path& bin, const std::string& title,
+                             const std::vector<std::string>& names, const VramSettings& vram,
+                             const DiscSettings& disc) {
+    return buildDisc(scenes, projectRoot, engine, bin, title, names, vram, disc, true);
 }
 
 DiscResult exportDisc(const Scene& scene, const fs::path& projectRoot, const fs::path& engine, const fs::path& bin,
