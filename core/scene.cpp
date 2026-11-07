@@ -662,6 +662,9 @@ json writeSettings(const SceneSettings& st) {
 const std::initializer_list<std::pair<const char*, UIElementType>> kUITypes = {
     {"image", UIElementType::Image}, {"box", UIElementType::Box},  {"text", UIElementType::Text},
     {"progress", UIElementType::Progress}, {"line", UIElementType::Line}};
+const std::initializer_list<std::pair<const char*, UIBlend>> kUIBlends = {
+    {"opaque", UIBlend::Opaque}, {"half", UIBlend::Half}, {"add", UIBlend::Add},
+    {"subtract", UIBlend::Subtract}, {"addQuarter", UIBlend::AddQuarter}};
 
 json rgb(const std::array<float, 3>& c) { return json::array({c[0], c[1], c[2]}); }
 void readRgb(const json& j, const char* key, std::array<float, 3>& c) {
@@ -848,6 +851,8 @@ json writeElement(const UIElement& e) {
         j["anchorMax"] = json::array({e.anchorMax[0], e.anchorMax[1]});
     }
     j["color"] = rgb(e.color);
+    // Written only when not opaque, so scenes without blending keep their bytes.
+    if (e.blend != UIBlend::Opaque) j["blend"] = enumTo(e.blend, kUIBlends);
     switch (e.type) {
     case UIElementType::Text:
         j["text"] = e.text;
@@ -894,6 +899,7 @@ UIElement readElement(const json& j, const std::string& canvas) {
         if (e.anchorMin[i] < 0 || e.anchorMax[i] > 1 || e.anchorMin[i] > e.anchorMax[i])
             fail("canvas '" + canvas + "', element '" + e.name + "': anchors must satisfy 0 <= min <= max <= 1");
     readRgb(j, "color", e.color);
+    if (j.contains("blend")) e.blend = enumFrom(j["blend"], kUIBlends);
     e.text = j.value("text", "");
     if (j.contains("font") && !j["font"].is_null()) e.font = j["font"].get<std::string>();
     if (j.contains("textKey") && j["textKey"].is_string()) e.textKey = j["textKey"].get<std::string>();
@@ -912,7 +918,10 @@ UIElement readElement(const json& j, const std::string& canvas) {
         e.cell = j.value("cell", 0);
         if (e.cell < 0 || e.cell > 255) fail("canvas '" + canvas + "', element '" + e.name + "': cell must be 0..255");
     }
-    e.extra = extrasOf(j, writeElement(e));
+    json written = writeElement(e);
+    // "blend" is the element's own even when it says "opaque" (not written back).
+    written["blend"] = nullptr;
+    e.extra = extrasOf(j, written);
     return e;
 }
 
