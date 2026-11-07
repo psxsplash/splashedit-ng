@@ -73,6 +73,10 @@ else()
     target_compile_options(stbvorbis PRIVATE -w)
 endif()
 
+# LZ4's block compressor, for archive discs (disc.cpp): the library alone.
+add_library(lz4 STATIC ${lz4_SOURCE_DIR}/lib/lz4.c ${lz4_SOURCE_DIR}/lib/lz4hc.c)
+target_include_directories(lz4 PUBLIC ${lz4_SOURCE_DIR}/lib)
+
 add_library(splashcore STATIC
     audio.cpp
     blend.cpp
@@ -107,7 +111,7 @@ target_include_directories(splashcore PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_include_directories(splashcore SYSTEM PRIVATE ${stb_SOURCE_DIR} ${dr_libs_SOURCE_DIR} ${cgltf_SOURCE_DIR} ${ufbx_SOURCE_DIR})
 # .blend import runs Blender from a worker thread (blend.cpp).
 find_package(Threads REQUIRED)
-target_link_libraries(splashcore PUBLIC nlohmann_json::nlohmann_json Threads::Threads PRIVATE recast psxlua psxav stbvorbis meshoptimizer)
+target_link_libraries(splashcore PUBLIC nlohmann_json::nlohmann_json Threads::Threads PRIVATE recast psxlua psxav stbvorbis meshoptimizer lz4)
 # The writer reproduces SplashEdit 2.4's float results bit for bit: no FMA
 # contraction, no fast-math.
 if(MSVC)
