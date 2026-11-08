@@ -94,6 +94,26 @@ std::filesystem::path discEngineFor(const std::filesystem::path& disc, bool boot
 // says nothing.
 std::string engineLoaderNote(const std::filesystem::path& exe, bool disc);
 
+// Whether `file` holds "probe:net", the name psxsplash's Net.Connect() opens
+// over PCDRV to ask for host networking (psxsplash#121). A psxsplash build
+// that has it can reach a server over PCDRV tcp://; a pcsx-redux that has it
+// answers it (its -pcdrvnet). False for a file it cannot read. Measured: a
+// redux without -pcdrvnet takes the flag without a word and boots as without
+// it, so the console would wait on SIO1 with no client set; this is how Play
+// tells one from the other before it asks for the flag.
+bool hasPcdrvNet(const std::filesystem::path& file);
+
+// How Play's relayed consoles reach the relay. `pcdrvNet`: through PCDRV
+// tcp:// to the relay's raw port 6699 (psxsplash's Net.Connect() default),
+// started with -pcdrvnet and no SIO1 client; else as redux's SIO1 client.
+// `note` says why not when the engine has the socket but redux does not.
+struct RelayWire {
+    bool pcdrvNet = false;
+    std::string note;
+};
+// For `effective` (withDefaults' result): the build engineFor boots and its redux.
+RelayWire relayWire(const PlayTools& effective);
+
 // One line per thing Play still needs; empty when it can run.
 std::vector<std::string> missingTools(const PlayTools& tools);
 
@@ -201,9 +221,11 @@ RenderLost maxRenderLost(const RenderLost& a, const RenderLost& b);
 // `console` directory (one of 2 linked consoles, editor::consoleDir) redux
 // reads its settings there (-portable) and, with a captureScript, runs
 // console/capturedir.lua first, so the capture files live in `console`.
+// `pcdrvNet` adds -pcdrvnet after the PCdrv flags: a relayed console whose
+// game reaches the relay over PCDRV tcp:// (relayWire).
 std::vector<std::string> reduxCommand(const PlayTools& tools, const std::filesystem::path& dir,
                                       const std::filesystem::path& captureScript = {},
-                                      const std::filesystem::path& console = {});
+                                      const std::filesystem::path& console = {}, bool pcdrvNet = false);
 
 // The Disc section's Preview boot screen: the real BIOS (`tools.bios`) booting
 // `cue`, a disc of the licence alone (splash::writeLicenceImage), in

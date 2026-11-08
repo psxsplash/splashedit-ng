@@ -172,6 +172,9 @@ struct State {
         // asked. Two consoles without the relay link directly on linkPort.
         int players = 1;
         bool relayed = false;
+        // Relayed over PCDRV tcp:// (editor::relayWire): every console runs
+        // with -pcdrvnet and reaches the relay's raw port instead of SIO1.
+        bool pcdrvNet = false;
         int focus = 0;
         uint16_t linkPort = 0;
         int starting = 0;

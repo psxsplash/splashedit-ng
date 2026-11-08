@@ -2558,6 +2558,135 @@ void testRelayWorldObjects() {
     CHECK(sent[b].size() == 1 && sent[b][0].payload[1] == 0);
 }
 
+// Bytes a hub sent `conn`, through that connection's wire: what the console gets.
+std::vector<uint8_t> wireOut(rl::Hub& h, int conn, const rl::WireCodec& codec) {
+    std::vector<uint8_t> out;
+    for (auto& [c, bytes] : h.takeOutput())
+        if (c == conn) codec.encode(bytes.data(), bytes.size(), out);
+    return out;
+}
+
+// What a console on the hub sends, through its wire, in pieces of `chunk` bytes.
+void wireIn(rl::Hub& h, int conn, rl::WireCodec& codec, const std::vector<uint8_t>& bytes, size_t chunk, double now) {
+    for (size_t at = 0; at < bytes.size(); at += chunk) {
+        std::vector<uint8_t> psnl;
+        codec.decode(bytes.data() + at, std::min(chunk, bytes.size() - at), psnl);
+        if (!psnl.empty()) h.receive(conn, psnl.data(), psnl.size(), now);
+    }
+}
+
+// The raw wire (PCDRV tcp://, psxsplash#121): PSNL frames as they are, which
+// TCP cuts and joins anywhere; garbage before and between is skipped. The
+// relay's answers go back as plain frames, no protobuf.
+void testRelayRawStream() {
+    CHECK(std::string(rl::wireName(rl::Wire::Raw)) == "tcp" && std::string(rl::wireName(rl::Wire::Sio)) == "sio1");
+    // Garbage with a false sync whose length is impossible (a plausible one
+    // waits for that many bytes before its CRC can fail, as in psxsplash).
+    std::vector<uint8_t> stream = {0x00, 0xA5, 0x07, 0x13, 0xEE, 0xEE, 0xEE, 0xEE, 0xFF, 0xFF};
+    const std::vector<uint8_t> hello = helloFrame(0xC0FFEE);
+    stream.insert(stream.end(), hello.begin(), hello.end());
+    stream.insert(stream.end(), {0x11, 0xA5, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF});  // more, between frames
+    const std::vector<uint8_t> ping = rl::encodeFrame(rl::Ping, {1, 2, 3, 4, 0, 0, 0, 0, 0, 0, 0, 0}, 1, 9);
+    stream.insert(stream.end(), ping.begin(), ping.end());
+    for (size_t chunk : {size_t(1), size_t(2), size_t(5), size_t(7), stream.size()}) {  // split, and all joined
+        rl::Hub h;
+        rl::WireCodec raw(rl::Wire::Raw);
+        const int c = h.connect(0, rl::Wire::Raw);
+        CHECK(h.connections().at(c).wire == rl::Wire::Raw);
+        wireIn(h, c, raw, stream, chunk, 0.5);
+        const std::vector<uint8_t> out = wireOut(h, c, raw);
+        rl::FrameParser p;  // the console reads frames straight off the stream
+        std::vector<rl::Frame> frames;
+        p.feed(out.data(), out.size(), frames);
+        const std::vector<rl::HelloAckPayload> acks = acksIn(frames);
+        CHECK(acks.size() == 1 && acks[0].yourSlot == 1 && acks[0].sceneHash == 0xC0FFEE);
+        CHECK(std::any_of(frames.begin(), frames.end(), [](const rl::Frame& f) {
+            return f.type == rl::Pong && f.payload.size() == 12 && f.payload[0] == 1 && f.payload[3] == 4;
+        }));
+        CHECK(p.crcErrors == 0 && p.resyncs == 0 && !out.empty() && out[0] == rl::kSync);
+        CHECK(h.connections().at(c).framesIn == 2 && h.connections().at(c).joined);
+    }
+    // The same bytes taken as redux's protobuf come to nothing: the wire matters.
+    rl::Hub h;
+    rl::WireCodec sio(rl::Wire::Sio);
+    const int c = h.connect(0);
+    wireIn(h, c, sio, stream, stream.size(), 0.5);
+    CHECK(h.connections().at(c).framesIn == 0 && !h.connections().at(c).joined);
+}
+
+// One room, two wires: a console on redux's SIO1 client and one on PCDRV
+// tcp:// join the same scene, see each other in their HelloAcks and get each
+// other's Events, each in its own wire's bytes.
+void testRelayMixedRoom() {
+    rl::Hub h;
+    rl::WireCodec sio(rl::Wire::Sio), raw(rl::Wire::Raw);
+    const int cs = h.connect(0, rl::Wire::Sio), cr = h.connect(0, rl::Wire::Raw);
+    std::vector<uint8_t> sioHello;
+    const std::vector<uint8_t> hello = helloFrame(0xAB);
+    for (uint8_t b : hello) rl::encodeSio(&b, 1, sioHello);  // as redux: a byte a message
+    wireIn(h, cs, sio, sioHello, 3, 0.1);
+    wireIn(h, cr, raw, helloFrame(0xAB), 4, 0.2);
+    // What each console reads, through its own wire.
+    auto readSio = [&](const std::vector<uint8_t>& bytes) {
+        rl::SioDecoder d;
+        std::vector<uint8_t> psnl;
+        d.feed(bytes.data(), bytes.size(), psnl);
+        CHECK(d.decodeErrors == 0 && (bytes.empty() || d.messages > 0));
+        rl::FrameParser p;
+        std::vector<rl::Frame> f;
+        p.feed(psnl.data(), psnl.size(), f);
+        return f;
+    };
+    auto readRaw = [&](const std::vector<uint8_t>& bytes) {
+        rl::FrameParser p;
+        std::vector<rl::Frame> f;
+        p.feed(bytes.data(), bytes.size(), f);
+        // Frames and nothing else: no protobuf around them.
+        size_t framed = 0;
+        for (const rl::Frame& one : f) framed += 1 + rl::kHeaderSize + one.payload.size() + 2;
+        CHECK(p.crcErrors == 0 && p.resyncs == 0 && framed == bytes.size());
+        return f;
+    };
+    auto out = h.takeOutput();
+    std::vector<uint8_t> toSio, toRaw;
+    for (auto& [c, bytes] : out) (c == cs ? sio : raw).encode(bytes.data(), bytes.size(), c == cs ? toSio : toRaw);
+    const std::vector<rl::HelloAckPayload> sa = acksIn(readSio(toSio)), ra = acksIn(readRaw(toRaw));
+    // The SIO1 console: its own ack, then told of the raw one (2 players); the raw one joins as 2 of 2.
+    CHECK(sa.size() == 2 && sa[0].yourSlot == 1 && sa[1].playerCount == 2 && sa[1].hostSlot == 1);
+    CHECK(ra.size() == 1 && ra[0].yourSlot == 2 && ra[0].playerCount == 2 && ra[0].hostSlot == 1);
+    CHECK(h.visiblePlayers(cs) == 2 && h.visiblePlayers(cr) == 2);
+    // An Event from the raw console reaches the SIO1 one, and back.
+    const std::vector<uint8_t> ev = {7, 0, 0, 0, 0xE9, 3, 0, 0};
+    wireIn(h, cr, raw, rl::encodeFrame(rl::Event, ev, 2, 5), 3, 1.0);
+    out = h.takeOutput();
+    toSio.clear();
+    toRaw.clear();
+    for (auto& [c, bytes] : out) (c == cs ? sio : raw).encode(bytes.data(), bytes.size(), c == cs ? toSio : toRaw);
+    std::vector<rl::Frame> fs = readSio(toSio), fr = readRaw(toRaw);
+    CHECK(fs.size() == 1 && fs[0].type == rl::Event && fs[0].payload == ev);
+    CHECK(fr.size() == 1 && fr[0].type == rl::EventAck && fr[0].seq == 5);
+    std::vector<uint8_t> sioEv;
+    const std::vector<uint8_t> ev2 = rl::encodeFrame(rl::Event, {8, 0, 0, 0, 1, 0, 0, 0}, 1, 3);
+    rl::encodeSio(ev2.data(), ev2.size(), sioEv);
+    wireIn(h, cs, sio, sioEv, sioEv.size(), 1.1);
+    out = h.takeOutput();
+    toRaw.clear();
+    for (auto& [c, bytes] : out)
+        if (c == cr) raw.encode(bytes.data(), bytes.size(), toRaw);
+    fr = readRaw(toRaw);
+    CHECK(fr.size() == 1 && fr[0].type == rl::Event && fr[0].payload[0] == 8);
+    // The snapshot: both avatars to both, each on its own wire.
+    h.tick(2.0);
+    out = h.takeOutput();
+    toSio.clear();
+    toRaw.clear();
+    for (auto& [c, bytes] : out) (c == cs ? sio : raw).encode(bytes.data(), bytes.size(), c == cs ? toSio : toRaw);
+    fs = readSio(toSio);
+    fr = readRaw(toRaw);
+    CHECK(fs.size() == 1 && fs[0].type == rl::Snapshot && fr.size() == 1 && fr[0].type == rl::Snapshot && fs[0].payload == fr[0].payload &&
+          !fs[0].payload.empty() && fs[0].payload[0] == 2);  // 2 avatars
+}
+
 // The server on a socket: three clients speaking redux's wire get slots 1, 2
 // and 3 in the order they connected.
 void testRelaySocket() {
@@ -2609,7 +2738,120 @@ void testRelaySocket() {
     for (int s : socks) close(s);
     relay.stop();
     CHECK(!relay.running() && relay.packets().size() >= 6);  // kept for the Network view
+    CHECK(relay.rawPort() == 0);  // not asked for
+
+    // The raw port too: a SIO1 client and a raw PSNL stream share one room.
+    // One another server holds is reported, and the relay runs without it.
+    std::string rawErr;
+    CHECK(relay.start(&err, uint16_t(0), &rawErr) && relay.rawPort() != 0 && relay.rawPort() != relay.port() && rawErr.empty());
+    auto dial = [](uint16_t port) {
+        const int s = socket(AF_INET, SOCK_STREAM, 0);
+        sockaddr_in a{};
+        a.sin_family = AF_INET;
+        a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        a.sin_port = htons(port);
+        CHECK(connect(s, reinterpret_cast<sockaddr*>(&a), sizeof a) == 0);
+        return s;
+    };
+    const int ss = dial(relay.port());
+    std::vector<uint8_t> wire;
+    for (uint8_t b : helloFrame(0xBEEF)) rl::encodeSio(&b, 1, wire);
+    CHECK(send(ss, wire.data(), wire.size(), 0) == ssize_t(wire.size()));
+    const int rs = dial(relay.rawPort());
+    const std::vector<uint8_t> hello = helloFrame(0xBEEF);
+    CHECK(send(rs, hello.data(), 5, 0) == 5 && send(rs, hello.data() + 5, hello.size() - 5, 0) == ssize_t(hello.size() - 5));
+    std::optional<rl::HelloAckPayload> rawAck;
+    {
+        rl::FrameParser p;
+        std::vector<rl::Frame> frames;
+        const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (!rawAck && std::chrono::steady_clock::now() < until) {
+            pollfd pf{rs, POLLIN, 0};
+            if (poll(&pf, 1, 50) <= 0) continue;
+            uint8_t buf[2048];
+            const ssize_t n = recv(rs, buf, sizeof buf, 0);
+            if (n <= 0) break;
+            p.feed(buf, size_t(n), frames);
+            if (std::vector<rl::HelloAckPayload> acks = acksIn(frames); !acks.empty()) rawAck = acks.front();
+        }
+    }
+    CHECK(rawAck && rawAck->yourSlot == 2 && rawAck->playerCount == 2);
+    const std::vector<rl::Connection> mixed = relay.connections();
+    CHECK(mixed.size() == 2 && mixed[0].wire == rl::Wire::Sio && mixed[1].wire == rl::Wire::Raw && mixed[1].joined);
+    const uint16_t held = relay.rawPort();
+    rl::Relay second;  // a second relay (or a psnl_server) cannot have it
+    CHECK(second.start(&err, held, &rawErr) && second.running() && second.rawPort() == 0 &&
+          rawErr.find(std::to_string(held)) != std::string::npos && rawErr.find("holds the port") != std::string::npos);
+    second.stop();
+    close(ss);
+    close(rs);
+    relay.stop();
 #endif
+}
+
+// Play's relayed consoles over PCDRV tcp:// (psxsplash#121): only when both
+// the engine and redux have "probe:net"; otherwise SIO1, argv unchanged.
+void testPlayPcdrvNet() {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    const fs::path dir = g_outDir / "play-pcdrvnet";
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir, ec);
+    auto put = [&](const char* name, const std::string& body) {
+        std::ofstream(dir / name, std::ios::binary) << body;
+        return dir / name;
+    };
+    std::string big(3 << 20, 'x');  // the name across a 1 MiB read boundary
+    big.replace((1 << 20) - 4, 9, "probe:net");
+    const fs::path newEngine = put("new.ps-exe", std::string("PS-X EXE\0scene_%d.splashpack\0probe:net\0", 40));
+    const fs::path oldEngine = put("old.ps-exe", std::string("PS-X EXE\0scene_%d.splashpack\0", 30));
+    const fs::path newRedux = put("pcsx-redux-new", big), oldRedux = put("pcsx-redux-old", std::string(3 << 20, 'y'));
+    CHECK(editor::hasPcdrvNet(newEngine) && !editor::hasPcdrvNet(oldEngine));
+    CHECK(editor::hasPcdrvNet(newRedux) && !editor::hasPcdrvNet(oldRedux) && !editor::hasPcdrvNet(dir / "missing"));
+
+    editor::PlayTools t;
+    t.players = 3;
+    t.psxsplash = newEngine;
+    t.redux = newRedux;
+    editor::RelayWire w = editor::relayWire(t);
+    CHECK(w.pcdrvNet && w.note.empty());
+    auto u8 = [](const fs::path& p) {
+        const std::u8string s = p.u8string();
+        return std::string(s.begin(), s.end());
+    };
+    const std::vector<std::string> base = {u8(newRedux), "-run", "-fastboot", "-no-ui", "-shmdisplay", "-loadexe",
+                                           u8(newEngine), "-pcdrv", "-pcdrvbase", "/b"};
+    std::vector<std::string> want = base;
+    want.insert(want.end(), {"-pcdrvnet", "-portable", "/b/console2"});
+    CHECK(editor::reduxCommand(t, "/b", {}, "/b/console2", w.pcdrvNet) == want);
+    std::string err;
+    const fs::path c2 = editor::consoleDir(dir, 1);
+    CHECK(editor::prepareConsole(c2, false, 41234, &err, !w.pcdrvNet));
+    auto slurp = [](const fs::path& f) {
+        std::ifstream in(f, std::ios::binary);
+        return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    };
+    const std::string net = slurp(c2 / "pcsx.json");
+    CHECK(net == editor::noLinkSettings() && net.find("\"SIO1Client\":false") != std::string::npos &&
+          net.find("SIO1ClientPort") == std::string::npos);
+
+    // An engine from before the socket: SIO1 client, argv as it always was.
+    t.psxsplash = oldEngine;
+    w = editor::relayWire(t);
+    CHECK(!w.pcdrvNet && w.note.empty());
+    want = base;
+    want[6] = u8(oldEngine);
+    want.insert(want.end(), {"-portable", "/b/console2"});
+    CHECK(editor::reduxCommand(t, "/b", {}, "/b/console2", w.pcdrvNet) == want);
+    CHECK(editor::reduxCommand(t, "/b", {}, "/b/console2", w.pcdrvNet) == editor::reduxCommand(t, "/b", {}, "/b/console2"));
+    CHECK(editor::prepareConsole(c2, false, 41234, &err, !w.pcdrvNet) && slurp(c2 / "pcsx.json") == editor::linkSettings(false, 41234));
+    // The new engine on a redux without -pcdrvnet (which takes the flag silently): SIO1, and a note why.
+    t.psxsplash = newEngine;
+    t.redux = oldRedux;
+    w = editor::relayWire(t);
+    CHECK(!w.pcdrvNet && w.note.find("no -pcdrvnet") != std::string::npos && w.note.find("SIO1") != std::string::npos);
+    const std::vector<std::string> fallback = editor::reduxCommand(t, "/b", {}, "/b/console2", w.pcdrvNet);
+    CHECK(std::find(fallback.begin(), fallback.end(), "-pcdrvnet") == fallback.end());
 }
 
 // A CD-ROM psxsplash build booted by Play (or a PCdrv one put on a disc)
@@ -20728,7 +20970,10 @@ int main(int argc, char** argv) {
     testRelayReliable();
     testRelaySnapshot();
     testRelayWorldObjects();
+    testRelayRawStream();
+    testRelayMixedRoom();
     testRelaySocket();
+    testPlayPcdrvNet();
     testPlayBootLogo();
     testBuildScenes();
     testBuildReport();
