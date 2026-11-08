@@ -169,7 +169,7 @@ check('dragging a list row reorders', names(cv) == order[1:4] + ['bar'] + order[
 cv, out, _ = run(['--click', at(*HP), '--wait', '3', '--key', 'ctrl+d', '--wait', '3'])
 n = names(cv)
 check('ctrl+d duplicates in front of the original', n[n.index('hp') + 1:n.index('hp') + 2] == ['hp (2)'], n)
-check('the copy sits 8 px down and right', elements(cv).get('hp (2)', {}).get('rect') == [16, 88, 120, 10],
+check('the copy sits where the original does', elements(cv).get('hp (2)', {}).get('rect') == [8, 80, 120, 10],
       elements(cv).get('hp (2)'))
 cv, out, _ = run(['--click', at(*HP), '--wait', '3', '--key', 'delete', '--wait', '3'])
 check('delete removes the selected element', 'hp' not in names(cv) and len(names(cv)) == len(order) - 1, names(cv))
