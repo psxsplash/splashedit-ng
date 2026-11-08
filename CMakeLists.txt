@@ -55,7 +55,14 @@ FetchContent_Declare(meshoptimizer
     GIT_REPOSITORY https://github.com/zeux/meshoptimizer.git
     GIT_TAG 9e1f07b159d3cb777f1c67ed31fc11fd117986f4)  # v1.3
 set(MESHOPT_INSTALL OFF CACHE BOOL "" FORCE)
-FetchContent_MakeAvailable(stb nlohmann_json recastnavigation psxlua psxavenc dr_libs cgltf ufbx meshoptimizer)
+# LZ4 (BSD) compresses the entries of an archive disc (core/disc.cpp). Fetch
+# only; core/CMakeLists.txt builds lib/lz4.c and lib/lz4hc.c.
+FetchContent_Declare(lz4
+    GIT_REPOSITORY https://github.com/lz4/lz4.git
+    GIT_TAG v1.10.0
+    GIT_SHALLOW TRUE
+    SOURCE_SUBDIR none)
+FetchContent_MakeAvailable(stb nlohmann_json recastnavigation psxlua psxavenc dr_libs cgltf ufbx meshoptimizer lz4)
 
 option(SPLASHEDIT_BUILD_EDITOR "Build the editor (needs SDL3, FreeType, OpenGL)" ON)
 

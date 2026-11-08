@@ -136,6 +136,17 @@ bytes a sector in the directory. What is no movie, and a name the disc cannot ho
     python3 discmoviecheck.py <splashpack-cli>
     xvfb-run -a -s "-screen 0 1600x1300x24" python3 discmovielistcheck.py <splashedit>
 
+`archivecheck.py` builds `disc --archive` of the courtyard and a streamed copy with a CD-DA track
+and a stand-in archive engine, then reads it as psxsplash's archive loader does: the root at LBA 22
+lists SYSTEM.CNF and PSX.EXE, the PSX-ARC1 index at 23 is sorted by DJB2 hash with one entry per
+file `build` exports, at absolute LBAs in load order, each LZ4 (decoded in Python) or stored
+byte-equal to the export, `.geo` stored, the header margin covering LZ4's in-place margin, and 9000
+zero sectors closing the data track, a movie as a STREAM entry keeping each sector's subheader and
+its .sbs as a plain entry. `--archive` must refuse a CD-ROM engine; without it, an archive engine
+still gets an archive disc.
+
+    python3 archivecheck.py <splashpack-cli>
+
 `bvhstatscheck.py` exports the courtyard example with `--stats` and reads the
 `bvh nodes=N leaves=L depth=D refs=R` line: nodes and refs must match the splashpack header, refs the
 triangle count, leaves (N + 1) / 2 (every inner node has two children) and the depth at least
