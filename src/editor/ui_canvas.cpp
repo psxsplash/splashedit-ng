@@ -726,34 +726,33 @@ int pasteElements(Document& doc, int c, int after, const std::string& text, Scre
         return std::any_of(cv.elements.begin(), cv.elements.end(),
                            [&](const UIElement& o) { return o.type == e.type && o.unknown.empty() && spot(o) == r; });
     };
+    auto shifted = [&](UIElement e, int dx, int dy) {
+        if (!e.unknown.empty()) return e;
+        if (e.type == UIElementType::Line) {
+            e.from = {e.from[0] + dx, e.from[1] + dy};
+            e.to = {e.to[0] + dx, e.to[1] + dy};
+        } else {
+            const Rect r = layout(e, s);
+            place(e, Rect{r.x + dx, r.y + dy, r.w, r.h}, s);
+        }
+        return e;
+    };
     int dx = 0, dy = 0;
     if (where) {
         if (const std::optional<Rect> b = clipboardBounds(text, s)) dx = (*where)[0] - b->x, dy = (*where)[1] - b->y;
+    } else {
+        // The whole group steps together, and only the elements the canvas
+        // held before this paste count, so a group keeps its own layout.
+        for (int d = 0; d <= 8 * 64; d += 8) {
+            dx = dy = d;
+            if (std::none_of(pasted->begin(), pasted->end(), [&](const UIElement& e) {
+                    return e.unknown.empty() && taken(shifted(e, d, d));
+                }))
+                break;
+        }
     }
     for (UIElement& e : *pasted) {
-        if (where) {
-            if (e.unknown.empty()) {
-                if (e.type == UIElementType::Line) {
-                    e.from = {e.from[0] + dx, e.from[1] + dy};
-                    e.to = {e.to[0] + dx, e.to[1] + dy};
-                } else {
-                    const Rect r = layout(e, s);
-                    place(e, Rect{r.x + dx, r.y + dy, r.w, r.h}, s);
-                }
-            }
-        } else if (e.unknown.empty()) {
-            const Rect home = layout(e, s);
-            const std::array<int, 2> from = e.from, to = e.to;
-            for (int k = 0; k < 64 && taken(e); k++) {
-                const int d = 8 * (k + 1);
-                if (e.type == UIElementType::Line) {
-                    e.from = {from[0] + d, from[1] + d};
-                    e.to = {to[0] + d, to[1] + d};
-                } else {
-                    place(e, Rect{home.x + d, home.y + d, home.w, home.h}, s);
-                }
-            }
-        }
+        e = shifted(std::move(e), dx, dy);
         std::string base;
         splitNumbered(e.name, &base);
         if (std::any_of(cv.elements.begin(), cv.elements.end(), [&](const UIElement& o) { return o.name == e.name; }))

@@ -11973,6 +11973,29 @@ void testUiClipboard() {
     CHECK(line.type == splash::UIElementType::Line && line.name == "line" && line.from[0] == 200 && line.to[1] == 200);
     CHECK(pasteElements(d, 1, -1, copyElementText(d, 0, 2), s) == 2);
     CHECK(d.scene().canvases[1].elements[2].from[0] == 208 && d.scene().canvases[1].elements[2].to[1] == 208);
+    // A group pasted where nothing sits keeps its layout, stacked elements
+    // included (#339); pasted again onto itself, it steps as one.
+    {
+        std::vector<splash::UIElement> group(3);
+        for (size_t k = 0; k < group.size(); k++) {
+            group[k].type = splash::UIElementType::Box;
+            group[k].name = "stack" + std::to_string(k);
+            group[k].rect = {333, 77, 40, 40};
+        }
+        group[2].rect = {353, 77, 40, 40};
+        const std::string stack = splash::writeUIElementsText(group);
+        const size_t before = d.scene().canvases[1].elements.size();
+        CHECK(pasteElements(d, 1, -1, stack, s) == int(before) + 2);
+        const auto& els = d.scene().canvases[1].elements;
+        CHECK((layout(els[before], s) == Rect{333, 77, 40, 40}));
+        CHECK((layout(els[before + 1], s) == Rect{333, 77, 40, 40}));
+        CHECK((layout(els[before + 2], s) == Rect{353, 77, 40, 40}));
+        CHECK(pasteElements(d, 1, -1, stack, s) == int(before) + 5);
+        const auto& again = d.scene().canvases[1].elements;
+        CHECK((layout(again[before + 3], s) == Rect{341, 85, 40, 40}));
+        CHECK((layout(again[before + 4], s) == Rect{341, 85, 40, 40}));
+        CHECK((layout(again[before + 5], s) == Rect{361, 85, 40, 40}));
+    }
     // Anchored elements keep their anchors and move on screen.
     d.reset(uiScene());
     editElement(d, 0, 0, [](splash::UIElement& e) {
