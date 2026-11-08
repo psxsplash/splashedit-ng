@@ -433,7 +433,10 @@ each element with the engine's `resolveLayout` at 320x240: a bar anchored 0..1 m
 and a box anchored to the right edge must end at x 319. It also checks font indices, line endpoints
 past 255, the font sheets in the .vram file (in the x = 960 column, one page each, clear of the
 system font, row 0 blank) and that an unknown font, 4 fonts, a repeated font name or 25 canvases
-fail the export.
+fail the export. Element flags: every element of the scene exports visible and opaque (0x01); with
+blends set, a box, bar or line carries the code in bits 1-3 (Subtract box 0x07, AddQuarter bar 0x09,
+hidden Add line 0x04, Half box 0x03) while an image or text with a blend in the scene still exports
+0x01, and an unknown blend name fails the export.
 
     python3 uicheck.py <splashpack-cli>
 
@@ -524,6 +527,17 @@ the canvas at 100% must show hero's cell 6 there, one Ctrl+Z takes back Snap siz
 cell, and None saves a plain image without the keys.
 
     python3 uispriteguicheck.py <splashedit>
+
+`uiblendcheck.py` drives the element inspector's Blend row on a canvas of five opaque stripes with
+one grey box per row across them and the checkerboard: on a Box the menu (`ui.blend`, items
+`ui.blend/Opaque`, `ui.blend/50% (half)`, `ui.blend/Add`, `ui.blend/Subtract`, `ui.blend/Add 25%`)
+must save `"blend": "subtract"`, one Ctrl+Z must take back one pick and undo to Opaque must leave no
+`blend` key; on a Text element the row must be there but open no menu and save nothing. With a box
+per mode, the canvas preview over the white stripe must be the GPU's 5-bit blend of grey and white
+(Half 189, Add and Add 25% white, Subtract 123). With a directory, the last screenshot is saved there
+as `se-uiblend-canvas.png`.
+
+    python3 uiblendcheck.py <splashedit> [screenshot-dir]
 
 `uifontscheck.py` drives the canvas inspector's Scene fonts section on the same copy of
 `ui/ui.scene`. With `--ui` the editor prints each font as `uicanvas: fonts: <i> <name> ttf <source>
