@@ -134,12 +134,13 @@ bool editCanvas(Document& doc, int c, const std::function<void(splash::UICanvas&
 // A new element of `type` on top of canvas `c`, centred, named after its type
 // and numbered when taken. Selects it and returns its index (-1: no canvas).
 int addElement(Document& doc, int c, splash::UIElementType type, Screen s);
-// A copy of element `e` right in front of it, 8 px down and right, renamed. Selects it.
+// A copy of element `e` right in front of it, in the same place, renamed. Selects it.
 int duplicateElement(Document& doc, int c, int e);
 bool deleteElement(Document& doc, int c, int e);
 // The same for a whole selection, as ONE undo step each. Duplicating puts each
 // copy right in front of its original and selects the copies; it returns how
-// many, or -2 (no change) when the canvas would pass kMaxCanvasElements.
+// many, or -2 (no change) when the canvas would pass kMaxCanvasElements. The
+// copies sit where their originals do (Copy then Paste gives an offset copy).
 bool deleteElements(Document& doc, int c, const std::vector<int>& idx);
 int duplicateElements(Document& doc, int c, const std::vector<int>& idx);
 std::string copyElementsText(const Document& doc, int c, const std::vector<int>& idx);

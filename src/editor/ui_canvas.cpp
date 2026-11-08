@@ -572,13 +572,6 @@ int duplicateElement(Document& doc, int c, int e) {
     std::string base;
     splitNumbered(copy.name, &base);
     copy.name = uniqueElementName(cv, base);
-    if (copy.type == UIElementType::Line) {
-        copy.from = {copy.from[0] + 8, copy.from[1] + 8};
-        copy.to = {copy.to[0] + 8, copy.to[1] + 8};
-    } else {
-        copy.rect[0] += 8;
-        copy.rect[1] += 8;
-    }
     cv.elements.insert(cv.elements.begin() + e + 1, std::move(copy));
     commit(doc, std::move(after), {c, e + 1});
     return e + 1;
@@ -623,13 +616,6 @@ int duplicateElements(Document& doc, int c, const std::vector<int>& idx) {
         std::string base;
         splitNumbered(copy.name, &base);
         copy.name = uniqueElementName(cv, base);
-        if (copy.type == UIElementType::Line) {
-            copy.from = {copy.from[0] + 8, copy.from[1] + 8};
-            copy.to = {copy.to[0] + 8, copy.to[1] + 8};
-        } else {
-            copy.rect[0] += 8;
-            copy.rect[1] += 8;
-        }
         cv.elements.insert(cv.elements.begin() + at + 1, std::move(copy));
         copies.push_back(at + 1);
     }

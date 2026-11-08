@@ -11577,7 +11577,7 @@ void testUiUndo() {
     CHECK(addElement(d, 1, splash::UIElementType::Text, s) == 2 && d.scene().canvases[1].elements[2].name == "Text (2)");
     int dup = duplicateElement(d, 0, 0);
     CHECK(dup == 1 && d.scene().canvases[0].elements[1].name == "back (2)");
-    CHECK((layout(d.scene().canvases[0].elements[1], s) == Rect{8, 8, 100, 50}));
+    CHECK((layout(d.scene().canvases[0].elements[1], s) == Rect{0, 0, 100, 50}));
     CHECK(duplicateElement(d, 0, 1) == 2 && d.scene().canvases[0].elements[2].name == "back (3)");
     CHECK(deleteElement(d, 0, 0) && d.scene().canvases[0].elements[0].name == "back (2)");
     CHECK((d.uiSelection() == editor::Document::UiSelection{0, -1}));
@@ -12082,14 +12082,14 @@ void testUiMultiSelect() {
     CHECK(d.undo() && names(0) == Names({"back", "front", "hidden", "line"}) && selectedElements(d) == std::vector<int>({0, 2}));
     CHECK(!deleteElements(d, 0, {}) && !deleteElements(d, 0, {1, 9}) && !deleteElements(d, 7, {0}) && !d.canUndo() && d.canRedo());
 
-    // Duplicate: each copy right in front of its original, 8 px down and right, the copies selected.
+    // Duplicate: each copy right in front of its original, in the same place (#339), the copies selected.
     CHECK(duplicateElements(d, 0, {0, 1}) == 2);
     CHECK(names(0) == Names({"back", "back (2)", "front", "front (2)", "hidden", "line"}) && d.historySize() == 1);
-    CHECK((layout(d.scene().canvases[0].elements[1], s) == Rect{8, 8, 100, 50}));
-    CHECK((layout(d.scene().canvases[0].elements[3], s) == Rect{58, 28, 100, 50}));
+    CHECK((layout(d.scene().canvases[0].elements[1], s) == Rect{0, 0, 100, 50}));
+    CHECK((layout(d.scene().canvases[0].elements[3], s) == Rect{50, 20, 100, 50}));
     CHECK(selectedElements(d) == std::vector<int>({1, 3}));
     CHECK(d.undo() && names(0).size() == 4);
-    CHECK(duplicateElements(d, 0, {3}) == 1 && d.scene().canvases[0].elements[4].from == (std::array<int, 2>{208, 108}));
+    CHECK(duplicateElements(d, 0, {3}) == 1 && d.scene().canvases[0].elements[4].from == (std::array<int, 2>{200, 100}));
     CHECK(d.undo());
 
     // Copy and paste of a group: both in order, the pasted ones selected, one step.
