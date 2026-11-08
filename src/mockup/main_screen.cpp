@@ -16,6 +16,7 @@
 #include <map>
 #include <mutex>
 #include <optional>
+#include <random>
 #include <set>
 #include <string>
 
@@ -29,6 +30,7 @@
 #include "path.hh"
 #include "shadow.hh"
 #include "import.hh"
+#include "editor/asset_fields.hh"
 #include "editor/catalog.hh"
 #include "editor/document.hh"
 #include "editor/gizmo.hh"
@@ -220,7 +222,7 @@ static void pollFrameCapture(State& st) {
         return;
     }
     std::string err;
-    if (!st.frame.load(dir / "capture.gpd", &err)) {
+    if (!st.frame.load(dir / "capture.gpd", &err, playDir())) {
         notify(st, "Capture frame: " + err, true);
         return;
     }
@@ -1836,14 +1838,83 @@ static void slotTarget(State& st, int slot, const editor::ObjectPath& path, ImRe
     }
 }
 
-static bool slotField(State& st, int slot, const editor::ObjectPath& path, const char* id, ImRect r, const char* ic, ImU32 iconColor,
-                      const char* name, const char* meta, int index = -1, const std::vector<editor::ObjectPath>& many = {}) {
-    const bool clicked = assetField(id, r, ic, iconColor, name, meta);
+static void revealInFolder(const std::filesystem::path& file);
+
+// The file field a slot edits (an AssetSlot, or -1 for the Model field);
+// none for Add clips from model, which adds files rather than showing one.
+static std::optional<editor::AssetField> slotAssetField(int slot) {
+    using F = editor::AssetField;
+    if (slot < 0) return F::Model;
+    switch (static_cast<AssetSlot>(slot)) {
+        case AssetSlot::Texture: return F::Texture;
+        case AssetSlot::Lua: return F::Lua;
+        case AssetSlot::TriggerLua: return F::TriggerLua;
+        case AssetSlot::Clip: return F::Clip;
+        case AssetSlot::SkinClips: return F::SkinClips;
+        case AssetSlot::SceneLua: return F::SceneLua;
+        case AssetSlot::MemCardIcon: return F::MemCardIcon;
+        case AssetSlot::UiTexture:
+        case AssetSlot::ClipModels:
+        case AssetSlot::UiFont: break;
+    }
+    return std::nullopt;
+}
+
+// What a file field's right-click menu asked for (#323), but Browse, which
+// the caller handles as a left click: Show in Project selects the file in the
+// Project panel, Show in file explorer opens its folder, Clear sets the field
+// to None as one undo step (not offered for a Model or a skin's Clips: see
+// editor::assetFieldClearable). Scripted runs print
+//   assetfield: <name> <project|explorer|clear> <file>.
+// Returns whether the caller should open its picker.
+static bool assetAction(State& st, editor::Document& doc, ui::AssetAction a, const char* name, int slot,
+                        const editor::ObjectPath& path, int index, const std::vector<editor::ObjectPath>& many = {}) {
+    if (a == ui::AssetAction::Clicked || a == ui::AssetAction::Browse) return true;
+    const std::optional<editor::AssetField> field = slotAssetField(slot);
+    if (a == ui::AssetAction::None || !field) return false;
+    std::string file = editor::assetFieldFile(doc, *field, path, index);
+    // The multi-object inspector: the first of them with a file.
+    for (size_t i = 0; file.empty() && i < many.size(); i++) file = editor::assetFieldFile(doc, *field, many[i], index);
+    if (file.empty()) return false;
+    const std::string who = std::string("assetfield: ") + (name ? name : "?");
+    if (a == ui::AssetAction::ShowInProject) {
+        scriptLine(nullptr, who + " project " + file);
+        st.bottomTab = State::BottomTab::Project;
+        st.assets.reveal(file);
+    } else if (a == ui::AssetAction::ShowInExplorer) {
+        scriptLine(nullptr, who + " explorer " + file);
+        revealInFolder(doc.projectRoot() / fromUtf8(file));
+    } else if (a == ui::AssetAction::Clear) {
+        if (editor::clearAssetField(doc, *field, path, index, many)) scriptLine(nullptr, who + " clear " + file);
+    }
+    return false;
+}
+
+// An asset field that takes a file dropped from the Project panel and, with
+// a `name`, has the right-click menu (named <name>.menu/...). Returns true on
+// a click or Browse: the caller opens its picker. Scripted runs print
+//   assetfield: <name> shows <shown>
+// when what it shows changes.
+static bool slotField(State& st, editor::Document& doc, int slot, const editor::ObjectPath& path, const char* id, const char* name,
+                      ImRect r, const char* ic, ImU32 iconColor, const char* shownName, const char* meta, int index = -1,
+                      const std::vector<editor::ObjectPath>& many = {}) {
+    const std::optional<editor::AssetField> field = name ? slotAssetField(slot) : std::nullopt;
+    bool hasFile = false;
+    if (field) {
+        hasFile = !editor::assetFieldFile(doc, *field, path, index).empty();
+        // The multi-object inspector: any of them with a file.
+        for (const editor::ObjectPath& p : many) hasFile = hasFile || !editor::assetFieldFile(doc, *field, p, index).empty();
+    }
+    if (name) {
+        nameRect(name, r);
+        scriptLine((std::string("assetfield.") + name).c_str(), std::string("assetfield: ") + name + " shows " + shownName);
+    }
+    const ui::AssetAction a = assetField(id, r, ic, iconColor, shownName, meta, name, hasFile, field && editor::assetFieldClearable(*field));
     ImDrawList* dl = ImGui::GetWindowDrawList();
     ImRect shown = r;
     shown.ClipWith(ImRect(dl->GetClipRectMin(), dl->GetClipRectMax()));
     slotTarget(st, slot, path, r, shown, index, many);
-    return clicked;
+    return assetAction(st, doc, a, name, slot, path, index, many);
 }
 
 // The inspector's New blocks and New Lua: writes scripts/<name>.blocks or
@@ -1991,7 +2062,7 @@ static float centerY(ImFont* font, float size, float y0, float y1) {
 }
 
 // File dialogs answer on their own thread; the result is picked up next frame.
-enum class FileAsk { None, Open, SaveAs, ExportDisc };
+enum class FileAsk { None, Open, SaveAs, ExportDisc, ExportPlayer };
 static std::mutex g_fileMutex;
 static FileAsk g_fileAsk = FileAsk::None;
 static std::string g_filePath;
@@ -2048,6 +2119,14 @@ static void SDLCALL onTrackPicked(void*, const char* const* files, int) {
 }
 static const SDL_DialogFileFilter kAudioFilter[] = {{"Audio (WAV, AIFF, MP3, Ogg, FLAC)", splash::kAudioExtensions},
                                                     {"All files", "*"}};
+static std::mutex g_movieMutex;
+static std::optional<std::string> g_moviePicked;
+static void SDLCALL onMoviePicked(void*, const char* const* files, int) {
+    if (!files || !files[0]) return;
+    std::lock_guard<std::mutex> lock(g_movieMutex);
+    g_moviePicked = files[0];
+}
+static const SDL_DialogFileFilter kMovieFilter[] = {{"Movies and subtitles (STR, SBS, SRT)", "str;sbs;srt"}, {"All files", "*"}};
 
 // A typed volume name character: upper-cased, dropped unless the volume name
 // keeps it (splash::volumeName's rule).
@@ -2127,6 +2206,108 @@ static void updateExport(State& st) {
     st.noticeReveal = p.discOut;
     st.noticeUntil = ImGui::GetTime() + 20;
     p.discWritten = p.discOut;
+}
+
+// What a project's standalone player is called: its folder's name, else the open scene's.
+static std::string playerTitle(const editor::Document& doc) {
+    const std::string name = utf8(doc.projectRoot().filename());
+    return name.empty() ? doc.sceneStem() : name;
+}
+
+// Why Export Standalone Player is off, or "" when it can run.
+static std::string playerExportOff(const State& st) {
+    splash::ReduxInstall ri;
+    std::string error;
+    if (!splash::findReduxInstall(editor::withDefaults(st.play.tools, st.play.bundleDir).redux, ri, error))
+        return "Needs pcsx-redux: " + error + ". The player copies the pcsx-redux Play uses, so it runs on this system only.";
+    return {};
+}
+
+// The disc as Export builds it, in a scratch folder, then the player folder
+// around it (splash::writePlayer), in the background.
+static void buildPlayer(State& st, const editor::Document& doc, const std::filesystem::path& out) {
+    State::Play& p = st.play;
+    p.playerOut = out;
+    std::vector<std::filesystem::path> files = editor::buildScenes(doc.projectRoot(), openSceneFile(doc));
+    p.built = {};
+    p.playerLaunch = launchOf(files, openSceneFile(doc));
+    const editor::PlayTools tools = editor::withDefaults(p.tools, p.bundleDir);
+    p.player = std::async(std::launch::async, [files = std::move(files), open = openSceneFile(doc), scene = doc.scene(), root = doc.projectRoot(),
+                                               engine = tools.disc, redux = tools.redux, out, title = playerTitle(doc),
+                                               stub = p.bundleDir.empty() ? std::filesystem::path() : p.bundleDir / splash::kLauncherStub] {
+        State::Play::PlayerExport x;
+        if (const std::string e = splash::playerDirError(out); !e.empty()) {
+            x.disc.exported.errors.push_back(e);
+            return x;
+        }
+        editor::BuildScenes b = editor::loadBuildScenes(root, files, open, scene);
+        if (!b.errors.empty()) {
+            x.disc.exported.errors = std::move(b.errors);
+            return x;
+        }
+        std::error_code ec;
+        const std::filesystem::path scratch =
+            std::filesystem::temp_directory_path(ec) / ("splashedit-player-" + std::to_string(std::random_device()()));
+        std::filesystem::create_directories(scratch, ec);
+        const splash::DiscSettings ds = editor::loadDiscSettings(root);
+        std::string logoNote;
+        const std::filesystem::path exe = editor::discEngineFor(engine, ds.bootLogo, &logoNote);
+        const std::filesystem::path bin = scratch / fromUtf8(splash::playerFileName(title, true) + ".bin");
+        x.disc = splash::exportDisc(b.pointers(), root, exe, bin, title, b.names, editor::loadVramSettings(root), ds);
+        if (x.disc.exported.ok() && !logoNote.empty()) x.disc.exported.warnings.push_back(logoNote);
+        if (const std::string n = editor::engineLoaderNote(exe, true); x.disc.exported.ok() && !n.empty())
+            x.disc.exported.warnings.push_back(n);
+        if (x.disc.exported.ok()) {
+            // The Windows launcher wears the memory card icon's first frame, as the console draws it.
+            const editor::MemCardIcon icon = editor::memCardIcon(scene.settings.memCard.icons, root);
+            const bool iconed = !icon.frames.empty() && icon.frames[0].error.empty();
+            splash::PlayerResult r = splash::writePlayer(bin, redux, out, title, stub, iconed ? &icon.frames[0].rgba : nullptr);
+            for (std::string& w : r.warnings) x.disc.exported.warnings.push_back(std::move(w));
+            if (!r.error.empty()) x.disc.exported.errors.push_back(std::move(r.error));
+            x.launcher = r.launcher;
+        }
+        std::filesystem::remove_all(scratch, ec);
+        return x;
+    });
+}
+
+static void startPlayerExport(State& st, const editor::Document& doc) {
+    State::Play& p = st.play;
+    if (p.player.valid() || doc.projectRoot().empty()) return;
+    if (const std::string off = playerExportOff(st); !off.empty()) {
+        notify(st, off, true);
+        return;
+    }
+    if (!editor::missingDiscTools(editor::withDefaults(p.tools, p.bundleDir)).empty()) {
+        p.openSetup = true;
+        p.setupFor = 1;
+        return;
+    }
+    if (!p.playerTo.empty()) {
+        buildPlayer(st, doc, p.playerTo);
+        return;
+    }
+    const std::string loc = utf8(doc.projectRoot());
+    ui::showOpenFolderDialog("export-player", onFilePicked, reinterpret_cast<void*>(static_cast<intptr_t>(FileAsk::ExportPlayer)),
+                             loc.c_str(), false);
+}
+
+// Reports a finished Export Standalone Player like Export, the link opening the player's folder.
+static void updatePlayerExport(State& st) {
+    State::Play& p = st.play;
+    if (!p.player.valid() || p.player.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return;
+    State::Play::PlayerExport x = p.player.get();
+    reportBuild(st, "Export Standalone Player", p.playerLaunch, x.disc.exported);
+    if (!x.disc.exported.ok()) {
+        notify(st, editor::buildFailure("Export Standalone Player failed", x.disc.exported), true);
+        return;
+    }
+    scriptLine(nullptr, "player: " + utf8(x.launcher));
+    notify(st, "Standalone player written: " + utf8(x.launcher.filename()) + " in " + utf8(p.playerOut.filename()) +
+                   " (zip the folder to hand it out)",
+           false);
+    st.noticeReveal = x.launcher;
+    st.noticeUntil = ImGui::GetTime() + 20;
 }
 
 // Opens `file` as the document. The scene is parsed first, so a file that does
@@ -2243,6 +2424,8 @@ static void filesPending(State& st, editor::Document& doc) {
         openScene(st, doc, path);
     } else if (ask == FileAsk::ExportDisc) {
         buildDisc(st, doc, path);
+    } else if (ask == FileAsk::ExportPlayer) {
+        buildPlayer(st, doc, path);
     } else if (ask == FileAsk::SaveAs) {
         std::optional<std::filesystem::path> rel = editor::sceneInProject(doc.projectRoot(), path);
         if (!rel) {
@@ -2941,6 +3124,7 @@ struct MenuEntry {
     enum Kind { Item, Separator, Heading } kind = Item;
     std::string label, shortcut;
     bool enabled = true, checked = false;
+    std::string tip;  // shown on hover, as why a disabled item is off
     bool choice = false;  // one of a group: the picked one shows a dot, an on/off item a check mark
     std::function<void()> run;
 };
@@ -3074,6 +3258,14 @@ static std::vector<MenuEntry> menuEntries(int which, State& st, editor::Document
             m.push_back(item(st.play.hw.active() ? "Stop Hardware Run" : "Run on Hardware", "Ctrl+F5", !st.play.hwBuild.valid(),
                              [&] { toggleRun(st, doc); }));
             m.push_back(item("Export Disc Image...", "Ctrl+B", !st.play.disc.valid(), [&] { startExport(st, doc); }));
+            {
+                const std::string off = playerExportOff(st);
+                m.push_back(item("Export Standalone Player...", "", off.empty() && !st.play.player.valid(),
+                                 [&] { startPlayerExport(st, doc); }));
+                m.back().tip = off.empty() ? "A folder to zip and hand out: the disc, a copy of pcsx-redux and a launcher. "
+                                             "It runs on this system only (the pcsx-redux Play uses)."
+                                           : off;
+            }
             {
                 std::error_code ec;
                 const bool written = !st.play.discWritten.empty() && std::filesystem::is_regular_file(st.play.discWritten, ec);
@@ -3230,6 +3422,7 @@ static std::function<void()> menuRows(const std::vector<MenuEntry>& entries, flo
                 text(dl, ImVec2(ir.Max.x - space::sm - ss.x, centerY(f.regular, type::label, ir.Min.y, ir.Max.y)), f.regular, type::label,
                      color::textFaint, e.shortcut.c_str());
             }
+            if (!e.tip.empty() && hit.hover > 0.5f) tooltip(e.tip.c_str());
             if (hit.clicked && e.enabled && e.run) run = e.run;
             y += rowH;
         }
@@ -6010,7 +6203,7 @@ static void paintTool(State& st, ImDrawList* dl, viewport::Ps1View& view, ImRect
     };
     if (colHit.pasted) brush.color = toBytes(*colHit.pasted);
     if (colHit.clicked) ImGui::OpenPopup("##paintcolpick");
-    ImGui::SetNextWindowPos(ImVec2(colRow.Min.x, colRow.Max.y + space::xs), ImGuiCond_Always);
+    placePopupBelow("##paintcolpick", colRow);
     pushPopupStyle();
     if (ImGui::BeginPopup("##paintcolpick")) {
         float c[3] = {cf[0], cf[1], cf[2]};
@@ -7811,7 +8004,7 @@ static void tilemapSection(State& st, ImDrawList* dl, editor::Document& doc, flo
             const ColorFieldHit colHit = colorField("tilebrushcolor", colRow, b.color, "scene.tilebrushcolor");
             if (colHit.clicked) ImGui::OpenPopup("##tilebrushcolpick");
             if (colHit.pasted) editBrush([&](splash::TileBrush& e) { e.color = *colHit.pasted; });
-            ImGui::SetNextWindowPos(ImVec2(colRow.Max.x, colRow.Max.y + space::xs), ImGuiCond_Always, ImVec2(1, 0));
+            placePopupBelow("##tilebrushcolpick", colRow, ImVec2(1, 0));
             pushPopupStyle();
             if (ImGui::BeginPopup("##tilebrushcolpick")) {
                 float c[3] = {b.color[0], b.color[1], b.color[2]};
@@ -7846,8 +8039,8 @@ static void tilemapSection(State& st, ImDrawList* dl, editor::Document& doc, flo
                 editBrush([v](splash::TileBrush& e) { e.cell = v; }, "tilebrushcell");
             }
             if (fc.done) doc.endMerge();
-            // Under the row, right edges lined up: it opens leftwards, inside the window.
-            ImGui::SetNextWindowPos(ImVec2(cellRow.Max.x, thumb.Max.y + 4), ImGuiCond_Always, ImVec2(1, 0));
+            // Under the row, right edges lined up (it opens leftwards); above it when there is no room below.
+            placePopupBelow("##tilecellpick", cellRow, ImVec2(1, 0));
             if (ImGui::BeginPopup("##tilecellpick")) {
                 ImDrawList* pdl = ImGui::GetWindowDrawList();
                 if (!img.ready()) {
@@ -7882,6 +8075,7 @@ static void tilemapSection(State& st, ImDrawList* dl, editor::Document& doc, flo
                     }
                     ImGui::Dummy(ImVec2(hw, size::field + 2));
                 }
+                nameRect("scene.tilebrushcellpicker", ImGui::GetCurrentWindow()->Rect());
                 ImGui::EndPopup();
             }
 
@@ -8045,7 +8239,7 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
         y += 34 + space::xs;
         const std::string& lua = set.script;
         const bool found = !lua.empty() && doc.fileExists(lua);
-        if (slotField(st, static_cast<int>(AssetSlot::SceneLua), {}, "scenelua", row("lscenelua", "File", "The script, blocks or Lua, that runs for the whole scene. Click to pick one."),
+        if (slotField(st, doc, static_cast<int>(AssetSlot::SceneLua), {}, "scenelua", "scene.lua", row("lscenelua", "File", "The script, blocks or Lua, that runs for the whole scene. Click to pick one."),
                        icon::fileCode, lua.empty() || found ? kind::script : color::warn, lua.empty() ? "None" : fileName(lua).c_str(),
                        nullptr))
             pickAsset(AssetSlot::SceneLua, {});
@@ -8108,7 +8302,7 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
         if (fogHit.clicked) ImGui::OpenPopup("##fogcolpick");
         // Paste from the field's right-click menu: one undo step.
         if (fogHit.pasted) doc.editSettings([&](splash::SceneSettings& s) { s.fog.color = *fogHit.pasted; });
-        ImGui::SetNextWindowPos(ImVec2(colRow.Max.x, colRow.Max.y + space::xs), ImGuiCond_Always, ImVec2(1, 0));
+        placePopupBelow("##fogcolpick", colRow, ImVec2(1, 0));
         pushPopupStyle();
         if (ImGui::BeginPopup("##fogcolpick")) {
             float c[3] = {set.fog.color[0], set.fog.color[1], set.fog.color[2]};
@@ -8117,6 +8311,7 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
                                                             ImGuiColorEditFlags_NoAlpha))
                 doc.editSettings([&](splash::SceneSettings& s) { s.fog.color = {c[0], c[1], c[2]}; }, "fogcol");
             if (ImGui::IsItemDeactivated()) doc.endMerge();
+            nameRect("scene.fogcolpick", ImGui::GetCurrentWindow()->Rect());
             ImGui::EndPopup();
         }
         ImGui::PopStyleVar(4);
@@ -8819,6 +9014,27 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
                 scriptLine("disclogo", std::string("disc logo: ") + (ds.bootLogo ? "on" : "off"));
         }
 
+        // Read speed: single for burned discs.
+        {
+            const ImRect br = row("ldiscspeed", "Single speed",
+                                  "For burned discs. A console's laser can read a CD-R perfectly at single speed and "
+                                  "badly at double, where movies skip and scenes can fail to load. On: the whole disc "
+                                  "reads at single speed. Scenes load half as fast, and movies want psxavenc -x 1 and "
+                                  "Movie.Play(name, {speed = 1}).");
+            const ImRect sw(ImVec2(br.Min.x, br.GetCenter().y - 8), ImVec2(br.Min.x + 30, br.GetCenter().y + 8));
+            nameRect("disc.singlespeed", sw);
+            const char* state = ds.singleSpeed ? "Reads at single speed" : "Off: reads at double speed";
+            text(dl, ImVec2(sw.Max.x + space::sm, centerY(f.regular, type::caption, br.Min.y, br.Max.y)), f.regular,
+                 type::caption, color::textFaint, state);
+            if (toggle("discspeed", sw, ds.singleSpeed) && !root.empty()) {
+                splash::DiscSettings next = ds;
+                next.singleSpeed = !ds.singleSpeed;
+                save(std::move(next));
+            }
+            if (namedRectsOn() && ImGui::GetFrameCount() > 1 && !root.empty())
+                scriptLine("discspeed", std::string("disc speed: ") + (ds.singleSpeed ? "single" : "double"));
+        }
+
         // Licence: none, the built-in psxsplash one, or a file.
         const int cur = ds.licence == "none" ? 0 : ds.licence.empty() || ds.licence == "psxsplash" ? 1 : 2;
         const std::string shown = cur == 0 ? "None" : cur == 1 ? "psxsplash" : licenceFile;
@@ -9249,6 +9465,165 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
                 block += "\ndisc music: track " + std::to_string(i + 2) + " " + tracks[i] + " " +
                          (i < durList.size() ? durList[i] : std::string("missing"));
             scriptLine("discmusic", block);
+        }
+
+        // Movies: what Movie.Play and Movie.PlayOn find under MOVIES/ on the
+        // disc. The same shape as the music list, and from a copy of the list
+        // for the same reason.
+        const std::vector<std::string> movies = ds.movies;
+        {
+            std::optional<std::string> picked;
+            {
+                std::lock_guard<std::mutex> lock(g_movieMutex);
+                picked.swap(g_moviePicked);
+            }
+            if (picked && !root.empty()) {
+                std::error_code ec;
+                const fs::path abs = fs::weakly_canonical(fs::path(std::u8string(picked->begin(), picked->end())), ec);
+                const fs::path base = fs::weakly_canonical(root, ec);
+                const fs::path rel = abs.lexically_relative(base);
+                const std::u8string u = (!rel.empty() && *rel.begin() != "..") ? rel.generic_u8string() : abs.generic_u8string();
+                splash::DiscSettings next = ds;
+                next.movies.push_back(std::string(u.begin(), u.end()));
+                save(std::move(next));
+            }
+        }
+        // A row's words, recomputed when the list changes or now and then.
+        static std::vector<std::string> mvFor, mvInfo;
+        static std::vector<char> mvBad;
+        static double mvAt = -1;
+        if (mvFor != movies || now - mvAt > 1.0) {
+            mvFor = movies;
+            mvAt = now;
+            mvInfo.clear();
+            mvBad.clear();
+            for (const std::string& rel : movies) {
+                const fs::path p = root.empty() ? fs::path(std::u8string(rel.begin(), rel.end()))
+                                                : root / fs::path(std::u8string(rel.begin(), rel.end()));
+                std::error_code fe;
+                std::string d;
+                bool bad = true;
+                if (!fs::is_regular_file(p, fe)) {
+                    d = "missing";
+                } else if (!splash::movieNameFits(p)) {
+                    d = "name too long";
+                } else {
+                    const splash::MovieInfo info = splash::movieInfo(p);
+                    if (!info.ok) {
+                        d = "not a movie";
+                    } else if (info.sbs) {
+                        d = "for a mesh";
+                        bad = false;
+                    } else if (info.srt) {
+                        // Subtitles show only over the movie of their name, and only what the player can read.
+                        const std::string stem = utf8(p.stem());
+                        bool movie = false;
+                        for (const std::string& o : movies) {
+                            const fs::path q(std::u8string(o.begin(), o.end()));
+                            std::string a = utf8(q.stem()), b = stem;
+                            for (char& ch : a) ch = char(std::toupper((unsigned char)ch));
+                            for (char& ch : b) ch = char(std::toupper((unsigned char)ch));
+                            std::string ext = utf8(q.extension());
+                            for (char& ch : ext) ch = char(std::tolower((unsigned char)ch));
+                            movie = movie || (a == b && ext == ".str");
+                        }
+                        char b[64];
+                        if (!movie) {
+                            d = "no movie of this name";
+                        } else if (!info.leftOut.empty()) {
+                            std::snprintf(b, sizeof b, "%u subtitle%s, %zu left out", info.subtitles, info.subtitles == 1 ? "" : "s",
+                                          info.leftOut.size());
+                            d = b;
+                        } else if (!info.wide.empty()) {
+                            std::snprintf(b, sizeof b, "%u subtitle%s, %zu too wide", info.subtitles, info.subtitles == 1 ? "" : "s",
+                                          info.wide.size());
+                            d = b;
+                        } else {
+                            std::snprintf(b, sizeof b, "%u subtitle%s", info.subtitles, info.subtitles == 1 ? "" : "s");
+                            d = b;
+                            bad = false;
+                        }
+                    } else {
+                        const long secs = long(info.sectors / 150);
+                        char b[48];
+                        std::snprintf(b, sizeof b, "%ux%u  %ld:%02ld%s", info.width, info.height, secs / 60, secs % 60,
+                                      info.audio ? "  sound" : "");
+                        d = b;
+                        bad = false;
+                    }
+                }
+                mvInfo.push_back(d);
+                mvBad.push_back(bad ? 1 : 0);
+            }
+        }
+
+        caption("Movies", color::textDim);
+        int mRemove = -1;
+        for (size_t i = 0; i < movies.size(); ++i) {
+            const ImRect rr(ImVec2(x0 + space::sm, y), ImVec2(x1 - space::sm, y + 28));
+            nameRect("disc.movie" + std::to_string(i), rr);
+            const float ty = centerY(f.regular, type::body, rr.Min.y, rr.Max.y);
+            const fs::path rp(std::u8string(movies[i].begin(), movies[i].end()));
+            const std::string file = utf8(rp.filename());
+            dl->AddText(f.regular, type::body, ImVec2(rr.Min.x + space::xs, ty), color::text, file.c_str(), nullptr);
+            const std::string& d = i < mvInfo.size() ? mvInfo[i] : std::string();
+            const bool bad = i < mvBad.size() && mvBad[i];
+            const float dw = f.regular->CalcTextSizeA(type::body, FLT_MAX, 0, d.c_str()).x;
+            const float bw = 22;
+            dl->AddText(f.regular, type::body, ImVec2(rr.Max.x - bw - 8 - dw, ty), bad ? color::warn : color::textDim,
+                        d.c_str(), nullptr);
+            ImGui::PushID(int(2000 + i));
+            const ImRect del(ImVec2(rr.Max.x - bw, rr.Min.y + 3), ImVec2(rr.Max.x, rr.Max.y - 3));
+            nameRect("disc.movie" + std::to_string(i) + ".remove", del);
+            if (iconButton("mremove", del, icon::x, false, "Remove movie")) mRemove = int(i);
+            ImGui::PopID();
+            y += 28;
+        }
+        if (mRemove >= 0) {
+            splash::DiscSettings next = ds;
+            next.movies.erase(next.movies.begin() + mRemove);
+            save(std::move(next));
+        }
+        // Add: the project's movie files, then "Choose file...".
+        static std::vector<std::string> movieFiles;
+        static fs::path movieRoot;
+        static double movieAt = -1;
+        if (root != movieRoot || now - movieAt > 1.0) {
+            movieRoot = root;
+            movieAt = now;
+            movieFiles.clear();
+            std::error_code ec;
+            if (!root.empty())
+                for (fs::recursive_directory_iterator it(root, fs::directory_options::skip_permission_denied, ec), end;
+                     !ec && it != end; it.increment(ec))
+                    if (it->is_regular_file(ec) && splash::isMovieFile(it->path()))
+                        movieFiles.push_back(utf8(it->path().lexically_relative(root).generic_u8string()));
+            std::sort(movieFiles.begin(), movieFiles.end());
+        }
+        std::vector<const char*> addMovies;
+        for (const std::string& a : movieFiles) addMovies.push_back(a.c_str());
+        addMovies.push_back("Choose file...");
+        const ImRect addMovieRow(ImVec2(x0 + space::sm, y + space::xs), ImVec2(x0 + space::sm + 220, y + space::xs + size::field));
+        nameRect("disc.addmovie", addMovieRow);
+        const int moviePick = dropdownMenu("disc.addmovie", addMovieRow, icon::plus, "Add movie", addMovies, -1);
+        if (moviePick >= 0 && moviePick < int(movieFiles.size())) {
+            splash::DiscSettings next = ds;
+            next.movies.push_back(movieFiles[size_t(moviePick)]);
+            save(std::move(next));
+        } else if (moviePick == int(movieFiles.size())) {
+            const std::string loc = utf8(root);
+            ui::showOpenFileDialog("movie", onMoviePicked, nullptr, kMovieFilter, 1, root.empty() ? nullptr : loc.c_str(), false);
+        }
+        y += size::field + space::xs + space::sm;
+        caption("Movies play from a disc image only: Movie.Play(\"INTRO\") plays intro.str, with intro.srt's subtitles when it is listed too; Movie.PlayOn a .sbs on a mesh.",
+                color::textFaint);
+        caption("Make them with psxavenc: -t str for a movie with sound, -t sbs -a 1024 for a mesh.", color::textFaint);
+        if (namedRectsOn() && ImGui::GetFrameCount() > 1 && !root.empty()) {
+            // Scripted tests: the whole list after every change, one block.
+            std::string block = "disc movies: " + std::to_string(movies.size()) + " movies";
+            for (size_t i = 0; i < movies.size(); ++i)
+                block += "\ndisc movies: " + movies[i] + " " + (i < mvInfo.size() ? mvInfo[i] : std::string("missing"));
+            scriptLine("discmovies", block);
         }
 
         if (namedRectsOn() && ImGui::GetFrameCount() > 1 && !root.empty()) {
@@ -9711,6 +10086,11 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
         for (int i = 0; i < nFrames + (nFrames < int(splash::kMemCardIconsMax) ? 1 : 0); i++) {
             ImRect tr(ImVec2(iv.Min.x + i * (tile + gap), ty), ImVec2(iv.Min.x + i * (tile + gap) + tile, ty + tile));
             ImGui::PushID(i);
+            // An image dragged from the Project panel lands on a frame (replacing
+            // it) or on Add (a new frame), as on a Texture field (#160).
+            ImRect shownTile = tr;
+            shownTile.ClipWith(ImRect(dl->GetClipRectMin(), dl->GetClipRectMax()));
+            slotTarget(st, static_cast<int>(AssetSlot::MemCardIcon), {}, tr, shownTile, i == nFrames ? -1 : i);
             if (i == nFrames) {
                 Hit h = interact("mcadd", tr);
                 tooltip(nFrames ? "Add a frame: 2 or 3 frames animate. Pick several images to add them at once." : iconTip);
@@ -9719,6 +10099,7 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
                 textCentered(dl, ImRect(tr.Min, ImVec2(tr.Max.x, tr.Max.y - 14)), f.medium, type::icon, color::textDim, icon::plus);
                 textCentered(dl, ImRect(ImVec2(tr.Min.x, tr.Max.y - 26), ImVec2(tr.Max.x, tr.Max.y - 6)), f.regular, type::caption,
                              color::textFaint, nFrames ? "Add frame" : "Add icon");
+                nameRect("scene.mcicon.add", tr);
                 if (h.clicked) pickAsset(AssetSlot::MemCardIcon, {}, -1);
             } else {
                 const editor::MemCardIcon::Frame& fr = icn.frames[size_t(i)];
@@ -9743,7 +10124,12 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
                 }
                 dl->AddRect(tr.Min, tr.Max,
                             !fr.error.empty() ? color::warn : lerpColor(color::border, color::borderStrong, h.hover), radius::field);
-                if (h.clicked) pickAsset(AssetSlot::MemCardIcon, {}, i);
+                // The file fields' right-click menu; its Clear takes the frame out, as the x under it does.
+                const std::string mcName = "scene.mcicon." + std::to_string(i);
+                nameRect(mcName, tr);
+                const AssetAction ma = assetMenu("mcframe", tr, h.hovered, mcName.c_str(), !fr.path.empty());
+                if (h.clicked || assetAction(st, doc, ma, mcName.c_str(), static_cast<int>(AssetSlot::MemCardIcon), {}, i))
+                    pickAsset(AssetSlot::MemCardIcon, {}, i);
                 // Under it: its number and a button that takes it out.
                 const float ly = tr.Max.y + 2;
                 text(dl, ImVec2(tr.Min.x + 2, ly + 2), f.regular, type::caption, color::textFaint, std::to_string(i + 1).c_str());
@@ -10343,7 +10729,7 @@ static void multiInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
             const ColorFieldHit fcHit = colorField("flatcol", fcRow, fc, "obj.flatcolor", mixed);
             if (fcHit.clicked) ImGui::OpenPopup("##mflatcolpick");
             if (fcHit.pasted) editAll(setFlat({(*fcHit.pasted)[0], (*fcHit.pasted)[1], (*fcHit.pasted)[2]}));
-            ImGui::SetNextWindowPos(ImVec2(fcRow.Max.x, fcRow.Max.y + space::xs), ImGuiCond_Always, ImVec2(1, 0));
+            placePopupBelow("##mflatcolpick", fcRow, ImVec2(1, 0));
             pushPopupStyle();
             if (ImGui::BeginPopup("##mflatcolpick")) {
                 float c[3] = {fc[0], fc[1], fc[2]};
@@ -10455,7 +10841,7 @@ static void multiInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
         const ColorFieldHit lHit = colorField("lcol", colRow, l.color, "obj.lcol", colMixed);
         if (lHit.clicked) ImGui::OpenPopup("##lcolpick");
         if (lHit.pasted) editAll([&](splash::Object& ob) { ob.light->color = *lHit.pasted; });
-        ImGui::SetNextWindowPos(ImVec2(colRow.Max.x, colRow.Max.y + space::xs), ImGuiCond_Always, ImVec2(1, 0));
+        placePopupBelow("##lcolpick", colRow, ImVec2(1, 0));
         pushPopupStyle();
         if (ImGui::BeginPopup("##lcolpick")) {
             float c[3] = {l.color[0], l.color[1], l.color[2]};
@@ -10464,6 +10850,7 @@ static void multiInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
                                                           ImGuiColorEditFlags_NoAlpha))
                 editAll([&](splash::Object& ob) { ob.light->color = {c[0], c[1], c[2]}; }, "mlcol");
             if (ImGui::IsItemDeactivated()) doc.endMerge();
+            nameRect("obj.lcolpick", ImGui::GetCurrentWindow()->Rect());
             ImGui::EndPopup();
         }
         ImGui::PopStyleVar(4);
@@ -10494,7 +10881,7 @@ static void multiInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
         const ImRect lr = row("llua", "File",
                               "The script, blocks or Lua, that runs for each of these objects. Click to pick one for all of them, or drop one here.");
         nameRect("obj.lua", lr);
-        if (slotField(st, static_cast<int>(AssetSlot::Lua), paths.back(), "lua", lr, icon::fileCode, found ? kind::script : color::warn,
+        if (slotField(st, doc, static_cast<int>(AssetSlot::Lua), paths.back(), "lua", "obj.lua", lr, icon::fileCode, found ? kind::script : color::warn,
                       mixed ? "mixed" : lua.empty() ? "None" : fileName(lua).c_str(), nullptr, -1, paths))
             pickAsset(AssetSlot::Lua, paths.back(), 0, paths);
         sectionEnd(top);
@@ -10575,7 +10962,7 @@ static void multiInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
                               "An audio file (WAV, AIFF, MP3, Ogg Vorbis or FLAC), converted to SPU ADPCM at export. Click to pick one for "
                               "all of them; each keeps its Name.");
         nameRect("obj.clip", cr);
-        if (slotField(st, static_cast<int>(AssetSlot::Clip), paths.back(), "clip", cr, icon::music, found ? kind::audio : color::warn,
+        if (slotField(st, doc, static_cast<int>(AssetSlot::Clip), paths.back(), "clip", "obj.clip", cr, icon::music, found ? kind::audio : color::warn,
                       mixed ? "mixed" : a.clip.empty() ? "None" : fileName(a.clip).c_str(), nullptr, -1, paths))
             pickAsset(AssetSlot::Clip, paths.back(), 0, paths);
         num("arate", "Sample rate", "The clips are resampled to this at export. Lower takes less sound RAM and sounds duller; 22050 is a good middle.",
@@ -11312,12 +11699,12 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
             // A terrain draws the mesh its grid builds; its materials are the layers.
             const ImRect modelRow = row("lmodel", "Model", "Built from the Terrain grid below: sculpt it in the Scene view.");
             const std::string tt = std::to_string(splash::terrainTriangles(*o->terrain)) + " tris";
-            slotField(st, -1, path, "model", modelRow, icon::layers, kind::terrain, "Terrain grid", tt.c_str());
+            slotField(st, doc, -1, path, "model", nullptr, modelRow, icon::layers, kind::terrain, "Terrain grid", tt.c_str());
             st.modelField = ImRect();
             st.modelFieldPath = path;
         } else {
         const ImRect modelRow = row("lmodel", "Model", "The 3D model to draw. Click to pick a .glb, .gltf, .fbx, .obj or .blend file (.blend needs Blender installed), or drop one here.");
-        bool pickModel = slotField(st, -1, path, "model", modelRow, icon::box, meshSt == editor::AssetStatus::Ok ? kind::mesh : color::warn,
+        bool pickModel = slotField(st, doc, -1, path, "model", "obj.model", modelRow, icon::box, meshSt == editor::AssetStatus::Ok ? kind::mesh : color::warn,
                                     modelName.c_str(), tris.empty() ? nullptr : tris.c_str());
         st.modelField = folded ? ImRect() : modelRow;
         st.modelField.ClipWith(r);
@@ -11353,8 +11740,8 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                     std::array<float, 4>& col = ob.mesh->materials[i].color;
                     col = {(*matHit.pasted)[0], (*matHit.pasted)[1], (*matHit.pasted)[2], col[3]};
                 });
-            // Right-aligned under the field, so it stays inside the inspector.
-            ImGui::SetNextWindowPos(ImVec2(colRow.Max.x, colRow.Max.y + space::xs), ImGuiCond_Always, ImVec2(1, 0));
+            // Right-aligned under the field (above it near the screen's bottom), so it stays on screen.
+            placePopupBelow(popup.c_str(), colRow, ImVec2(1, 0));
             pushPopupStyle();
             if (ImGui::BeginPopup(popup.c_str())) {
                 float c[3] = {c3[0], c3[1], c3[2]};
@@ -11425,7 +11812,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
         if (nMat <= 1) {
             const ImRect texRow = row("ltex", "Texture", "Image painted on the model. Click to pick an image. Converted to PS1 colours on export.");
             nameRect("obj.texture", texRow);
-            if (slotField(st, static_cast<int>(AssetSlot::Texture), path, "texture", texRow, icon::grid,
+            if (slotField(st, doc, static_cast<int>(AssetSlot::Texture), path, "texture", "obj.texture", texRow, icon::grid,
                           texSt != editor::AssetStatus::Ok || to4 ? color::warn : color::textDim, texName.c_str(), texMeta.c_str(), 0) |
                 fileCard("fixtex", texSt, texPath, ti ? ti->error : std::string()))
                 pickAsset(AssetSlot::Texture, path, 0);
@@ -11454,7 +11841,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                 const ImRect texRow = row(("ltex." + is).c_str(), label.c_str(),
                                           "Image painted on this part of the model. Click to pick an image, or drop one here. Converted to PS1 colours on export.");
                 nameRect("obj.texture." + is, texRow);
-                if (slotField(st, static_cast<int>(AssetSlot::Texture), path, ("texture." + is).c_str(), texRow, icon::grid,
+                if (slotField(st, doc, static_cast<int>(AssetSlot::Texture), path, ("texture." + is).c_str(), ("obj.texture." + is).c_str(), texRow, icon::grid,
                               mSt != editor::AssetStatus::Ok || to4 ? color::warn : color::textDim,
                               tp.empty() ? "None" : fileName(tp).c_str(), meta.empty() ? nullptr : meta.c_str(), int(i)) |
                     fileCard(("fixtex." + is).c_str(), mSt, tp, mt ? mt->error : std::string()))
@@ -11626,7 +12013,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
             const ColorFieldHit fcHit = colorField("flatcol", fcRow, fc, "obj.flatcolor");
             if (fcHit.clicked) ImGui::OpenPopup("##flatcolpick");
             if (fcHit.pasted) doc.edit(path, setFlat({(*fcHit.pasted)[0], (*fcHit.pasted)[1], (*fcHit.pasted)[2]}));
-            ImGui::SetNextWindowPos(ImVec2(fcRow.Max.x, fcRow.Max.y + space::xs), ImGuiCond_Always, ImVec2(1, 0));
+            placePopupBelow("##flatcolpick", fcRow, ImVec2(1, 0));
             pushPopupStyle();
             if (ImGui::BeginPopup("##flatcolpick")) {
                 float c[3] = {fc[0], fc[1], fc[2]};
@@ -11787,8 +12174,8 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
         if (lHit.clicked) ImGui::OpenPopup("##lcolpick");
         // Paste from the field's right-click menu: one undo step.
         if (lHit.pasted) doc.edit(path, [&](splash::Object& ob) { ob.light->color = *lHit.pasted; });
-        // Right-aligned under the field, so it stays inside the inspector.
-        ImGui::SetNextWindowPos(ImVec2(colRow.Max.x, colRow.Max.y + space::xs), ImGuiCond_Always, ImVec2(1, 0));
+        // Right-aligned under the field (above it near the screen's bottom), so it stays on screen.
+        placePopupBelow("##lcolpick", colRow, ImVec2(1, 0));
         pushPopupStyle();
         if (ImGui::BeginPopup("##lcolpick")) {
             float c[3] = {l.color[0], l.color[1], l.color[2]};
@@ -11797,6 +12184,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                                                           ImGuiColorEditFlags_NoAlpha))
                 doc.edit(path, [&](splash::Object& ob) { ob.light->color = {c[0], c[1], c[2]}; }, "lcol");
             if (ImGui::IsItemDeactivated()) doc.endMerge();
+            nameRect("obj.lcolpick", ImGui::GetCurrentWindow()->Rect());
             ImGui::EndPopup();
         }
         ImGui::PopStyleVar(4);
@@ -11834,7 +12222,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                      removeFlag(editor::ComponentKind::Script)));
         y += 34 + space::xs;
         bool found = doc.fileExists(lua);
-        if (slotField(st, static_cast<int>(AssetSlot::Lua), path, "lua", row("llua", "File", "The script, blocks or Lua, that runs for this object. Click to pick one."), icon::fileCode,
+        if (slotField(st, doc, static_cast<int>(AssetSlot::Lua), path, "lua", "obj.lua", row("llua", "File", "The script, blocks or Lua, that runs for this object. Click to pick one."), icon::fileCode,
                        found ? kind::script : color::warn, lua.empty() ? "None" : fileName(lua).c_str(), nullptr) |
             // No file yet: the field and New blocks / New Lua below say so, a "not found" card would not.
             fileCard("fixlua", found || lua.empty() ? editor::AssetStatus::Ok : editor::AssetStatus::Missing, lua, std::string()))
@@ -12135,7 +12523,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                          fmtFixed(tr.size.y).c_str(), fmtFixed(tr.size.z).c_str(), nullptr, sz),
                "tsize", [&](splash::Object& ob) { ob.trigger->size = {std::max(0.0f, sz[0]), std::max(0.0f, sz[1]), std::max(0.0f, sz[2])}; });
         bool found = !tr.lua.empty() && doc.fileExists(tr.lua);
-        if (slotField(st, static_cast<int>(AssetSlot::TriggerLua), path, "tlua", row("ltlua", "Script", "The script, blocks or Lua, that gets the enter and exit calls. Click to pick one."), icon::fileCode,
+        if (slotField(st, doc, static_cast<int>(AssetSlot::TriggerLua), path, "tlua", "obj.tlua", row("ltlua", "Script", "The script, blocks or Lua, that gets the enter and exit calls. Click to pick one."), icon::fileCode,
                        tr.lua.empty() || found ? kind::script : color::warn, tr.lua.empty() ? "None" : fileName(tr.lua).c_str(), nullptr))
             pickAsset(AssetSlot::TriggerLua, path);
         if (!tr.lua.empty()) {
@@ -12324,7 +12712,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                 if (on) dl->AddCircleFilled(dot.GetCenter(), 3.5f, kind::terrain);
                 nameRect("obj.tlayer." + is, slot);
                 const std::string meta = std::to_string(painted[i]) + " cells";
-                if (slotField(st, static_cast<int>(AssetSlot::Texture), path, ("tlayer." + is).c_str(), slot, icon::grid, color::textDim,
+                if (slotField(st, doc, static_cast<int>(AssetSlot::Texture), path, ("tlayer." + is).c_str(), ("obj.tlayer." + is).c_str(), slot, icon::grid, color::textDim,
                               tp.empty() ? "None" : fileName(tp).c_str(), meta.c_str(), int(i)))
                     pickAsset(AssetSlot::Texture, path, int(i));
                 (void)mt;
@@ -12637,7 +13025,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
         top = y;
         compSection("s_audio", editor::ComponentKind::Audio);
         bool found = doc.fileExists(a.clip);
-        if (slotField(st, static_cast<int>(AssetSlot::Clip), path, "clip", row("lclip", "Clip", "An audio file (WAV, AIFF, MP3, Ogg Vorbis or FLAC), converted to SPU ADPCM at export. Click to pick one."), icon::music,
+        if (slotField(st, doc, static_cast<int>(AssetSlot::Clip), path, "clip", "obj.clip", row("lclip", "Clip", "An audio file (WAV, AIFF, MP3, Ogg Vorbis or FLAC), converted to SPU ADPCM at export. Click to pick one."), icon::music,
                        found ? kind::audio : color::warn, a.clip.empty() ? "None" : fileName(a.clip).c_str(), nullptr) |
             fileCard("fixclip", found ? editor::AssetStatus::Ok : editor::AssetStatus::Missing, a.clip, std::string()))
             pickAsset(AssetSlot::Clip, path);
@@ -12683,7 +13071,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
         top = y;
         compSection("s_skin", editor::ComponentKind::Skin);
         std::string clips = std::to_string(sk.clips.size()) + (sk.clips.size() == 1 ? " clip" : " clips");
-        if (slotField(st, static_cast<int>(AssetSlot::SkinClips), path, "clips", row("lclips", "Clips", "Animation clips, at most 16. Click to pick the .anim files; the pick replaces the list."),
+        if (slotField(st, doc, static_cast<int>(AssetSlot::SkinClips), path, "clips", "obj.skinclips", row("lclips", "Clips", "Animation clips, at most 16. Click to pick the .anim files; the pick replaces the list."),
                        icon::play, kind::camera, clips.c_str(), nullptr))
             pickAsset(AssetSlot::SkinClips, path);
         // Animations from other model files (Mixamo: one per file), named
@@ -12696,7 +13084,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                                   "file): matched by joint name and converted with this model's import settings. Click to pick "
                                   "the files, or drop them here. Changing either file imports them again.");
             nameRect("obj.skinaddclips", ar);
-            if (slotField(st, static_cast<int>(AssetSlot::ClipModels), path, "clipmodels", ar, icon::box, kind::mesh, "Add clips from model...",
+            if (slotField(st, doc, static_cast<int>(AssetSlot::ClipModels), path, "clipmodels", "obj.skinaddclips", ar, icon::box, kind::mesh, "Add clips from model...",
                           meta.empty() ? nullptr : meta.c_str()))
                 pickAsset(AssetSlot::ClipModels, path);
         }
@@ -14726,6 +15114,7 @@ ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view,
     }
     updatePlay(st, doc);
     updateExport(st);
+    updatePlayerExport(st);
     updateModels(st, doc);
     ImGui::SetNextWindowPos(ImVec2(0, 0));
     ImGui::SetNextWindowSize(size);

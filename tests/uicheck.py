@@ -61,8 +61,11 @@ for ci in range(ncanvas):
         amin, amax = list(d[q + 16:q + 18]), list(d[q + 18:q + 20])
         td = d[q + 24:q + 40]
         text = cstr(d, struct.unpack_from('<I', d, q + 40)[0])
+        # Flags: bit 0 visible, bits 1-3 the blend (psxsplash src/uiblend.hh).
         elements[cstr(d, enof)] = dict(type=typ, x=x, y=y, w=w, h=h, amin=amin, amax=amax, td=td, text=text,
-                                       color=tuple(d[q + 20:q + 23]))
+                                       color=tuple(d[q + 20:q + 23]), visible=eflags & 1, blend=(eflags >> 1) & 7)
+check('elements visible and opaque', all(e['visible'] == 1 and e['blend'] == 0 for e in elements.values()),
+      {k: (e['visible'], e['blend']) for k, e in elements.items()})
 
 expect = {'bar': (0, 220, 320, 20), 'corner': (312, 0, 8, 8), 'crate': (248, 80, 64, 64),
           'title': (8, 8, 300, 20), 'hp': (8, 80, 120, 10)}
@@ -78,33 +81,53 @@ check('text', elements['title']['text'] == 'SplashEdit NG: UI', elements['title'
 check('progress', tuple(elements['hp']['td'][:4]) == (76, 26, 26, 60), tuple(elements['hp']['td'][:4]))
 
 # Font sheets: inside the x=960 column, one texture page each, not
-# overlapping each other or the system font (960, 464, 48 rows).
-spans = [(f['vy'], f['vy'] + f['th']) for f in fonts]
-check('fonts in column 960', all(f['vx'] == 960 for f in fonts))
-check('fonts inside a page', all(a // 256 == (b - 1) // 256 for a, b in spans), spans)
-check('fonts clear of each other and the system font',
-      all(b <= 464 for a, b in spans) and all(s[1] <= t[0] or t[1] <= s[0] for i, s in enumerate(spans)
-                                               for t in spans[i + 1:]), spans)
-v = open(out[:-len('splashpack')] + 'vram', 'rb').read()
-na, nc, nf = struct.unpack_from('<HHB', v, 2)
-q = 8
-for i in range(na):
-    w, h = struct.unpack_from('<HH', v, q + 4)
-    q = (q + 8 + w * h * 2 + 3) & ~3
-for i in range(nc):
-    n = struct.unpack_from('<H', v, q + 4)[0]
-    q = (q + 8 + n * 2 + 3) & ~3
-check('vram font count', nf == nfont, nf)
-for i in range(nf):
-    gw, gh, vx, vy, th, size = struct.unpack_from('<BBHHHI', v, q)
-    px = v[q + 12:q + 12 + size]
-    check('vram font %d matches descriptor' % i, (gw, gh, vx, vy, th, size) ==
-          (fonts[i]['gw'], fonts[i]['gh'], fonts[i]['vx'], fonts[i]['vy'], fonts[i]['th'], fonts[i]['size']))
-    # psxsplash writes the font CLUT over the first 8 texels of row 0
-    # (psxsplash#56): the row must carry no ink.
-    check('vram font %d row 0 blank' % i, size == 128 * th and not any(px[:128]))
-    check('vram font %d has ink' % i, any(px))
-    q = (q + 12 + size + 3) & ~3
+# overlapping each other or the system font (960, 464, 48 rows). A greyLevels
+# font's 16-entry palette follows its sheet and takes the row below it.
+def font_sheets(tag, pack, fonts, grey):
+    spans = [(f['vy'], f['vy'] + f['th'] + (1 if g else 0)) for f, g in zip(fonts, grey)]
+    check(tag + 'fonts in column 960', all(f['vx'] == 960 for f in fonts))
+    check(tag + 'fonts inside a page', all(f['vy'] // 256 == (f['vy'] + f['th'] - 1) // 256 for f in fonts), spans)
+    check(tag + 'fonts clear of each other and the system font',
+          all(b <= 464 for a, b in spans) and all(s[1] <= t[0] or t[1] <= s[0] for i, s in enumerate(spans)
+                                                   for t in spans[i + 1:]), spans)
+    v = open(pack[:-len('splashpack')] + 'vram', 'rb').read()
+    na, nc, nf = struct.unpack_from('<HHB', v, 2)
+    q = 8
+    for i in range(na):
+        w, h = struct.unpack_from('<HH', v, q + 4)
+        q = (q + 8 + w * h * 2 + 3) & ~3
+    for i in range(nc):
+        n = struct.unpack_from('<H', v, q + 4)[0]
+        q = (q + 8 + n * 2 + 3) & ~3
+    check(tag + 'vram font count', nf == len(fonts), nf)
+    for i in range(nf):
+        gw, gh, vx, vy, th, size = struct.unpack_from('<BBHHHI', v, q)
+        px = v[q + 12:q + 12 + size]
+        check(tag + 'vram font %d matches descriptor' % i, (gw, gh, vx, vy, th, size) ==
+              (fonts[i]['gw'], fonts[i]['gh'], fonts[i]['vx'], fonts[i]['vy'], fonts[i]['th'], fonts[i]['size']))
+        # psxsplash writes the font CLUT over the first 8 texels of row 0
+        # (psxsplash#56): the row must carry no ink. A grey font's palette
+        # (0 transparent, 1 white, then greys) goes below the sheet instead.
+        check(tag + 'vram font %d row 0 blank' % i, size == 128 * th + (32 if grey[i] else 0) and not any(px[:128]))
+        check(tag + 'vram font %d has ink' % i, any(px[:128 * th]))
+        if grey[i]:
+            pal = struct.unpack_from('<16H', px, 128 * th)
+            check(tag + 'vram font %d grey palette' % i, pal[:3] == (0, 0x7FFF, 29 * 0x421) and pal[15] == 2 * 0x421, pal)
+            check(tag + 'vram font %d grey ink' % i, len({b & 15 for b in px[:128 * th]} | {b >> 4 for b in px[:128 * th]}) > 2)
+        q = (q + 12 + size + 3) & ~3
+
+
+def read_fonts(d):
+    nf = struct.unpack_from('<B', d, 94)[0]
+    p = struct.unpack_from('<I', d, 96)[0]
+    out = []
+    for i in range(nf):
+        gw, gh, vx, vy, th, off, size = struct.unpack_from('<BBHHHII', d, p + 112 * i)
+        out.append(dict(gw=gw, gh=gh, vx=vx, vy=vy, th=th, size=size))
+    return out
+
+
+font_sheets('', out, fonts, [False, False])
 
 # Bad input fails the export instead of loading wrong.
 base = json.load(open(scene))
@@ -134,6 +157,44 @@ r = export(os.path.join(tmp, 'future.scene'), os.path.join(tmp, 'future.splashpa
 fd = open(os.path.join(tmp, 'future.splashpack'), 'rb').read() if r.returncode == 0 else b''
 check('unknown element type skipped', r.returncode == 0 and 'future' in r.stderr + r.stdout
       and fd[struct.unpack_from('<I', fd, 96)[0] + 2 * 112 + 6] == 8, r.stdout + r.stderr)
+
+# Blend: codes 1-4 in bits 1-3 of a box's, bar's or line's flags; images and
+# text always 0 there, whatever the scene says.
+s = json.loads(json.dumps(base))
+modes = {'bar': 'subtract', 'hp': 'addQuarter', 'diag': 'add', 'corner': 'half', 'crate': 'half', 'title': 'add'}
+for e in s['canvases'][0]['elements']:
+    if e['name'] in modes: e['blend'] = modes[e['name']]
+    if e['name'] == 'diag': e['visible'] = False
+for f in s['fonts']: f['source'] = os.path.join(here, 'ui', f['source'])
+for e in s['canvases'][0]['elements']:
+    if 'texture' in e: e['texture'] = os.path.join(here, 'ui', e['texture'])
+json.dump(s, open(os.path.join(tmp, 'blend.scene'), 'w'))
+r = export(os.path.join(tmp, 'blend.scene'), os.path.join(tmp, 'blend.splashpack'))
+check('blend export', r.returncode == 0, r.stderr)
+bd = open(os.path.join(tmp, 'blend.splashpack'), 'rb').read() if r.returncode == 0 else b''
+bflags = {}
+if bd:
+    bt = struct.unpack_from('<I', bd, 96)[0] + struct.unpack_from('<B', bd, 94)[0] * 112
+    bdofs, _, _, bcount = struct.unpack_from('<IBBB', bd, bt)
+    for ei in range(bcount):
+        bq = bdofs + ei * 48
+        bflags[cstr(bd, struct.unpack_from('<I', bd, bq + 4)[0])] = bd[bq + 1]
+want = {'bar': 0x07, 'hp': 0x09, 'diag': 0x04, 'corner': 0x03, 'crate': 0x01, 'title': 0x01, 'body': 0x01}
+check('blend flags', all(bflags.get(k) == v for k, v in want.items()), bflags)
+bad('unknown blend', lambda s: s['canvases'][0]['elements'][0].update(blend='multiply'))
+
+# The body font with greyLevels: its record carries the palette, the title's does not.
+s = json.loads(json.dumps(base))
+s['fonts'][1]['greyLevels'] = True
+for f in s['fonts']: f['source'] = os.path.join(here, 'ui', f['source'])
+for e in s['canvases'][0]['elements']:
+    if 'texture' in e: e['texture'] = os.path.join(here, 'ui', e['texture'])
+json.dump(s, open(os.path.join(tmp, 'grey.scene'), 'w'))
+gout = os.path.join(tmp, 'grey.splashpack')
+r = export(os.path.join(tmp, 'grey.scene'), gout)
+check('grey export', r.returncode == 0, r.stdout + r.stderr)
+if r.returncode == 0:
+    font_sheets('grey: ', gout, read_fonts(open(gout, 'rb').read()), [False, True])
 bad('unknown font', lambda s: s['canvases'][0]['elements'][2].update(font='nope'))
 bad('four fonts', lambda s: s['fonts'].extend([dict(s['fonts'][1], name='c'), dict(s['fonts'][1], name='d')]))
 bad('duplicate font name', lambda s: s['fonts'].append(dict(s['fonts'][1])))

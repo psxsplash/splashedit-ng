@@ -29,7 +29,7 @@ FetchContent_Declare(recastnavigation
 # Pin to the commit psxsplash's nugget uses.
 FetchContent_Declare(psxlua
     GIT_REPOSITORY https://github.com/rixnobis/psxlua.git
-    GIT_TAG 4401a3354e1ffe5f38b028c4d5cedf7c077638bd
+    GIT_TAG f3e9b015feb481cc1257e80609e7138cc3bd82d6
     SOURCE_SUBDIR src)
 # libpsxav's SPU-ADPCM encoder (the one psxavenc uses), and dr_wav to read WAV.
 FetchContent_Declare(psxavenc
@@ -55,7 +55,14 @@ FetchContent_Declare(meshoptimizer
     GIT_REPOSITORY https://github.com/zeux/meshoptimizer.git
     GIT_TAG 9e1f07b159d3cb777f1c67ed31fc11fd117986f4)  # v1.3
 set(MESHOPT_INSTALL OFF CACHE BOOL "" FORCE)
-FetchContent_MakeAvailable(stb nlohmann_json recastnavigation psxlua psxavenc dr_libs cgltf ufbx meshoptimizer)
+# LZ4 (BSD) compresses the entries of an archive disc (core/disc.cpp). Fetch
+# only; core/CMakeLists.txt builds lib/lz4.c and lib/lz4hc.c.
+FetchContent_Declare(lz4
+    GIT_REPOSITORY https://github.com/lz4/lz4.git
+    GIT_TAG v1.10.0
+    GIT_SHALLOW TRUE
+    SOURCE_SUBDIR none)
+FetchContent_MakeAvailable(stb nlohmann_json recastnavigation psxlua psxavenc dr_libs cgltf ufbx meshoptimizer lz4)
 
 option(SPLASHEDIT_BUILD_EDITOR "Build the editor (needs SDL3, FreeType, OpenGL)" ON)
 
@@ -84,10 +91,30 @@ else()
     target_compile_options(make_templates PRIVATE -Wall -Wextra)
 endif()
 
+# The Windows standalone player's <title>.exe (core/player.hh kLauncherStub),
+# shipped beside splashedit.exe.
+if(WIN32)
+    set(SPLASHEDIT_ICON "${CMAKE_CURRENT_SOURCE_DIR}/assets/brand/icon.ico")
+    configure_file(tools/player_launcher/launcher.rc.in ${CMAKE_CURRENT_BINARY_DIR}/player_launcher.rc @ONLY)
+    add_executable(splashedit-player-launcher WIN32 tools/player_launcher/launcher.c ${CMAKE_CURRENT_BINARY_DIR}/player_launcher.rc)
+    target_link_libraries(splashedit-player-launcher PRIVATE kernel32 user32)
+    if(MINGW)
+        target_link_options(splashedit-player-launcher PRIVATE -municode)
+    endif()
+    if(MSVC)
+        # The player folder has no MSVC runtime beside it: the static one.
+        set_target_properties(splashedit-player-launcher PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+        target_compile_options(splashedit-player-launcher PRIVATE /W4)
+    else()
+        target_compile_options(splashedit-player-launcher PRIVATE -Wall -Wextra)
+    endif()
+endif()
+
 # The editor's document model (history, picking): no SDL or GL, so it builds
 # and tests headless, also with SPLASHEDIT_BUILD_EDITOR off.
 add_library(splasheditdoc STATIC
     src/editor/asset_browser.cpp
+    src/editor/asset_fields.cpp
     src/editor/blocks_edit.cpp
     src/editor/catalog.cpp
     src/editor/memcard.cpp
@@ -154,6 +181,11 @@ else()
     target_compile_options(editor_tests PRIVATE -Wall -Wextra)
 endif()
 add_test(NAME editor_tests COMMAND editor_tests)
+if(WIN32)
+    # The icon test (testPlayerExeIcon) works on a copy of the launcher.
+    add_dependencies(editor_tests splashedit-player-launcher)
+    target_compile_definitions(editor_tests PRIVATE SPLASHEDIT_PLAYER_LAUNCHER="$<TARGET_FILE:splashedit-player-launcher>")
+endif()
 
 if(NOT SPLASHEDIT_BUILD_EDITOR)
     return()
