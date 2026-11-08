@@ -583,6 +583,13 @@ PsxTexture convertTexture(const Image& img, BitDepth depth, bool cutout, const s
     return t;
 }
 
+void setSemiTransparent(PsxTexture& t) {
+    std::vector<uint16_t>& words = t.hasPalette ? t.palette : t.imageData;
+    for (uint16_t& w : words)
+        if (w != 0) w |= 0x8000;
+    t.semiTransparent = true;
+}
+
 std::vector<std::string> paletteGroupMembers(const Scene& scene, const std::string& name, BitDepth depth, bool cutout,
                                              const std::function<std::optional<bool>(const std::string&)>& cutoutOf) {
     std::vector<std::string> members;
