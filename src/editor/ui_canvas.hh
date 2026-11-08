@@ -134,12 +134,13 @@ bool editCanvas(Document& doc, int c, const std::function<void(splash::UICanvas&
 // A new element of `type` on top of canvas `c`, centred, named after its type
 // and numbered when taken. Selects it and returns its index (-1: no canvas).
 int addElement(Document& doc, int c, splash::UIElementType type, Screen s);
-// A copy of element `e` right in front of it, 8 px down and right, renamed. Selects it.
+// A copy of element `e` right in front of it, in the same place, renamed. Selects it.
 int duplicateElement(Document& doc, int c, int e);
 bool deleteElement(Document& doc, int c, int e);
 // The same for a whole selection, as ONE undo step each. Duplicating puts each
 // copy right in front of its original and selects the copies; it returns how
-// many, or -2 (no change) when the canvas would pass kMaxCanvasElements.
+// many, or -2 (no change) when the canvas would pass kMaxCanvasElements. The
+// copies sit where their originals do (Copy then Paste gives an offset copy).
 bool deleteElements(Document& doc, int c, const std::vector<int>& idx);
 int duplicateElements(Document& doc, int c, const std::vector<int>& idx);
 std::string copyElementsText(const Document& doc, int c, const std::vector<int>& idx);
@@ -150,10 +151,11 @@ std::optional<Rect> clipboardBounds(const std::string& text, Screen s);
 // empty when there is no such element. Cut is this, then deleteElement.
 std::string copyElementText(const Document& doc, int c, int e);
 // Inserts the elements in clipboard `text` into canvas `c` right in front of
-// element `after` (on top of all when -1 or gone), as one undo step. Each one
-// moves 8 px down and right per copy already sitting where it would land, so
-// a paste next to its original never covers it (a cut one comes back in
-// place), and takes a name no element of the canvas has. Selects the last
+// element `after` (on top of all when -1 or gone), as one undo step. The group
+// moves 8 px down and right, all together, until none of its elements would
+// land exactly on one the canvas already held, so a paste next to its original
+// never covers it (a cut one comes back in place) and elements stacked in the
+// clipboard stay stacked; each takes a name no element of the canvas has. Selects the last
 // one and returns its index; -1, with no change, for text that is not UI
 // elements or no such canvas. All pasted elements end up selected. With `at`
 // the top-left of the pasted group's box lands there instead (no offset
@@ -261,8 +263,14 @@ std::vector<uint32_t> renderSample(const splash::Scene& scene, Assets& assets, c
 // texel 0 transparent; empty cells, holes, missing brushes and cells past the
 // sheet skipped. *tilemapTiles gets the tiles drawn, -1 when there is no
 // tilemap or no readable tileset.
+// Boxes, progress bars and lines with a blend (UIElement::blend) mix with what
+// is under them by the PS1's math: over something drawn, on its 15-bit colour
+// exactly as the GPU does; over a pixel nothing drew, on 8-bit channels with
+// `backdrop[pixel]` (0xAABBGGRR, w x h; without one, `background`), the
+// element's colour widened from 5 bits, and that pixel comes out opaque.
 std::vector<uint32_t> render(const splash::Scene& scene, const std::vector<bool>& show, Screen s, Assets& assets,
-                             uint32_t background, std::vector<uint8_t>* covered = nullptr, int* tilemapTiles = nullptr);
+                             uint32_t background, std::vector<uint8_t>* covered = nullptr, int* tilemapTiles = nullptr,
+                             const std::vector<uint32_t>* backdrop = nullptr);
 
 }  // namespace uic
 }  // namespace editor

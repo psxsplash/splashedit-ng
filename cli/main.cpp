@@ -92,15 +92,19 @@ static int usage() {
                  "  prints the Lua a block script exports as\n"
                  "usage: splashpack-cli build <scene>... -o <dir> [--project <dir>] [--lua-bytecode]\n"
                  "  exports the scenes as one build, <dir>/scene_<i>.{splashpack,vram,spu,loading}, the files\n"
-                 "  psxsplash's PCdrv loader opens (the game boots in scene 0), as Play does: scene 0 carries the\n"
-                 "  largest ordering table and bump allocator of the build, since psxsplash allocates them once,\n"
-                 "  from scene 0, and prints a render buffers line when it raised them; Lua is always stored\n"
+                 "  psxsplash's PCdrv loader opens (the game boots in scene 0), and <dir>/psxsplash.bin, the\n"
+                 "  same files as the image psxsplash's archive loader reads over PCdrv, as Play does: scene 0\n"
+                 "  carries the largest ordering table and bump allocator of the build, since psxsplash\n"
+                 "  allocates them once, from scene 0, and prints a render buffers line when it raised them; Lua is always stored\n"
                  "  compiled, as Play stores it (the bundled engines have no Lua compiler), so --lua-bytecode\n"
                  "  changes nothing here\n"
                  "usage: splashpack-cli disc <scene>... --engine <psxsplash.ps-exe> -o <out.bin> [--project <dir>]\n"
                  "    [--licence <file|psxsplash|none>] [--volume <name>] [--track <audio file>]...\n"
+                 "    [--movie <str file>]... [--single-speed] [--archive]\n"
                  "  builds a bootable disc image (.bin + .cue) of the scenes, numbered in the order given\n"
                  "  (the game starts in the first); the engine is a LOADER=cdrom build\n"
+                 "  --archive writes the scenes' files into one LZ4 archive at LBA 23 instead, for a\n"
+                 "    LOADER=archive engine (the same image runs over PCdrv as psxsplash.bin)\n"
                  "  with --project, the volume, licence and music tracks come from <dir>/disc.json; the options\n"
                  "    override it\n"
                  "  --licence writes sectors 0-15 from a licence file (12 or 16 sectors of 2336, 2352 or\n"
@@ -111,6 +115,12 @@ static int usage() {
                  "  --track adds a CD-DA music track (WAV, AIFF, MP3, Ogg Vorbis or FLAC; relative to the\n"
                  "    working directory), tracks 2 and up in the order given (Audio.PlayCDDA(2) plays the\n"
                  "    first); any --track replaces disc.json's list\n"
+                 "  --movie adds a movie made with psxavenc (-t str, strcd or strv) as MOVIES/<NAME>.STR, which\n"
+                 "    Movie.Play(\"NAME\") plays, or its subtitles (.srt) as MOVIES/<NAME>.SRT, shown over it;\n"
+                 "    any --movie replaces disc.json's list\n"
+                 "  --single-speed has the engine read the whole disc at single speed, for burned discs\n"
+                 "    (a laser can read a CD-R perfectly at single and badly at double); scenes load half\n"
+                 "    as fast, and movies want psxavenc -x 1 and Movie.Play(name, {speed = 1})\n"
                  "usage: splashpack-cli player <scene>... --engine <psxsplash.ps-exe> --redux <pcsx-redux> -o <dir>\n"
                  "    [--title <name>] [--project <dir>]\n"
                  "  writes a standalone player to hand out: <dir>/game holds the disc image (built as disc\n"
@@ -138,26 +148,30 @@ static int usage() {
                  "    (10..200, default 100) scales it; --tmd-out <file> writes the logo TMD used\n"
                  "  --preview-sim <out.png> [--fonts <dir>] instead renders the --from licence's boot screen\n"
                  "    in software (640x480; --fonts: Inter's directory, else no text; --region: the console)\n"
-                 "usage: splashpack-cli font <font.ttf> --size <px> -o <sheet.png>\n"
-                 "       splashpack-cli font <bitmap.png> --cell <w>x<h> -o <sheet.png>\n"
-                 "  builds one UI font sheet the way export does and prints its cell size and height\n"
+                 "usage: splashpack-cli font <font.ttf> --size <px> [--grey] -o <sheet.png>\n"
+                 "       splashpack-cli font <bitmap.png> --cell <w>x<h> [--grey] -o <sheet.png>\n"
+                 "  builds one UI font sheet the way export does (--grey: greyLevels) and prints its cell size and height\n"
                  "usage: splashpack-cli gpudump <capture.gpd> [--vram <out.raw>] [--owner <out.raw>] [--list] [--redux]\n"
+                 "                              [--names <scene.splashpack>]\n"
                  "  replays a GPU dump in the frame debugger's rasterizer and prints its packet, command and\n"
                  "  primitive counts; --vram writes the final 1024x512 VRAM (16-bit little endian),\n"
                  "  --owner the command index that last wrote each pixel (32-bit), --list prints one line per\n"
                  "  drawing command, --redux renders as pcsx-redux's software GPU does (no dithering, textured\n"
-                 "  gouraud shaded a pixel pair at a time) instead of as psx-spx describes the hardware\n");
+                 "  gouraud shaded a pixel pair at a time) instead of as psx-spx describes the hardware;\n"
+                 "  --list shows psxsplash capture tags (object, triangle, OT slot), --names takes the object\n"
+                 "  names from the pack the captured scene was exported to\n");
     return 2;
 }
 
 static int gpudumpCmd(int argc, char** argv) {
-    std::string in, vramOut, ownerOut;
+    std::string in, vramOut, ownerOut, namesFrom;
     bool list = false, redux = false;
     for (int i = 2; i < argc; i++) {
         std::string a = argv[i];
         if (a == "--vram" && i + 1 < argc) vramOut = argv[++i];
         else if (a == "--owner" && i + 1 < argc) ownerOut = argv[++i];
         else if (a == "--list") list = true;
+        else if (a == "--names" && i + 1 < argc) namesFrom = argv[++i];
         else if (a == "--redux") redux = true;
         else if (in.empty() && a[0] != '-') in = a;
         else return usage();
@@ -172,10 +186,25 @@ static int gpudumpCmd(int argc, char** argv) {
     const gpudump::CommandList cl = gpudump::decode(dump);
     std::printf("packets %zu commands %zu primitives %zu frames %d%s%s\n", dump.packets.size(), cl.commands.size(),
                 cl.drawn.size(), cl.frames, dump.truncated ? " truncated" : "", cl.incomplete ? " incomplete" : "");
+    gpudump::TagScene scene;
+    if (cl.tagged) {
+        std::printf("tagged %d\n", cl.tagged);
+        if (!namesFrom.empty()) {
+            if (!gpudump::loadTagScene(fs::path(namesFrom), scene, &err)) {
+                std::fprintf(stderr, "%s: %s\n", namesFrom.c_str(), err.c_str());
+                return 1;
+            }
+            if (gpudump::matchTagScene(cl, {scene}) < 0) std::printf("warning: the tags do not fit %s\n", namesFrom.c_str());
+        }
+    }
     if (list)
         for (size_t i = 0; i < cl.drawn.size(); i++) {
             const gpudump::Command& c = cl.commands[size_t(cl.drawn[i])];
-            std::printf("#%zu cmd %d %s %08x\n", i, cl.drawn[i], gpudump::typeName(c).c_str(), c.op);
+            if (c.tag.present)
+                std::printf("#%zu cmd %d %s %08x  %s\n", i, cl.drawn[i], gpudump::typeName(c).c_str(), c.op,
+                            gpudump::tagText(c.tag, scene.objects.empty() ? nullptr : &scene).c_str());
+            else
+                std::printf("#%zu cmd %d %s %08x\n", i, cl.drawn[i], gpudump::typeName(c).c_str(), c.op);
         }
     gpuraster::Gpu gpu;
     if (redux) gpu.options = gpuraster::Options::redux();
@@ -510,6 +539,7 @@ static int font(int argc, char** argv) {
         std::string a = argv[i];
         if (a == "-o" && i + 1 < argc) out = argv[++i];
         else if (a == "--size" && i + 1 < argc) f.size = std::atoi(argv[++i]);
+        else if (a == "--grey") f.greyLevels = true;
         else if (a == "--cell" && i + 1 < argc) {
             if (std::sscanf(argv[++i], "%dx%d", &f.glyphWidth, &f.glyphHeight) != 2) return usage();
         } else if (in.empty()) in = a;
@@ -526,14 +556,14 @@ static int font(int argc, char** argv) {
         img.pixels.resize(s.texels.size());
         for (int y = 0; y < s.height; y++)
             for (int x = 0; x < 256; x++) {
-                float v = s.texels[size_t(y) * 256 + x];
-                img.pixels[size_t(s.height - 1 - y) * 256 + x] = {v, v, v, 1};
+                const uint16_t c = s.texels[size_t(y) * 256 + x] ? s.clut[s.texels[size_t(y) * 256 + x] & 15] : 0;
+                img.pixels[size_t(s.height - 1 - y) * 256 + x] = {(c & 31) / 31.f, (c >> 5 & 31) / 31.f, (c >> 10 & 31) / 31.f, 1};
             }
         splash::savePng(img, out);
         int ink = 0;
-        for (uint8_t t : s.texels) ink += t;
+        for (uint8_t t : s.texels) ink += t != 0;
         std::printf("%s cell=%dx%d height=%d vram_bytes=%zu ink=%d\n", in.c_str(), s.glyphWidth, s.glyphHeight,
-                    s.height, s.texels.size() / 2, ink);
+                    s.height, s.vramBytes().size(), ink);
         return 0;
     } catch (const std::exception& e) {
         std::fprintf(stderr, "error: %s\n", e.what());
@@ -593,6 +623,14 @@ static int buildCmd(int argc, char** argv) {
                             all[i].stats.bumpAllocatorSize);
         }
         if (!all.empty()) printRaised(all[0].stats);
+        if (ok) {
+            // psxsplash's archive loader reads the build from this image over PCdrv.
+            const std::string error = splash::writePcdrvImage(outDir, all.size());
+            if (!error.empty()) {
+                std::fprintf(stderr, "error: %s\n", error.c_str());
+                return 1;
+            }
+        }
         return ok ? 0 : 1;
     } catch (const std::exception& e) {
         std::fprintf(stderr, "error: %s\n", e.what());
@@ -744,18 +782,25 @@ static int licenceCmd(int argc, char** argv) {
 static int discCmd(int argc, char** argv) {
     std::vector<std::string> scenePaths;
     std::string outPath, project, engine, licence, volume;
-    std::vector<std::string> tracks;
-    bool hasLicence = false, hasVolume = false;
+    std::vector<std::string> tracks, movies;
+    bool hasLicence = false, hasVolume = false, singleSpeed = false, archive = false;
     for (int i = 2; i < argc; i++) {
         std::string a = argv[i];
         if (a == "-o" && i + 1 < argc)
             outPath = argv[++i];
+        else if (a == "--archive")
+            archive = true;
         else if (a == "--licence" && i + 1 < argc) {
             licence = argv[++i];
             hasLicence = true;
         } else if (a == "--track" && i + 1 < argc) {
             std::u8string u = fs::absolute(fs::path(argv[++i])).u8string();
             tracks.push_back(std::string(u.begin(), u.end()));
+        } else if (a == "--single-speed") {
+            singleSpeed = true;
+        } else if (a == "--movie" && i + 1 < argc) {
+            std::u8string u = fs::absolute(fs::path(argv[++i])).u8string();
+            movies.push_back(std::string(u.begin(), u.end()));
         } else if (a == "--volume" && i + 1 < argc) {
             volume = argv[++i];
             hasVolume = true;
@@ -796,8 +841,12 @@ static int discCmd(int argc, char** argv) {
         }
         if (hasVolume) disc.volume = volume;
         if (!tracks.empty()) disc.tracks = tracks;
-        splash::DiscResult r = splash::exportDisc(ptrs, root, engine, outPath, names.front(), names,
-                                                     splash::readVramSettings(root / "vram.json"), disc);
+        if (!movies.empty()) disc.movies = movies;
+        if (singleSpeed) disc.singleSpeed = true;
+        const splash::VramSettings vram = splash::readVramSettings(root / "vram.json");
+        splash::DiscResult r = archive ? splash::exportArchiveDisc(ptrs, root, engine, outPath, names.front(), names,
+                                                                   vram, disc)
+                                       : splash::exportDisc(ptrs, root, engine, outPath, names.front(), names, vram, disc);
         for (auto& m : r.exported.warnings) std::fprintf(stderr, "warning: %s\n", m.c_str());
         for (auto& m : r.exported.errors) std::fprintf(stderr, "error: %s\n", m.c_str());
         if (!r.exported.ok()) return 1;

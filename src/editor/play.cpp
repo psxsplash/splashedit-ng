@@ -341,6 +341,7 @@ splash::ExportResult exportForPlay(const std::vector<const splash::Scene*>& scen
     }
     for (const fs::path& f : stale) fs::remove(f, ec);
     fs::remove(dir / "reload.flag", ec);
+    fs::remove(dir / splash::kPcdrvImage, ec);
     // Scene 0's render buffers come out as the build's largest (exportBuild).
     for (size_t i = 0; i < scenes.size(); ++i) removeSceneFiles(dir, i);
     std::vector<splash::ExportResult> all = splash::exportBuild(
@@ -351,6 +352,10 @@ splash::ExportResult exportForPlay(const std::vector<const splash::Scene*>& scen
         for (const std::string& m : one.errors) r.errors.push_back(tag + m);
         for (const std::string& m : one.warnings) r.warnings.push_back(tag + m);
         if (i == 0) r.stats = std::move(one.stats);
+    }
+    if (r.errors.empty()) {
+        const std::string error = splash::writePcdrvImage(dir);
+        if (!error.empty()) r.errors.push_back(error);
     }
     return r;
 }
@@ -496,6 +501,11 @@ splash::ExportResult reloadForPlay(const splash::Scene& scene, const fs::path& p
             r.errors.push_back("Cannot replace " + utf8(dir / e.path().filename()) + ": " + ec.message());
             return r;
         }
+    }
+    const std::string error = splash::writePcdrvImage(dir);
+    if (!error.empty()) {
+        r.errors.push_back(error);
+        return r;
     }
     if (!writeReloadFlag(dir, generation)) r.errors.push_back("Cannot write " + utf8(dir / "reload.flag"));
     return r;
