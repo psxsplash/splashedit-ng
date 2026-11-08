@@ -26,6 +26,7 @@
 #include "licencesim.hh"
 #include "licencetmd.hh"
 #include "player.hh"
+#include "webexport.hh"
 #include "splashpack.hh"
 #include "texture.hh"
 #include "unity_import.hh"
@@ -128,6 +129,13 @@ static int usage() {
                  "  settings, and <title>.bat, .command or .sh starts the game in pcsx-redux's kiosk mode; the\n"
                  "  player runs on the system that pcsx-redux is for; --title (default the first scene's file\n"
                  "  name) names the launcher and the disc; <dir> must be empty, missing or a player export\n"
+                 "usage: splashpack-cli web <scene>... --engine <psxsplash.ps-exe> --redux-web <dir> -o <dir>\n"
+                 "    [--title <name>] [--project <dir>]\n"
+                 "  writes the game for a web host: <dir>/game holds the disc image (built as player does),\n"
+                 "  beside the files of the pcsx-redux web build in --redux-web (pcsx-redux.js, .wasm, .data,\n"
+                 "  enable-threads.js) and an index.html that plays it in the browser; --title (default the\n"
+                 "  first scene's file name) names the page and the disc; <dir> must be empty, missing or a\n"
+                 "  web export\n"
                  "usage: splashpack-cli licence --out <file> [--tmd <file>] [--top <text>] [--bottom <text>]\n"
                  "    [--from <file|psxsplash>] [--region japan|america|europe]\n"
                  "  builds a 12-sector licence file (28032 bytes, for --licence) from a TMD logo (flat\n"
@@ -857,7 +865,8 @@ static int discCmd(int argc, char** argv) {
 // The folder this program is in (defined at the end, after windows.h).
 static fs::path selfDir(const char* argv0);
 
-static int playerCmd(int argc, char** argv) {
+// player, or web with `web`: the same arguments but --redux-web for --redux.
+static int playerCmd(int argc, char** argv, bool web) {
     std::vector<std::string> scenePaths;
     std::string outPath, project, engine, redux, title;
     for (int i = 2; i < argc; i++) {
@@ -868,7 +877,7 @@ static int playerCmd(int argc, char** argv) {
             project = argv[++i];
         else if (a == "--engine" && i + 1 < argc)
             engine = argv[++i];
-        else if (a == "--redux" && i + 1 < argc)
+        else if (a == (web ? "--redux-web" : "--redux") && i + 1 < argc)
             redux = argv[++i];
         else if (a == "--title" && i + 1 < argc)
             title = argv[++i];
@@ -879,14 +888,14 @@ static int playerCmd(int argc, char** argv) {
     }
     if (scenePaths.empty() || outPath.empty() || engine.empty() || redux.empty()) return usage();
     // Refused before anything is built.
-    if (std::string e = splash::playerDirError(outPath); !e.empty()) {
+    if (std::string e = web ? splash::webDirError(outPath) : splash::playerDirError(outPath); !e.empty()) {
         std::fprintf(stderr, "error: %s\n", e.c_str());
         return 1;
     }
     {
         std::string e;
         splash::ReduxInstall ri;
-        if (!splash::findReduxInstall(redux, ri, e)) {
+        if (!web && !splash::findReduxInstall(redux, ri, e)) {
             std::fprintf(stderr, "error: %s\n", e.c_str());
             return 1;
         }
@@ -923,6 +932,18 @@ static int playerCmd(int argc, char** argv) {
             fs::remove_all(scratch, ec);
             return 1;
         }
+        if (web) {
+            const std::string e = splash::writeWeb(bin, redux, outPath, title);
+            fs::remove_all(scratch, ec);
+            if (!e.empty()) {
+                std::fprintf(stderr, "error: %s\n", e.c_str());
+                return 1;
+            }
+            std::u8string l = (fs::path(outPath) / "index.html").u8string();
+            std::printf("%s sectors=%u\n", std::string(l.begin(), l.end()).c_str(), r.disc.sectors);
+            printRaised(r.exported.stats);
+            return 0;
+        }
         const fs::path self = selfDir(argv[0]);
         splash::PlayerResult p =
             splash::writePlayer(bin, redux, outPath, title, self.empty() ? fs::path() : self / splash::kLauncherStub);
@@ -945,7 +966,8 @@ static int playerCmd(int argc, char** argv) {
 
 int main(int argc, char** argv) {
     if (argc >= 2 && std::strcmp(argv[1], "disc") == 0) return discCmd(argc, argv);
-    if (argc >= 2 && std::strcmp(argv[1], "player") == 0) return playerCmd(argc, argv);
+    if (argc >= 2 && std::strcmp(argv[1], "player") == 0) return playerCmd(argc, argv, false);
+    if (argc >= 2 && std::strcmp(argv[1], "web") == 0) return playerCmd(argc, argv, true);
     if (argc >= 2 && std::strcmp(argv[1], "licence") == 0) return licenceCmd(argc, argv);
     if (argc >= 2 && std::strcmp(argv[1], "build") == 0) return buildCmd(argc, argv);
     if (argc >= 2 && std::strcmp(argv[1], "font") == 0) return font(argc, argv);

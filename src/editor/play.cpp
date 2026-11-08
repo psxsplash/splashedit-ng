@@ -38,6 +38,7 @@ PlayTools loadPlayTools(const fs::path& file) {
         std::string key = line.substr(0, eq), value = line.substr(eq + 1);
         fs::path p = fromUtf8(value);
         if (key == "redux") t.redux = p;
+        else if (key == "reduxweb") t.reduxWeb = p;
         else if (key == "psxsplash") t.psxsplash = p;
         else if (key == "bios") t.bios = p;
         else if (key == "disc") t.disc = p;
@@ -64,6 +65,7 @@ bool savePlayTools(const fs::path& file, const PlayTools& t) {
     if (file.has_parent_path()) fs::create_directories(file.parent_path(), ec);
     std::ofstream out(file, std::ios::binary);
     out << "redux=" << utf8(t.redux) << "\n"
+        << "reduxweb=" << utf8(t.reduxWeb) << "\n"
         << "psxsplash=" << utf8(t.psxsplash) << "\n"
         << "bios=" << utf8(t.bios) << "\n"
         << "disc=" << utf8(t.disc) << "\n"
@@ -143,7 +145,9 @@ PlayTools withDefaults(PlayTools t, const fs::path& bundle) {
     dropMissing(t.redux);
     dropMissing(t.psxsplash);
     dropMissing(t.disc);
+    if (std::error_code ec; !t.reduxWeb.empty() && !fs::is_directory(t.reduxWeb, ec)) t.reduxWeb.clear();
     fromEnv(t.redux, "SPLASHEDIT_REDUX");
+    fromEnv(t.reduxWeb, "SPLASHEDIT_REDUX_WEB");
     fromEnv(t.psxsplash, "SPLASHEDIT_PSXSPLASH");
     fromEnv(t.bios, "SPLASHEDIT_BIOS");
     fromEnv(t.disc, "SPLASHEDIT_DISC_ENGINE");

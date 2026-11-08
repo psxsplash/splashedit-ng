@@ -44,6 +44,7 @@
 #include "editor/texture_preview.hh"
 #include "terrain.hh"
 #include "texture.hh"
+#include "webexport.hh"
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_dialog.h>
 
@@ -828,6 +829,7 @@ static void playSetup(State& st, const editor::Document& doc, ImVec2 size) {
             (g_pickWhich == 0   ? p.tools.redux
              : g_pickWhich == 1 ? p.tools.psxsplash
              : g_pickWhich == 2 ? p.tools.bios
+             : g_pickWhich == 4 ? p.tools.reduxWeb
                                 : p.tools.disc) = picked;
             if (!p.settingsFile.empty()) editor::savePlayTools(p.settingsFile, p.tools);
             g_pickWhich = -1;
@@ -886,11 +888,12 @@ static void playSetup(State& st, const editor::Document& doc, ImVec2 size) {
     } rows[] = {{"pcsx-redux", &eff.redux, false, nullptr},
                 {engineLabel, &engine, false, "ps-exe"},
                 {"BIOS", &eff.bios, true, "bin"},
-                {"psxsplash disc build", &discExe, false, "ps-exe"}};
+                {"psxsplash disc build", &discExe, false, "ps-exe"},
+                {"pcsx-redux web build (folder)", &eff.reduxWeb, true, nullptr}};
     static const SDL_DialogFileFilter exeFilter[] = {{"PlayStation executable", "ps-exe;exe"}};
     static const SDL_DialogFileFilter biosFilter[] = {{"BIOS image", "bin;rom"}};
     // Each popup lists what its own action runs.
-    const int shown[4][4] = {{0, 1, 2, -1}, {3, -1, -1, -1}, {1, -1, -1, -1}, {0, 1, 2, 3}};
+    const int shown[4][5] = {{0, 1, 2, -1, -1}, {3, -1, -1, -1, -1}, {1, -1, -1, -1, -1}, {0, 1, 2, 3, 4}};
     for (int i : shown[mode]) {
         if (i < 0) continue;
         const Row& r = rows[i];
@@ -902,9 +905,9 @@ static void playSetup(State& st, const editor::Document& doc, ImVec2 size) {
         std::string sub;
         ImU32 tone = color::textFaint;
         if (r.path->empty()) {
-            sub = r.optional ? "Optional: pcsx-redux uses its own" : "Not set";
+            sub = i == 4 ? "Optional: Export for the Web needs it" : r.optional ? "Optional: pcsx-redux uses its own" : "Not set";
             if (!r.optional) tone = color::warn;
-        } else if (!std::filesystem::is_regular_file(*r.path, ec)) {
+        } else if (i == 4 ? !std::filesystem::is_directory(*r.path, ec) : !std::filesystem::is_regular_file(*r.path, ec)) {
             sub = "Not found: " + utf8(*r.path);
             tone = color::bad;
         } else {
@@ -914,11 +917,14 @@ static void playSetup(State& st, const editor::Document& doc, ImVec2 size) {
         text(dl, ImVec2(o.x + space::md, y + 24), f.regular, type::caption, tone, sub.c_str());
         ImGui::PopClipRect();
         const float bw = buttonWidth(icon::folderOpen, "Locate");
-        static const char* const locateIds[] = {"locate.redux", "locate.psxsplash", "locate.bios", "locate.disc"};
+        static const char* const locateIds[] = {"locate.redux", "locate.psxsplash", "locate.bios", "locate.disc", "locate.reduxweb"};
         if (button(locateIds[i], ImVec2(o.x + inner - bw - space::sm, y + (rowH - size::field - 6) * 0.5f), icon::folderOpen, "Locate",
                    ButtonKind::Secondary)) {
             const SDL_DialogFileFilter* flt = i == 1 || i == 3 ? exeFilter : i == 2 ? biosFilter : nullptr;
-            ui::showOpenFileDialog("tool", onToolPicked, reinterpret_cast<void*>(static_cast<intptr_t>(i)), flt, flt ? 1 : 0, nullptr,
+            if (i == 4)
+                ui::showOpenFolderDialog("tool", onToolPicked, reinterpret_cast<void*>(static_cast<intptr_t>(i)), nullptr, false);
+            else
+                ui::showOpenFileDialog("tool", onToolPicked, reinterpret_cast<void*>(static_cast<intptr_t>(i)), flt, flt ? 1 : 0, nullptr,
                                    false);
         }
         ImGui::PopID();
@@ -2087,7 +2093,7 @@ static float centerY(ImFont* font, float size, float y0, float y1) {
 }
 
 // File dialogs answer on their own thread; the result is picked up next frame.
-enum class FileAsk { None, Open, SaveAs, ExportDisc, ExportPlayer };
+enum class FileAsk { None, Open, SaveAs, ExportDisc, ExportPlayer, ExportWeb };
 static std::mutex g_fileMutex;
 static FileAsk g_fileAsk = FileAsk::None;
 static std::string g_filePath;
@@ -2248,20 +2254,30 @@ static std::string playerExportOff(const State& st) {
     return {};
 }
 
+// Why Export for the Web is off, or "" when it can run.
+static std::string webExportOff(const State& st) {
+    if (editor::withDefaults(st.play.tools, st.play.bundleDir).reduxWeb.empty())
+        return "Needs a pcsx-redux web build: set its folder (pcsx-redux.js, .wasm, .data, enable-threads.js) in Build > Tools.";
+    return {};
+}
+
 // The disc as Export builds it, in a scratch folder, then the player folder
-// around it (splash::writePlayer), in the background.
-static void buildPlayer(State& st, const editor::Document& doc, const std::filesystem::path& out) {
+// around it (splash::writePlayer), or with `web` the web export
+// (splash::writeWeb), in the background.
+static void buildPlayer(State& st, const editor::Document& doc, const std::filesystem::path& out, bool web = false) {
     State::Play& p = st.play;
     p.playerOut = out;
+    p.playerWeb = web;
     std::vector<std::filesystem::path> files = editor::buildScenes(doc.projectRoot(), openSceneFile(doc));
     p.built = {};
     p.playerLaunch = launchOf(files, openSceneFile(doc));
     const editor::PlayTools tools = editor::withDefaults(p.tools, p.bundleDir);
     p.player = std::async(std::launch::async, [files = std::move(files), open = openSceneFile(doc), scene = doc.scene(), root = doc.projectRoot(),
-                                               engine = tools.disc, redux = tools.redux, out, title = playerTitle(doc),
+                                               engine = tools.disc, redux = web ? tools.reduxWeb : tools.redux, out,
+                                               title = playerTitle(doc), web,
                                                stub = p.bundleDir.empty() ? std::filesystem::path() : p.bundleDir / splash::kLauncherStub] {
         State::Play::PlayerExport x;
-        if (const std::string e = splash::playerDirError(out); !e.empty()) {
+        if (const std::string e = web ? splash::webDirError(out) : splash::playerDirError(out); !e.empty()) {
             x.disc.exported.errors.push_back(e);
             return x;
         }
@@ -2282,7 +2298,10 @@ static void buildPlayer(State& st, const editor::Document& doc, const std::files
         if (x.disc.exported.ok() && !logoNote.empty()) x.disc.exported.warnings.push_back(logoNote);
         if (const std::string n = editor::engineLoaderNote(exe, true); x.disc.exported.ok() && !n.empty())
             x.disc.exported.warnings.push_back(n);
-        if (x.disc.exported.ok()) {
+        if (x.disc.exported.ok() && web) {
+            if (std::string e = splash::writeWeb(bin, redux, out, title); !e.empty()) x.disc.exported.errors.push_back(std::move(e));
+            x.launcher = out / "index.html";
+        } else if (x.disc.exported.ok()) {
             // The Windows launcher wears the memory card icon's first frame, as the console draws it.
             const editor::MemCardIcon icon = editor::memCardIcon(scene.settings.memCard.icons, root);
             const bool iconed = !icon.frames.empty() && icon.frames[0].error.empty();
@@ -2296,10 +2315,10 @@ static void buildPlayer(State& st, const editor::Document& doc, const std::files
     });
 }
 
-static void startPlayerExport(State& st, const editor::Document& doc) {
+static void startPlayerExport(State& st, const editor::Document& doc, bool web = false) {
     State::Play& p = st.play;
     if (p.player.valid() || doc.projectRoot().empty()) return;
-    if (const std::string off = playerExportOff(st); !off.empty()) {
+    if (const std::string off = web ? webExportOff(st) : playerExportOff(st); !off.empty()) {
         notify(st, off, true);
         return;
     }
@@ -2308,13 +2327,14 @@ static void startPlayerExport(State& st, const editor::Document& doc) {
         p.setupFor = 1;
         return;
     }
-    if (!p.playerTo.empty()) {
-        buildPlayer(st, doc, p.playerTo);
+    if (const std::filesystem::path& to = web ? p.webTo : p.playerTo; !to.empty()) {
+        buildPlayer(st, doc, to, web);
         return;
     }
     const std::string loc = utf8(doc.projectRoot());
-    ui::showOpenFolderDialog("export-player", onFilePicked, reinterpret_cast<void*>(static_cast<intptr_t>(FileAsk::ExportPlayer)),
-                             loc.c_str(), false);
+    ui::showOpenFolderDialog(web ? "export-web" : "export-player", onFilePicked,
+                             reinterpret_cast<void*>(static_cast<intptr_t>(web ? FileAsk::ExportWeb : FileAsk::ExportPlayer)), loc.c_str(),
+                             false);
 }
 
 // Reports a finished Export Standalone Player like Export, the link opening the player's folder.
@@ -2322,14 +2342,15 @@ static void updatePlayerExport(State& st) {
     State::Play& p = st.play;
     if (!p.player.valid() || p.player.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return;
     State::Play::PlayerExport x = p.player.get();
-    reportBuild(st, "Export Standalone Player", p.playerLaunch, x.disc.exported);
+    const std::string what = p.playerWeb ? "Export for the Web" : "Export Standalone Player";
+    reportBuild(st, what.c_str(), p.playerLaunch, x.disc.exported);
     if (!x.disc.exported.ok()) {
-        notify(st, editor::buildFailure("Export Standalone Player failed", x.disc.exported), true);
+        notify(st, editor::buildFailure(what + " failed", x.disc.exported), true);
         return;
     }
-    scriptLine(nullptr, "player: " + utf8(x.launcher));
-    notify(st, "Standalone player written: " + utf8(x.launcher.filename()) + " in " + utf8(p.playerOut.filename()) +
-                   " (zip the folder to hand it out)",
+    scriptLine(nullptr, (p.playerWeb ? "web: " : "player: ") + utf8(x.launcher));
+    notify(st, (p.playerWeb ? "Web export written: " : "Standalone player written: ") + utf8(x.launcher.filename()) + " in " +
+                   utf8(p.playerOut.filename()) + (p.playerWeb ? " (put the folder on a web host)" : " (zip the folder to hand it out)"),
            false);
     st.noticeReveal = x.launcher;
     st.noticeUntil = ImGui::GetTime() + 20;
@@ -2449,8 +2470,8 @@ static void filesPending(State& st, editor::Document& doc) {
         openScene(st, doc, path);
     } else if (ask == FileAsk::ExportDisc) {
         buildDisc(st, doc, path);
-    } else if (ask == FileAsk::ExportPlayer) {
-        buildPlayer(st, doc, path);
+    } else if (ask == FileAsk::ExportPlayer || ask == FileAsk::ExportWeb) {
+        buildPlayer(st, doc, path, ask == FileAsk::ExportWeb);
     } else if (ask == FileAsk::SaveAs) {
         std::optional<std::filesystem::path> rel = editor::sceneInProject(doc.projectRoot(), path);
         if (!rel) {
@@ -3290,6 +3311,12 @@ static std::vector<MenuEntry> menuEntries(int which, State& st, editor::Document
                 m.back().tip = off.empty() ? "A folder to zip and hand out: the disc, a copy of pcsx-redux and a launcher. "
                                              "It runs on this system only (the pcsx-redux Play uses)."
                                            : off;
+                const std::string webOff = webExportOff(st);
+                m.push_back(item("Export for the Web...", "", webOff.empty() && !st.play.player.valid(),
+                                 [&] { startPlayerExport(st, doc, true); }));
+                m.back().tip = webOff.empty() ? "A folder to put on a web host: the disc, the pcsx-redux web build and a page "
+                                                "that plays the game in the browser."
+                                              : webOff;
             }
             {
                 std::error_code ec;

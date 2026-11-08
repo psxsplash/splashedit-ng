@@ -146,6 +146,8 @@ struct Args {
     std::string exportTo;
     // --export-player-to <dir>: Export Standalone Player writes there instead of asking.
     std::string playerTo;
+    // --export-web-to <dir>: the same for Export for the Web.
+    std::string webTo;
     // --play-settings <file>: a screenshot run reads and saves Play's tools there.
     std::string playSettings;
     float dropX = -1, dropY = -1;
@@ -389,6 +391,7 @@ Args parse(int argc, char** argv) {
         else if (!std::strcmp(argv[i], "--ui")) a.ui = true;
         else if (!std::strcmp(argv[i], "--export-to")) a.exportTo = next();
         else if (!std::strcmp(argv[i], "--export-player-to")) a.playerTo = next();
+        else if (!std::strcmp(argv[i], "--export-web-to")) a.webTo = next();
         else if (!std::strcmp(argv[i], "--play-settings")) a.playSettings = next();
         else if (!std::strcmp(argv[i], "--click") || !std::strcmp(argv[i], "--dblclick")) {
             Action act(!std::strcmp(argv[i], "--click") ? Action::Click : Action::DoubleClick);
@@ -770,6 +773,7 @@ int main(int argc, char** argv) {
     }
     state.play.exportTo = std::filesystem::path(std::u8string(args.exportTo.begin(), args.exportTo.end()));
     state.play.playerTo = std::filesystem::path(std::u8string(args.playerTo.begin(), args.playerTo.end()));
+    state.play.webTo = std::filesystem::path(std::u8string(args.webTo.begin(), args.webTo.end()));
     // Play's tool paths persist per user; screenshot runs read only the environment.
     if (!args.screenshot) {
         if (char* pref = SDL_GetPrefPath("psxsplash", "splashedit")) {

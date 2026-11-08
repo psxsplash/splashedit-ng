@@ -335,15 +335,28 @@ bool setExeIcon(const fs::path& exe, const std::vector<uint32_t>& rgba16, std::s
 
 std::string seededReduxConfig() { return "{\"emulator\":{\"ShownAutoUpdateConfig\":true,\"AutoUpdate\":false}}\n"; }
 
-std::string playerDirError(const fs::path& out) {
+std::string exportDirError(const fs::path& out, const char* marker, const std::string& what) {
     std::error_code ec;
     if (!fs::exists(out, ec)) return {};
     if (!fs::is_directory(out, ec)) return utf8(out) + " is a file, not a folder";
-    if (fs::is_regular_file(out / kPlayerMarker, ec)) return {};
+    if (fs::is_regular_file(out / marker, ec)) return {};
     fs::directory_iterator it(out, ec);
     if (ec) return "cannot read " + utf8(out) + ": " + ec.message();
-    if (it != fs::directory_iterator()) return utf8(out) + " is not empty and holds no standalone player: pick an empty folder";
+    if (it != fs::directory_iterator()) return utf8(out) + " is not empty and holds no " + what + ": pick an empty folder";
     return {};
+}
+
+std::string playerDirError(const fs::path& out) { return exportDirError(out, kPlayerMarker, "standalone player"); }
+
+void removeExported(const fs::path& out, const char* marker) {
+    std::ifstream m(out / marker);
+    std::string line;
+    while (m && std::getline(m, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        const fs::path name = fromUtf8(line);
+        if (line.empty() || line == "." || line == ".." || name.has_parent_path() || name.has_root_path()) continue;
+        fs::remove_all(out / name);
+    }
 }
 
 PlayerResult writePlayer(const fs::path& bin, const fs::path& redux, const fs::path& out, const std::string& title,
@@ -375,15 +388,7 @@ PlayerResult writePlayer(const fs::path& bin, const fs::path& redux, const fs::p
     try {
         fs::create_directories(out);
         // What a previous export wrote goes; whatever else is there stays.
-        if (std::ifstream m(out / kPlayerMarker); m) {
-            std::string line;
-            while (std::getline(m, line)) {
-                if (!line.empty() && line.back() == '\r') line.pop_back();
-                const fs::path name = fromUtf8(line);
-                if (line.empty() || line == "." || line == ".." || name.has_parent_path() || name.has_root_path()) continue;
-                fs::remove_all(out / name);
-            }
-        }
+        removeExported(out, kPlayerMarker);
         fs::create_directories(out / "game");
         fs::copy_file(bin, out / "game" / bin.filename(), fs::copy_options::overwrite_existing);
         fs::copy_file(cue, out / "game" / cue.filename(), fs::copy_options::overwrite_existing);

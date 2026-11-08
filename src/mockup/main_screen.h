@@ -219,6 +219,7 @@ struct State {
         };
         std::future<PlayerExport> player;
         std::filesystem::path playerOut;
+        bool playerWeb = false;  // the export running or last run is Export for the Web
         int setupFor = 0;  // which action the setup popup is for: 0 Play, 1 Export, 2 Run on hardware
         // Run on hardware (Ctrl+F5): the export it uploads, then the serial session.
         std::future<splash::ExportResult> hwBuild;
@@ -227,6 +228,7 @@ struct State {
         std::vector<std::string> ports;  // serial ports found when the setup popup opened
         std::filesystem::path exportTo;  // screenshot mode: write here instead of asking
         std::filesystem::path playerTo;  // the same for Export Standalone Player (a folder)
+        std::filesystem::path webTo;     // and for Export for the Web
         // What the engine reported using in the last Play of scene `peakScene`
         // (Document::loadId), kept after it stops.
         std::optional<editor::RenderPeak> peak;

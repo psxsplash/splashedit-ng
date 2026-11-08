@@ -83,6 +83,7 @@ add_library(splashcore STATIC
     blocks.cpp
     disc.cpp
     player.cpp
+    webexport.cpp
     font.cpp
     licencesim.cpp
     licencetmd.cpp

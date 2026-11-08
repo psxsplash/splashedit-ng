@@ -198,6 +198,9 @@ jobs:
       - name: Export Standalone Player from the editor
         if: runner.os == 'Linux'
         run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/playerguicheck.py build/splashedit
+      - name: Export for the Web from the editor
+        if: runner.os == 'Linux'
+        run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/webguicheck.py build/splashedit
       - name: Memory card settings
         if: runner.os == 'Linux'
         run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/memcardeditcheck.py build/splashedit

@@ -23,6 +23,8 @@ namespace editor {
 // it, see engineFor); the disc follows the project's own disc setting.
 struct PlayTools {
     std::filesystem::path redux, psxsplash, bios, disc;
+    // Export for the Web: the folder of a pcsx-redux web (WebAssembly) build.
+    std::filesystem::path reduxWeb;
     std::string port;  // Run on hardware: a serial port, or tcp:HOST:PORT
     bool overlayPerf = false, overlayRooms = false;
     bool bootLogo = true;
@@ -44,7 +46,7 @@ inline constexpr int kMaxPlayers = 10;
 // Whether a Play with these tools runs its consoles through the relay.
 inline bool usesRelay(const PlayTools& t) { return t.players >= 3 || (t.players == 2 && t.relay); }
 
-// key=value lines: redux=, psxsplash=, bios=, disc=, port=, overlay_perf=,
+// key=value lines: redux=, reduxweb=, psxsplash=, bios=, disc=, port=, overlay_perf=,
 // overlay_rooms=, boot_logo= (1 or 0), players= (1 to kMaxPlayers, clamped),
 // relay= (1 or 0), game_safe_area= (1 or 0), game_aspect= (4:3 or square),
 // game_look= (rgb, svideo or composite), ui_safe_area= (1 or 0),
@@ -54,7 +56,7 @@ inline bool usesRelay(const PlayTools& t) { return t.players >= 3 || (t.players 
 PlayTools loadPlayTools(const std::filesystem::path& file);
 bool savePlayTools(const std::filesystem::path& file, const PlayTools& tools);
 
-// Fills empty entries from SPLASHEDIT_REDUX, SPLASHEDIT_PSXSPLASH,
+// Fills empty entries from SPLASHEDIT_REDUX, SPLASHEDIT_REDUX_WEB, SPLASHEDIT_PSXSPLASH,
 // SPLASHEDIT_BIOS, SPLASHEDIT_DISC_ENGINE and SPLASHEDIT_PORT, then from the copies shipped in
 // `bundle` (the directory holding the editor: redux/ and engine/), then looks
 // for pcsx-redux on PATH.
