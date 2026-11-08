@@ -141,7 +141,9 @@ and a stand-in archive engine, then reads it as psxsplash's archive loader does:
 lists SYSTEM.CNF and PSX.EXE, the PSX-ARC1 index at 23 is sorted by DJB2 hash with one entry per
 file `build` exports, at absolute LBAs in load order, each LZ4 (decoded in Python) or stored
 byte-equal to the export, `.geo` stored, the header margin covering LZ4's in-place margin, and 9000
-zero sectors closing the data track. Each export must refuse the other's engine.
+zero sectors closing the data track, a movie as a STREAM entry keeping each sector's subheader and
+its .sbs as a plain entry. `--archive` must refuse a CD-ROM engine; without it, an archive engine
+still gets an archive disc.
 
     python3 archivecheck.py <splashpack-cli>
 

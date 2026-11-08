@@ -91,9 +91,10 @@ static int usage() {
                  "  prints the Lua a block script exports as\n"
                  "usage: splashpack-cli build <scene>... -o <dir> [--project <dir>] [--lua-bytecode]\n"
                  "  exports the scenes as one build, <dir>/scene_<i>.{splashpack,vram,spu,loading}, the files\n"
-                 "  psxsplash's PCdrv loader opens (the game boots in scene 0), as Play does: scene 0 carries the\n"
-                 "  largest ordering table and bump allocator of the build, since psxsplash allocates them once,\n"
-                 "  from scene 0, and prints a render buffers line when it raised them; Lua is always stored\n"
+                 "  psxsplash's PCdrv loader opens (the game boots in scene 0), and <dir>/psxsplash.bin, the\n"
+                 "  same files as the image psxsplash's archive loader reads over PCdrv, as Play does: scene 0\n"
+                 "  carries the largest ordering table and bump allocator of the build, since psxsplash\n"
+                 "  allocates them once, from scene 0, and prints a render buffers line when it raised them; Lua is always stored\n"
                  "  compiled, as Play stores it (the bundled engines have no Lua compiler), so --lua-bytecode\n"
                  "  changes nothing here\n"
                  "usage: splashpack-cli disc <scene>... --engine <psxsplash.ps-exe> -o <out.bin> [--project <dir>]\n"
@@ -613,6 +614,14 @@ static int buildCmd(int argc, char** argv) {
                             all[i].stats.bumpAllocatorSize);
         }
         if (!all.empty()) printRaised(all[0].stats);
+        if (ok) {
+            // psxsplash's archive loader reads the build from this image over PCdrv.
+            const std::string error = splash::writePcdrvImage(outDir, all.size());
+            if (!error.empty()) {
+                std::fprintf(stderr, "error: %s\n", error.c_str());
+                return 1;
+            }
+        }
         return ok ? 0 : 1;
     } catch (const std::exception& e) {
         std::fprintf(stderr, "error: %s\n", e.what());

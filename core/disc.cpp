@@ -827,14 +827,14 @@ uint64_t archiveHash(const std::string& name) {
 
 DiscInfo writeArchiveImage(const std::vector<ArchiveFile>& files, const std::vector<uint8_t>& exe,
                            const std::string& volume, const fs::path& bin, const std::vector<LicenceSector>& licence,
-                           const std::vector<std::vector<int16_t>>& tracks) {
+                           const std::vector<std::vector<int16_t>>& tracks, uint32_t tail) {
     checkTrackCount(tracks.size());
     // The index entry's fields (psyqo-paths archive-manager.hh): 21-bit size,
     // 11-bit padding, 19-bit sector offset, 10-bit sector count, 3-bit method.
     constexpr size_t kMaxFileBytes = (size_t(1) << 21) - 1;
     constexpr uint32_t kMaxEntrySectors = 1023;
     constexpr uint32_t kMaxLba = (1u << 19) - 1;
-    constexpr uint32_t kMethodStored = 0, kMethodLz4 = 2;
+    constexpr uint32_t kMethodStored = 0, kMethodLz4 = 2, kMethodStream = 3;
     // The header keeps the margin as one byte of 16-byte blocks, read as (byte + 1) * 16.
     constexpr uint32_t kMaxMargin = 4095;
     struct Packed {
@@ -850,6 +850,18 @@ DiscInfo writeArchiveImage(const std::vector<ArchiveFile>& files, const std::vec
         p.hash = archiveHash(f.name);
         auto [it, fresh] = names.emplace(p.hash, f.name);
         if (!fresh) throw std::runtime_error("Two archive files named " + f.name + " (or with the hash of " + it->second + ")");
+        if (f.stream) {
+            // Raw sectors, each written with its own subheader; the entry's
+            // first word is the sector count (psyqo-paths' STREAM method).
+            if (f.data.empty() || f.data.size() % kMode2Sector != 0)
+                throw std::runtime_error(f.name + " is not whole Mode 2 sectors of " + std::to_string(kMode2Sector) +
+                                         " bytes");
+            p.method = kMethodStream;
+            p.sectors = uint32_t(f.data.size() / kMode2Sector);
+            p.bytes = f.data;
+            packed.push_back(std::move(p));
+            continue;
+        }
         if (f.data.size() > kMaxFileBytes)
             throw std::runtime_error(f.name + " is " + std::to_string(f.data.size()) +
                                      " bytes; an archive file must be under 2 MiB");
@@ -899,7 +911,7 @@ DiscInfo writeArchiveImage(const std::vector<ArchiveFile>& files, const std::vec
     const uint32_t exeLba = next;
     const uint32_t exeSectors = std::max<uint32_t>(1, uint32_t((exe.size() + kSector - 1) / kSector));
     next += exeSectors;
-    const uint32_t total = next + kArchiveTail;
+    const uint32_t total = next + tail;
 
     // The index: header, then the entries sorted by hash for its binary search.
     std::vector<uint8_t> index(indexSectors * kSector, 0);
@@ -914,6 +926,12 @@ DiscInfo writeArchiveImage(const std::vector<ArchiveFile>& files, const std::vec
         const Packed& p = *sorted[i];
         le32(e, uint32_t(p.hash));
         le32(e + 4, uint32_t(p.hash >> 32));
+        if (p.method == kMethodStream) {
+            // The sector count does not fit the 10-bit size field, so it takes the first word.
+            le32(e + 8, p.sectors);
+            le32(e + 12, p.lba | (p.method << 29));
+            continue;
+        }
         le32(e + 8, p.size | (p.padding << 21));
         le32(e + 12, p.lba | (p.sectors << 19) | (p.method << 29));
     }
@@ -945,7 +963,10 @@ DiscInfo writeArchiveImage(const std::vector<ArchiveFile>& files, const std::vec
     w.emitRun(index.data(), index.size(), indexSectors);
     for (const Packed& p : packed) {
         if (w.lba() != p.lba) throw std::runtime_error("archive layout drifted at " + names[p.hash]);
-        w.emitRun(p.bytes.data(), p.bytes.size(), p.sectors);
+        if (p.method == kMethodStream)
+            w.emitMode2(p.bytes.data(), p.bytes.size());
+        else
+            w.emitRun(p.bytes.data(), p.bytes.size(), p.sectors);
     }
     w.emitRun(reinterpret_cast<const uint8_t*>(cnf.data()), cnf.size(), 1);
     if (w.lba() != exeLba) throw std::runtime_error("archive layout drifted at PSX.EXE");
@@ -1149,6 +1170,40 @@ DiscFile loadMovie(const fs::path& file) {
     return movie;
 }
 
+namespace {
+fs::path scenePart(size_t i, const char* kind) { return "scene_" + std::to_string(i) + kind; }
+}  // namespace
+
+std::string writePcdrvImage(const fs::path& dir, size_t scenes) {
+    // The kinds in the order loadScene reads them, as the disc has them.
+    static const char* const kOrder[] = {".loading", ".vram", ".spu", ".splashpack", ".geo"};
+    std::error_code ec;
+    std::vector<ArchiveFile> files;
+    try {
+        for (size_t i = 0; i < scenes && fs::is_regular_file(dir / scenePart(i, ".splashpack"), ec); ++i)
+            for (const char* kind : kOrder) {
+                const fs::path part = dir / scenePart(i, kind);
+                if (!fs::is_regular_file(part, ec)) continue;
+                std::ifstream in(part, std::ios::binary);
+                std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+                if (!in.eof() && in.fail()) return "Cannot read " + utf8(part);
+                // StreamReader reads streamed geometry's sectors as they are.
+                files.push_back({utf8(part.filename()), std::move(bytes), std::strcmp(kind, ".geo") == 0});
+            }
+        if (files.empty()) return "No scene_0.splashpack in " + utf8(dir);
+        // Written beside the image and moved over it, so psxsplash never opens half of one.
+        // Over PCdrv nothing reads past the archive, so no executable and no tail.
+        const fs::path next = dir / "psxsplash-next.bin";
+        writeArchiveImage(files, {}, "PSXSPLASH", next, {}, {}, 0);
+        fs::remove(dir / "psxsplash-next.cue", ec);
+        fs::rename(next, dir / kPcdrvImage, ec);
+        if (ec) return "Cannot replace " + utf8(dir / kPcdrvImage) + ": " + ec.message();
+    } catch (const std::exception& e) {
+        return e.what();
+    }
+    return {};
+}
+
 DiscInfo writeLicenceImage(const std::vector<LicenceSector>& licence, const fs::path& bin) {
     return writeDiscImage({}, "LICENCE", bin, licence);
 }
@@ -1209,12 +1264,8 @@ DiscResult buildDisc(const std::vector<const Scene*>& scenes, const fs::path& pr
             }
             break;
         case EngineKind::Archive:
-            if (!archive) {
-                r.exported.errors.push_back(utf8(engine.filename()) +
-                                            " is the archive build of psxsplash (LOADER=archive); write it an archive "
-                                            "disc, or use the CD-ROM build (LOADER=cdrom)");
-                return r;
-            }
+            // The only loader psxsplash has had since its archive loader: it reads nothing else.
+            archive = true;
             break;
     }
     std::string licenceError;
@@ -1344,7 +1395,13 @@ DiscResult buildDisc(const std::vector<const Scene*>& scenes, const fs::path& pr
             // The loading screen psxsplash draws while this scene loads.
             if (fs::exists(part.replace_extension(".loading"))) files.push_back({dir + ".LDG", readFile(part)});
         }
-        for (DiscFile& m : movies) files.push_back(std::move(m));
+        for (DiscFile& m : movies) {
+            // An .STR is a STREAM entry the player reads sector by sector; .SBS and .SRT are loaded whole.
+            if (archive)
+                entries.push_back({m.path, std::move(m.data), m.mode2, m.mode2});
+            else
+                files.push_back(std::move(m));
+        }
         if (r.exported.errors.empty()) {
             // The length check needs the layout; write, then drop an over-long image.
             r.disc = archive ? writeArchiveImage(entries, exe, discVolume(disc.volume, title), bin, licence, music)

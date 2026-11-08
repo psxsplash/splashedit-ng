@@ -244,10 +244,13 @@ constexpr uint32_t kArchiveTail = 9000;
 
 // A file in an archive disc: `name` its key as the engine asks for it
 // ("scene_0.splashpack"); `stored` keeps it uncompressed (streamed files).
+// `stream`: `data` is whole Mode 2 sectors as loadMovie stores them (8-byte
+// subheader, 2328 bytes), written as a STREAM entry, an .STR movie.
 struct ArchiveFile {
     std::string name;
     std::vector<uint8_t> data;
     bool stored = false;
+    bool stream = false;
 };
 
 // A disc for psxsplash's archive loader (LOADER=archive), laid out as
@@ -255,23 +258,37 @@ struct ArchiveFile {
 // the terminator at 17, path tables at 18-21, the root directory at 22
 // (PSX.EXE and SYSTEM.CNF), then a psyqo-paths archive index ("PSX-ARC1") at
 // kArchiveLba, the entries in `files` order, SYSTEM.CNF, `exe`, and
-// kArchiveTail zero sectors; then the CD-DA `tracks` and the .cue as
+// `tail` zero sectors; then the CD-DA `tracks` and the .cue as
 // writeDiscImage. Each entry's sector offset is its absolute LBA (the index
 // is opened by LBA). An entry is LZ4 (block, HC) compressed and padded at its
 // front to end on a sector, unless it is `stored` or that saves no sector.
-// Throws std::runtime_error when a file is 2 MiB or larger, an entry is over
+// A `stream` entry is its sectors as they are, each with its own subheader,
+// the index entry holding its sector count. Throws std::runtime_error when a
+// stream entry is not whole sectors, a file is 2 MiB or larger, an entry is over
 // 1023 sectors, the LZ4 decompression margin does not fit the header (4096
 // bytes or more), a name repeats, or on a write error.
 DiscInfo writeArchiveImage(const std::vector<ArchiveFile>& files, const std::vector<uint8_t>& exe,
                            const std::string& volume, const std::filesystem::path& bin,
                            const std::vector<LicenceSector>& licence = {},
-                           const std::vector<std::vector<int16_t>>& tracks = {});
+                           const std::vector<std::vector<int16_t>>& tracks = {}, uint32_t tail = kArchiveTail);
+
+// The image psxsplash's archive loader opens over PCdrv when there is no disc.
+inline constexpr const char* kPcdrvImage = "psxsplash.bin";
+// Writes dir/psxsplash.bin from a build's files (dir/scene_<i>.*, from scene
+// 0 up to `scenes` or the first missing scene_<i>.splashpack): an archive
+// image (writeArchiveImage, no executable, no tail) with each kind in the order
+// psxsplash loads them, .geo stored. Written as dir/psxsplash-next.bin and
+// moved over the old image, so the engine never opens half of one. Returns ""
+// or what went wrong.
+std::string writePcdrvImage(const std::filesystem::path& dir, size_t scenes = size_t(-1));
 
 // A bootable disc: SYSTEM.CNF, the engine as PSX.EXE, and each scene's files
 // under SCENE<i>/ as SCENE_<i>.SPK, .VRM, .SPU (and .GEO when it streams),
 // where psxsplash's CD-ROM loader opens them; scene 0 is the one the game
-// starts in and Lua's Scene.Load(i) opens scene i. `engine` must be a
-// LOADER=cdrom build. The volume name is `disc.volume`, or `title` when that
+// starts in and Lua's Scene.Load(i) opens scene i. `engine` is a
+// LOADER=cdrom build; given a psxsplash with the archive loader (its only
+// loader from psxsplash#133 on), this writes exportArchiveDisc's disc
+// instead. The volume name is `disc.volume`, or `title` when that
 // is empty (letters, digits and _ kept, upper-cased, at most 31; PSXSPLASH
 // when nothing is left). `disc.licence` goes into sectors 0-15 (see
 // resolveLicence and writeDiscImage); a licence that cannot be read or has a
@@ -298,10 +315,12 @@ DiscResult exportDisc(const std::vector<const Scene*>& scenes, const std::filesy
                       const std::vector<std::string>& names = {}, const VramSettings& vram = {},
                       const DiscSettings& disc = {});
 // The same disc for psxsplash's archive loader (writeArchiveImage): `engine`
-// must be a LOADER=archive build, and each scene's files go into the archive
+// must be a build with that loader, and each scene's files go into the archive
 // under their PCdrv names (scene_<i>.loading, .vram, .spu, .splashpack, .geo,
-// the order the engine loads them), .geo stored so it can stream. Settings,
-// music, errors and warnings as exportDisc.
+// the order the engine loads them), .geo stored so it can stream. Movies go in
+// under MOVIES/: an .STR as a STREAM entry (its sectors with their
+// subheaders), .SBS and .SRT as files. Settings, music, errors and warnings as
+// exportDisc.
 DiscResult exportArchiveDisc(const std::vector<const Scene*>& scenes, const std::filesystem::path& projectRoot,
                              const std::filesystem::path& engine, const std::filesystem::path& bin,
                              const std::string& title, const std::vector<std::string>& names = {},
