@@ -130,7 +130,9 @@ std::vector<std::string> missingHardwareTools(const PlayTools& tools);
 // one scene, each error and warning starts with its scene's index and, when
 // `names` gives one, its name ("scene 1 (cave): ..."). The stats are scene 0's.
 // Every scene packs VRAM with the project's vram.json (loadVramSettings),
-// as does reloadForPlay.
+// as does reloadForPlay. When every scene exports, the same files also go
+// into dir/psxsplash.bin (splash::writePcdrvImage), which psxsplash's archive loader
+// reads over PCdrv; a PCdrv-loader build from before it reads the files.
 splash::ExportResult exportForPlay(const std::vector<const splash::Scene*>& scenes,
                                    const std::filesystem::path& projectRoot, const std::filesystem::path& dir,
                                    const std::vector<std::string>& names = {});
@@ -174,8 +176,10 @@ std::string buildFailure(const std::string& what, const splash::ExportResult& bu
 // few frames when it existed at boot, and reloads the scene in place when its
 // contents change. writeReloadFlag stores `generation` there; reloadForPlay
 // exports `scene` as scene `index` into dir/next, moves its files over
-// dir/scene_<index>.*, then bumps the flag; the other scenes' files are left
-// as they are. A failed export leaves the running scene's files alone.
+// dir/scene_<index>.*, rewrites dir/psxsplash.bin (splash::writePcdrvImage; the
+// archive loader rereads its index on the flag), then bumps the flag; the
+// other scenes' files are left as they are. A failed export leaves the
+// running scene's files alone.
 bool writeReloadFlag(const std::filesystem::path& dir, unsigned generation);
 splash::ExportResult reloadForPlay(const splash::Scene& scene, const std::filesystem::path& projectRoot,
                                    const std::filesystem::path& dir, unsigned generation, size_t index = 0);

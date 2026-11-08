@@ -128,6 +128,25 @@ that scene's own export, and no `SCENE2`.
 
     python3 disccheck.py <splashpack-cli>
 
+`discmoviecheck.py` puts psxavenc's three STR layouts and a .sbs on a disc and reads them back as a
+drive does: every sector's subheader as it went in, Form 2 sectors kept Form 2 with their EDC, 2048
+bytes a sector in the directory. What is no movie, and a name the disc cannot hold, write no image.
+`discmovielistcheck.py` drives the Disc section's Movies list through the GUI, in a display 1300 tall.
+
+    python3 discmoviecheck.py <splashpack-cli>
+    xvfb-run -a -s "-screen 0 1600x1300x24" python3 discmovielistcheck.py <splashedit>
+
+`archivecheck.py` builds `disc --archive` of the courtyard and a streamed copy with a CD-DA track
+and a stand-in archive engine, then reads it as psxsplash's archive loader does: the root at LBA 22
+lists SYSTEM.CNF and PSX.EXE, the PSX-ARC1 index at 23 is sorted by DJB2 hash with one entry per
+file `build` exports, at absolute LBAs in load order, each LZ4 (decoded in Python) or stored
+byte-equal to the export, `.geo` stored, the header margin covering LZ4's in-place margin, and 9000
+zero sectors closing the data track, a movie as a STREAM entry keeping each sector's subheader and
+its .sbs as a plain entry. `--archive` must refuse a CD-ROM engine; without it, an archive engine
+still gets an archive disc.
+
+    python3 archivecheck.py <splashpack-cli>
+
 `bvhstatscheck.py` exports the courtyard example with `--stats` and reads the
 `bvh nodes=N leaves=L depth=D refs=R` line: nodes and refs must match the splashpack header, refs the
 triangle count, leaves (N + 1) / 2 (every inner node has two children) and the depth at least
@@ -425,7 +444,10 @@ each element with the engine's `resolveLayout` at 320x240: a bar anchored 0..1 m
 and a box anchored to the right edge must end at x 319. It also checks font indices, line endpoints
 past 255, the font sheets in the .vram file (in the x = 960 column, one page each, clear of the
 system font, row 0 blank) and that an unknown font, 4 fonts, a repeated font name or 25 canvases
-fail the export.
+fail the export. Element flags: every element of the scene exports visible and opaque (0x01); with
+blends set, a box, bar or line carries the code in bits 1-3 (Subtract box 0x07, AddQuarter bar 0x09,
+hidden Add line 0x04, Half box 0x03) while an image or text with a blend in the scene still exports
+0x01, and an unknown blend name fails the export.
 
     python3 uicheck.py <splashpack-cli>
 
@@ -434,8 +456,10 @@ the glyph sheet export builds and prints its cell size and VRAM cost.
 
 `ui/ui.scene` booted with `boot/boot.sh` at frame 300 shows both Inter fonts, the system font, the
 progress bar, the image, a line ending at x 311 and the full-width bar, at the positions above.
-That frame is kept as `ui/ui-runtime.png` (psxsplash 669fb6b): `editor_tests` renders the scene
-with the UI tab's preview and requires the same pixels in 15-bit colour.
+That frame is kept as `ui/ui-runtime.png` (psxsplash 669fb6b; the image 'crate', 248..311 x
+80..143, from the same boot of psxsplash 4374c86, which draws 1:1 images one texel per pixel,
+psxsplash#135): `editor_tests` renders the scene with the UI tab's preview and requires the same
+pixels in 15-bit colour.
 
 `uicanvascheck.py` drives the UI tab (the canvas editor) on a copy of `ui/ui.scene`, started with
 `--ui`, which opens the tab and prints where the canvas and the element list are. It drags an
@@ -495,6 +519,15 @@ shows nothing and answers `<file>` at once, printing `file dialog: <kind> picked
 
     python3 uiinspectorcheck.py <splashedit>
 
+`fieldarrowcheck.py` checks Up and Down in a number field being typed into (#158), on the same
+copy of `ui/ui.scene` with `--ui`: Up and Down step the typed value (one for a whole-number field)
+and stay in the field instead of moving the keyboard focus; Tab still moves on to the next field,
+typing into a field Tab reached still replaces its value, and Escape still cancels. It double-clicks
+`@ui.posa`, Tabs and presses keys, saves with Ctrl+S and reads the `title` element's rect. Needs a
+display.
+
+    python3 fieldarrowcheck.py <splashedit>
+
 `uispriteguicheck.py` drives the Image inspector's Sheet row on a project holding `sprite/`'s two
 sheets and a canvas with one plain image: selected on the canvas, its Sheet menu (`ui.sheet`, items
 `ui.sheet/None`, `ui.sheet/<sheet>`) picks `hero`, the cell picker drawn over the sheet's texture
@@ -505,6 +538,17 @@ the canvas at 100% must show hero's cell 6 there, one Ctrl+Z takes back Snap siz
 cell, and None saves a plain image without the keys.
 
     python3 uispriteguicheck.py <splashedit>
+
+`uiblendcheck.py` drives the element inspector's Blend row on a canvas of five opaque stripes with
+one grey box per row across them and the checkerboard: on a Box the menu (`ui.blend`, items
+`ui.blend/Opaque`, `ui.blend/50% (half)`, `ui.blend/Add`, `ui.blend/Subtract`, `ui.blend/Add 25%`)
+must save `"blend": "subtract"`, one Ctrl+Z must take back one pick and undo to Opaque must leave no
+`blend` key; on a Text element the row must be there but open no menu and save nothing. With a box
+per mode, the canvas preview over the white stripe must be the GPU's 5-bit blend of grey and white
+(Half 189, Add and Add 25% white, Subtract 123). With a directory, the last screenshot is saved there
+as `se-uiblend-canvas.png`.
+
+    python3 uiblendcheck.py <splashedit> [screenshot-dir]
 
 `uifontscheck.py` drives the canvas inspector's Scene fonts section on the same copy of
 `ui/ui.scene`. With `--ui` the editor prints each font as `uicanvas: fonts: <i> <name> ttf <source>
@@ -670,6 +714,14 @@ write no `memCard`, and one Ctrl+Z must take the title back and leave saves on. 
 sections above and clicks the controls by name (`--click @s_render`, `@scene.mcenable`). Needs a display.
 
     python3 memcardeditcheck.py <splashedit>
+
+`memcardiconcheck.py` drags a 16x16 PNG from the Project panel onto the memory card Icon in the
+scene inspector (#160): dropped on Add it becomes a new frame, on a frame it replaces it, and a
+scene dropped there is refused ("That field does not take ..."). It scrolls to the Icon row with
+`--scroll-to @scene.mcicon.add` / `@scene.mcicon.0`, reads where it is drawn, drags there in a
+second run and reads `settings.memCard.icons` back from the saved scene. Needs a display.
+
+    python3 memcardiconcheck.py <splashedit>
 
 `spritesheetcheck.py` drives the scene inspector's Sprite sheets section (its last) on copies of the
 courtyard example with `sprite/hero.png` added to its textures: Add sheet picks the image and makes

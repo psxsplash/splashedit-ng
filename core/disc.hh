@@ -106,13 +106,19 @@ std::pair<std::string, std::string> licenceText(const std::vector<LicenceSector>
 // a "tracks" entry that is not a string is skipped. "bootLogo": false = the
 // disc boots the psxsplash build without the boot logo (the editor picks
 // psxsplash-cdrom-nologo); missing or not a bool reads as true, and it is
-// written only when false. writeDiscSettings returns false when the file
-// cannot be written.
+// written only when false. `movies` are STR files (loadMovie) in the same form
+// as tracks, written only when there are any: Movie.Play("INTRO") plays
+// intro.str. "singleSpeed": true = psxsplash reads the whole disc at single
+// speed, for burned discs (a console's laser can read a CD-R perfectly at single
+// and badly at double); written only when true. writeDiscSettings returns false
+// when the file cannot be written.
 struct DiscSettings {
     std::string volume;
     std::string licence;
     std::vector<std::string> tracks;
+    std::vector<std::string> movies;
     bool bootLogo = true;
+    bool singleSpeed = false;
 };
 DiscSettings readDiscSettings(const std::filesystem::path& file);
 bool writeDiscSettings(const std::filesystem::path& file, const DiscSettings& s);
@@ -131,11 +137,51 @@ std::vector<LicenceSector> resolveLicence(const std::string& licence, const std:
                                           std::string& error);
 
 // A file on the disc. `path` is "NAME.EXT" or "DIR/NAME.EXT", upper case, no
-// ";1": the writer adds the version.
+// ";1": the writer adds the version. With `mode2`, `data` is whole Mode 2
+// sectors of kMode2Sector bytes, a subheader then its payload, as a movie has to
+// be for its XA audio to reach the drive: each sector is written with the
+// subheader it came with (its EDC and ECC computed here) and the directory gives
+// the file's size as 2048 bytes a sector, as mkpsxiso does.
 struct DiscFile {
     std::string path;
     std::vector<uint8_t> data;
+    bool mode2 = false;
 };
+
+constexpr size_t kMode2Sector = 2336;
+
+// `file` (made with psxavenc) as MOVIES/<STEM>.STR, in any of its layouts: -t str
+// (2336-byte sectors), -t strcd (2352, the sync and header dropped) or -t strv
+// (2048, video only, given Form 1 subheaders). A .sbs (psxavenc -t sbs) goes as
+// plain data, MOVIES/<STEM>.SBS, for Movie.PlayOn. The stem is upper-cased. Throws
+// std::runtime_error when the file is none of these or has no video sector. A .srt goes as plain data too,
+// MOVIES/<STEM>.SRT: the player shows it over the movie of the same name.
+DiscFile loadMovie(const std::filesystem::path& file);
+
+// What a movie file is, for a list, from its start alone: a long movie is not
+// read to draw a row. `ok` when loadMovie would take it by the look of it;
+// `sbs` when it is frames for Movie.PlayOn, whose size only the mesh it plays on
+// says. `sectors` are its sectors on the disc, 150 a second at double speed. For a .srt (`srt`), read whole as the
+// player reads it: the subtitles it shows, and by their number in the file the ones it leaves out (no time line
+// "00:00:01,500 --> 00:00:04,000" and text) and the ones wider than the screen's two rows of 40 characters.
+struct MovieInfo {
+    bool ok = false;
+    bool sbs = false;
+    bool srt = false;
+    uint32_t subtitles = 0;
+    std::vector<uint32_t> leftOut, wide;
+    bool audio = false;
+    uint32_t width = 0;
+    uint32_t height = 0;
+    uint32_t sectors = 0;
+};
+MovieInfo movieInfo(const std::filesystem::path& file);
+
+// A .str, .sbs or .srt file, whatever its case.
+bool isMovieFile(const std::filesystem::path& file);
+// Whether the file's stem can be a name on the disc and in Movie.Play: A-Z, 0-9
+// and _ once upper-cased, 8 characters at most.
+bool movieNameFits(const std::filesystem::path& file);
 
 // A CD-DA track as written: `start` is its INDEX 01 LBA (after its 150-sector
 // pregap), `sectors` its PCM sectors (the pregap not counted).
@@ -186,18 +232,72 @@ DiscInfo writeDiscImage(const std::vector<DiscFile>& files, const std::string& v
 // its .cue. Throws as writeDiscImage.
 DiscInfo writeLicenceImage(const std::vector<LicenceSector>& licence, const std::filesystem::path& bin);
 
+// psyqo-paths' archive key for a file name: 64-bit DJB2 (h = h * 33 ^ c from
+// 5381), as psyqo's djb::hash<uint64_t>.
+uint64_t archiveHash(const std::string& name);
+
+// The archive index sits here; psxsplash's archive loader reads it by LBA.
+constexpr uint32_t kArchiveLba = 23;
+// Zero sectors after the data, as PCSX-Redux's authoring writes: a drive
+// seeking near the end of the data overshoots past it.
+constexpr uint32_t kArchiveTail = 9000;
+
+// A file in an archive disc: `name` its key as the engine asks for it
+// ("scene_0.splashpack"); `stored` keeps it uncompressed (streamed files).
+// `stream`: `data` is whole Mode 2 sectors as loadMovie stores them (8-byte
+// subheader, 2328 bytes), written as a STREAM entry, an .STR movie.
+struct ArchiveFile {
+    std::string name;
+    std::vector<uint8_t> data;
+    bool stored = false;
+    bool stream = false;
+};
+
+// A disc for psxsplash's archive loader (LOADER=archive), laid out as
+// PCSX-Redux's authoring does: the licence (as writeDiscImage), the PVD at 16,
+// the terminator at 17, path tables at 18-21, the root directory at 22
+// (PSX.EXE and SYSTEM.CNF), then a psyqo-paths archive index ("PSX-ARC1") at
+// kArchiveLba, the entries in `files` order, SYSTEM.CNF, `exe`, and
+// `tail` zero sectors; then the CD-DA `tracks` and the .cue as
+// writeDiscImage. Each entry's sector offset is its absolute LBA (the index
+// is opened by LBA). An entry is LZ4 (block, HC) compressed and padded at its
+// front to end on a sector, unless it is `stored` or that saves no sector.
+// A `stream` entry is its sectors as they are, each with its own subheader,
+// the index entry holding its sector count. Throws std::runtime_error when a
+// stream entry is not whole sectors, a file is 2 MiB or larger, an entry is over
+// 1023 sectors, the LZ4 decompression margin does not fit the header (4096
+// bytes or more), a name repeats, or on a write error.
+DiscInfo writeArchiveImage(const std::vector<ArchiveFile>& files, const std::vector<uint8_t>& exe,
+                           const std::string& volume, const std::filesystem::path& bin,
+                           const std::vector<LicenceSector>& licence = {},
+                           const std::vector<std::vector<int16_t>>& tracks = {}, uint32_t tail = kArchiveTail);
+
+// The image psxsplash's archive loader opens over PCdrv when there is no disc.
+inline constexpr const char* kPcdrvImage = "psxsplash.bin";
+// Writes dir/psxsplash.bin from a build's files (dir/scene_<i>.*, from scene
+// 0 up to `scenes` or the first missing scene_<i>.splashpack): an archive
+// image (writeArchiveImage, no executable, no tail) with each kind in the order
+// psxsplash loads them, .geo stored. Written as dir/psxsplash-next.bin and
+// moved over the old image, so the engine never opens half of one. Returns ""
+// or what went wrong.
+std::string writePcdrvImage(const std::filesystem::path& dir, size_t scenes = size_t(-1));
+
 // A bootable disc: SYSTEM.CNF, the engine as PSX.EXE, and each scene's files
 // under SCENE<i>/ as SCENE_<i>.SPK, .VRM, .SPU (and .GEO when it streams),
 // where psxsplash's CD-ROM loader opens them; scene 0 is the one the game
-// starts in and Lua's Scene.Load(i) opens scene i. `engine` must be a
-// LOADER=cdrom build. The volume name is `disc.volume`, or `title` when that
+// starts in and Lua's Scene.Load(i) opens scene i. `engine` is a
+// LOADER=cdrom build; given a psxsplash with the archive loader (its only
+// loader from psxsplash#133 on), this writes exportArchiveDisc's disc
+// instead. The volume name is `disc.volume`, or `title` when that
 // is empty (letters, digits and _ kept, upper-cased, at most 31; PSXSPLASH
 // when nothing is left). `disc.licence` goes into sectors 0-15 (see
 // resolveLicence and writeDiscImage); a licence that cannot be read or has a
 // bad size is an error. `disc.tracks` become CD-DA tracks 2 and up (paths
 // relative to `projectRoot`, decoded with loadCdAudio); one that is missing
 // or cannot be decoded is the error "music track <N>: <why>" (N its disc
-// track number, 2 for the first). A disc longer than 74 minutes (333000
+// track number, 2 for the first). `disc.movies` go under MOVIES/ (see
+// loadMovie); one that is missing or is not a movie is the error
+// "movie <file>: <why>". A disc longer than 74 minutes (333000
 // sectors) is a warning naming its length in minutes; longer than 80
 // (360000) is an error and no image is written. Errors land in the result;
 // with more than one scene,
@@ -214,6 +314,17 @@ DiscResult exportDisc(const std::vector<const Scene*>& scenes, const std::filesy
                       const std::filesystem::path& engine, const std::filesystem::path& bin, const std::string& title,
                       const std::vector<std::string>& names = {}, const VramSettings& vram = {},
                       const DiscSettings& disc = {});
+// The same disc for psxsplash's archive loader (writeArchiveImage): `engine`
+// must be a build with that loader, and each scene's files go into the archive
+// under their PCdrv names (scene_<i>.loading, .vram, .spu, .splashpack, .geo,
+// the order the engine loads them), .geo stored so it can stream. Movies go in
+// under MOVIES/: an .STR as a STREAM entry (its sectors with their
+// subheaders), .SBS and .SRT as files. Settings, music, errors and warnings as
+// exportDisc.
+DiscResult exportArchiveDisc(const std::vector<const Scene*>& scenes, const std::filesystem::path& projectRoot,
+                             const std::filesystem::path& engine, const std::filesystem::path& bin,
+                             const std::string& title, const std::vector<std::string>& names = {},
+                             const VramSettings& vram = {}, const DiscSettings& disc = {});
 // The same for one scene, as scene 0.
 DiscResult exportDisc(const Scene& scene, const std::filesystem::path& projectRoot, const std::filesystem::path& engine,
                       const std::filesystem::path& bin, const std::string& title, const VramSettings& vram = {},
@@ -224,8 +335,9 @@ DiscResult exportDisc(const Scene& scene, const std::filesystem::path& projectRo
 // nothing when the build has one scene.
 std::string sceneTag(size_t index, size_t count, const std::string& name);
 
-// What the engine file is: a CD-ROM build, a PCdrv build, or not a PS-X EXE.
-enum class EngineKind { NotExe, Cdrom, Pcdrv };
+// What the engine file is: a CD-ROM build, a PCdrv build, an archive build
+// (it prints "FileLoader: archive of"), or not a PS-X EXE.
+enum class EngineKind { NotExe, Cdrom, Pcdrv, Archive };
 EngineKind engineKind(const std::vector<uint8_t>& exe);
 
 }  // namespace splash

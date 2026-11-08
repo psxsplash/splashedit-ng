@@ -56,7 +56,7 @@ size_t utf16Units(const std::string& s) {
 
 bool sameElement(const UIElement& a, const UIElement& b) {
     return a.type == b.type && a.name == b.name && a.visible == b.visible && a.rect == b.rect && a.anchorMin == b.anchorMin &&
-           a.anchorMax == b.anchorMax && a.color == b.color && a.text == b.text && a.font == b.font && a.textKey == b.textKey && a.from == b.from &&
+           a.anchorMax == b.anchorMax && a.color == b.color && a.blend == b.blend && a.text == b.text && a.font == b.font && a.textKey == b.textKey && a.from == b.from &&
            a.to == b.to && a.background == b.background && a.value == b.value && a.texture == b.texture &&
            a.bitDepth == b.bitDepth && a.cutout == b.cutout && a.sheet == b.sheet && a.cell == b.cell && a.unknown == b.unknown;
 }
@@ -122,7 +122,7 @@ void commit(Document& doc, std::vector<UICanvas> after, Document::UiSelection se
 bool sameFont(const splash::UIFont& a, const splash::UIFont& b) {
     return a.name == b.name && a.source == b.source && a.size == b.size && a.bitmap == b.bitmap && a.glyphWidth == b.glyphWidth &&
            a.glyphHeight == b.glyphHeight && a.monospace == b.monospace && a.gap == b.gap && a.advances == b.advances &&
-           a.extra == b.extra;
+           a.greyLevels == b.greyLevels && a.extra == b.extra;
 }
 
 bool validCanvas(const Document& doc, int c) { return c >= 0 && c < int(doc.scene().canvases.size()); }
@@ -572,13 +572,6 @@ int duplicateElement(Document& doc, int c, int e) {
     std::string base;
     splitNumbered(copy.name, &base);
     copy.name = uniqueElementName(cv, base);
-    if (copy.type == UIElementType::Line) {
-        copy.from = {copy.from[0] + 8, copy.from[1] + 8};
-        copy.to = {copy.to[0] + 8, copy.to[1] + 8};
-    } else {
-        copy.rect[0] += 8;
-        copy.rect[1] += 8;
-    }
     cv.elements.insert(cv.elements.begin() + e + 1, std::move(copy));
     commit(doc, std::move(after), {c, e + 1});
     return e + 1;
@@ -623,13 +616,6 @@ int duplicateElements(Document& doc, int c, const std::vector<int>& idx) {
         std::string base;
         splitNumbered(copy.name, &base);
         copy.name = uniqueElementName(cv, base);
-        if (copy.type == UIElementType::Line) {
-            copy.from = {copy.from[0] + 8, copy.from[1] + 8};
-            copy.to = {copy.to[0] + 8, copy.to[1] + 8};
-        } else {
-            copy.rect[0] += 8;
-            copy.rect[1] += 8;
-        }
         cv.elements.insert(cv.elements.begin() + at + 1, std::move(copy));
         copies.push_back(at + 1);
     }
@@ -726,34 +712,33 @@ int pasteElements(Document& doc, int c, int after, const std::string& text, Scre
         return std::any_of(cv.elements.begin(), cv.elements.end(),
                            [&](const UIElement& o) { return o.type == e.type && o.unknown.empty() && spot(o) == r; });
     };
+    auto shifted = [&](UIElement e, int dx, int dy) {
+        if (!e.unknown.empty()) return e;
+        if (e.type == UIElementType::Line) {
+            e.from = {e.from[0] + dx, e.from[1] + dy};
+            e.to = {e.to[0] + dx, e.to[1] + dy};
+        } else {
+            const Rect r = layout(e, s);
+            place(e, Rect{r.x + dx, r.y + dy, r.w, r.h}, s);
+        }
+        return e;
+    };
     int dx = 0, dy = 0;
     if (where) {
         if (const std::optional<Rect> b = clipboardBounds(text, s)) dx = (*where)[0] - b->x, dy = (*where)[1] - b->y;
+    } else {
+        // The whole group steps together, and only the elements the canvas
+        // held before this paste count, so a group keeps its own layout.
+        for (int d = 0; d <= 8 * 64; d += 8) {
+            dx = dy = d;
+            if (std::none_of(pasted->begin(), pasted->end(), [&](const UIElement& e) {
+                    return e.unknown.empty() && taken(shifted(e, d, d));
+                }))
+                break;
+        }
     }
     for (UIElement& e : *pasted) {
-        if (where) {
-            if (e.unknown.empty()) {
-                if (e.type == UIElementType::Line) {
-                    e.from = {e.from[0] + dx, e.from[1] + dy};
-                    e.to = {e.to[0] + dx, e.to[1] + dy};
-                } else {
-                    const Rect r = layout(e, s);
-                    place(e, Rect{r.x + dx, r.y + dy, r.w, r.h}, s);
-                }
-            }
-        } else if (e.unknown.empty()) {
-            const Rect home = layout(e, s);
-            const std::array<int, 2> from = e.from, to = e.to;
-            for (int k = 0; k < 64 && taken(e); k++) {
-                const int d = 8 * (k + 1);
-                if (e.type == UIElementType::Line) {
-                    e.from = {from[0] + d, from[1] + d};
-                    e.to = {to[0] + d, to[1] + d};
-                } else {
-                    place(e, Rect{home.x + d, home.y + d, home.w, home.h}, s);
-                }
-            }
-        }
+        e = shifted(std::move(e), dx, dy);
         std::string base;
         splitNumbered(e.name, &base);
         if (std::any_of(cv.elements.begin(), cv.elements.end(), [&](const UIElement& o) { return o.name == e.name; }))
@@ -1210,7 +1195,8 @@ const splash::FontSheet* Assets::font(const splash::Scene& scene, const std::str
         return nullptr;
     }
     std::string key = def->source + "|" + std::to_string(def->size) + "|" + def->bitmap + "|" + std::to_string(def->glyphWidth) +
-                      "x" + std::to_string(def->glyphHeight) + (def->monospace ? "|m" : "|g" + std::to_string(def->gap));
+                      "x" + std::to_string(def->glyphHeight) + (def->monospace ? "|m" : "|g" + std::to_string(def->gap)) +
+                      (def->greyLevels ? "|grey" : "");
     for (int a : def->advances) key += "," + std::to_string(a);
     std::unique_ptr<Font>& slot = m_fonts[name];
     if (!slot || slot->key != key) {
@@ -1235,14 +1221,58 @@ namespace {
 
 uint8_t glyphChar(unsigned char c) { return (c < 32 || c > 127) ? uint8_t('?') : uint8_t(c); }
 
+// One channel of a blend, B behind and F the element, clamped to 0..max: the
+// math of psxsplash's uiblend::blendChannel (max 31 there, 5-bit channels).
+int blendChannel(splash::UIBlend b, int back, int front, int max) {
+    int r = front;
+    switch (b) {
+        case splash::UIBlend::Opaque: r = front; break;
+        case splash::UIBlend::Half: r = (back + front) / 2; break;
+        case splash::UIBlend::Add: r = back + front; break;
+        case splash::UIBlend::Subtract: r = back - front; break;
+        case splash::UIBlend::AddQuarter: r = back + front / 4; break;
+    }
+    return std::clamp(r, 0, max);
+}
+
+// An 8-bit channel as the GPU's 5-bit one shows: c5 widened to 8 bits.
+uint32_t widen5(int c5) { return uint32_t((c5 << 3) | (c5 >> 2)); }
+
 struct Frame {
     Screen s;
     std::vector<uint16_t> px;  // 15-bit colour
+    // 0 = nothing drew; 1 = px holds what did; 2 = a blend over the backdrop,
+    // whose colour (8 bits a channel, 0xAABBGGRR) is in `over`.
     std::vector<uint8_t> cov;
+    std::vector<uint32_t> over;
+    // What is behind the pixels nothing drew, for blends: `backdrop` (one
+    // 0xAABBGGRR pixel each) or, without one, `background`.
+    const std::vector<uint32_t>* backdrop = nullptr;
+    uint32_t background = 0;
+    // The blend put() draws with: the element's, for one that can blend.
+    splash::UIBlend blend = splash::UIBlend::Opaque;
     void put(int x, int y, uint16_t c) {
         if (x < 0 || y < 0 || x >= s.w || y >= s.h) return;
-        px[size_t(y) * size_t(s.w) + size_t(x)] = c;
-        cov[size_t(y) * size_t(s.w) + size_t(x)] = 1;
+        const size_t i = size_t(y) * size_t(s.w) + size_t(x);
+        if (blend == splash::UIBlend::Opaque) {
+            px[i] = c;
+            cov[i] = 1;
+        } else if (cov[i] == 1) {
+            // Over something drawn: the GPU's own 5-bit blend, exactly.
+            int ch[3];
+            for (int k = 0; k < 3; k++) ch[k] = blendChannel(blend, (px[i] >> (5 * k)) & 31, (c >> (5 * k)) & 31, 31);
+            px[i] = uint16_t(ch[0] | (ch[1] << 5) | (ch[2] << 10));
+        } else {
+            // Over the backdrop the editor shows (not a PS1 frame): the same
+            // math on 8-bit channels, the element's colour widened from 5 bits.
+            if (over.empty()) over.assign(px.size(), 0);
+            const uint32_t b = cov[i] == 2 ? over[i] : backdrop && i < backdrop->size() ? (*backdrop)[i] : background;
+            uint32_t out = 0xff000000u;
+            for (int k = 0; k < 3; k++)
+                out |= uint32_t(blendChannel(blend, int((b >> (8 * k)) & 0xff), int(widen5((c >> (5 * k)) & 31)), 255)) << (8 * k);
+            over[i] = out;
+            cov[i] = 2;
+        }
     }
     void fill(int x, int y, int w, int h, uint16_t c) {
         const int x0 = std::max(0, x), y0 = std::max(0, y), x1 = std::min(s.w, x + w), y1 = std::min(s.h, y + h);
@@ -1287,7 +1317,8 @@ void drawSystemText(Frame& f, int x, int y, const std::string& text, uint16_t co
     }
 }
 
-void drawFontText(Frame& f, int x, int y, const std::string& text, const splash::FontSheet& sh, uint16_t col) {
+// Each texel is its palette entry tinted by the text colour, as the GPU draws it.
+void drawFontText(Frame& f, int x, int y, const std::string& text, const splash::FontSheet& sh, const std::array<float, 3>& color) {
     const int perRow = 256 / std::max(1, sh.glyphWidth);
     for (unsigned char raw : truncateBytes(text, kTextMax)) {
         const uint8_t ch = glyphChar(raw);
@@ -1299,7 +1330,9 @@ void drawFontText(Frame& f, int x, int y, const std::string& text, const splash:
             for (int gy = 0; gy < sh.glyphHeight; gy++)
                 for (int gx = 0; gx < w; gx++) {
                     const int tx = u + gx, ty = v + gy;
-                    if (tx < 256 && ty < sh.height && sh.texels[size_t(ty) * 256 + size_t(tx)]) f.put(x + gx, y + gy, col);
+                    if (tx >= 256 || ty >= sh.height) continue;
+                    const uint8_t t = sh.texels[size_t(ty) * 256 + size_t(tx)];
+                    if (t) f.put(x + gx, y + gy, tint(sh.clut[t & 15], color));
                 }
         }
         x += adv;
@@ -1376,8 +1409,11 @@ std::vector<uint32_t> renderSample(const splash::Scene& scene, Assets& assets, c
 }
 
 std::vector<uint32_t> render(const splash::Scene& scene, const std::vector<bool>& show, Screen s, Assets& assets,
-                             uint32_t background, std::vector<uint8_t>* covered, int* tilemapTiles) {
-    Frame f{s, std::vector<uint16_t>(size_t(s.w) * size_t(s.h), 0), std::vector<uint8_t>(size_t(s.w) * size_t(s.h), 0)};
+                             uint32_t background, std::vector<uint8_t>* covered, int* tilemapTiles,
+                             const std::vector<uint32_t>* backdrop) {
+    Frame f{s, std::vector<uint16_t>(size_t(s.w) * size_t(s.h), 0), std::vector<uint8_t>(size_t(s.w) * size_t(s.h), 0), {}};
+    f.backdrop = backdrop;
+    f.background = background;
     // The renderer draws the tiles, then sprites, then the UI: the map is under every canvas.
     if (tilemapTiles) *tilemapTiles = drawTilemap(f, scene, assets);
     std::vector<int> order;
@@ -1395,6 +1431,8 @@ std::vector<uint32_t> render(const splash::Scene& scene, const std::vector<bool>
         for (const UIElement& e : scene.canvases[size_t(c)].elements) {
             if (!e.visible || !e.unknown.empty()) continue;
             const Rect r = drawn(e, s);
+            // Boxes, bars and lines draw with their blend; images and text opaque.
+            f.blend = splash::blendable(e.type) ? e.blend : splash::UIBlend::Opaque;
             switch (e.type) {
                 case UIElementType::Box: f.fill(r.x, r.y, r.w, r.h, flat(e.color)); break;
                 case UIElementType::Progress: {
@@ -1424,11 +1462,24 @@ std::vector<uint32_t> render(const splash::Scene& scene, const std::vector<bool>
                         tw = sh->cellW;
                         th = sh->cellH;
                     }
-                    // UVs run 0..size-1 across the rect, as the export writes them;
-                    // the rasteriser leaves out the last column and row.
+                    if (r.w <= 0 || r.h <= 0) break;
+                    // The texel each column (row) shows, as psxsplash#135 draws it.
+                    // At 1:1 a sprite: one texel per pixel. Scaled, two triangles
+                    // whose UVs run from the first texel to one past the last below
+                    // 2x, to the last itself from 2x up; the GPU interpolates them
+                    // across the n pixels and rounds to nearest, a half up
+                    // (core/gpu_raster's lerp), which is the identity at 1:1 too.
+                    // Not modelled: an atlas UV of 255 keeps the inclusive end.
+                    auto texels = [](int size, int n) {
+                        std::vector<int> out(size_t(n), 0);
+                        const int64_t span = n < 2 * size ? size : size - 1;
+                        for (int i = 0; i < n; i++) out[size_t(i)] = std::min(size - 1, int((2 * i * span + n) / (2 * n)));
+                        return out;
+                    };
+                    const std::vector<int> us = texels(tw, r.w), vs = texels(th, r.h);
                     for (int y = 0; y < r.h; y++)
                         for (int x = 0; x < r.w; x++) {
-                            const int u = u0 + int(int64_t(x) * (tw - 1) / r.w), v = v0 + int(int64_t(y) * (th - 1) / r.h);
+                            const int u = u0 + us[size_t(x)], v = v0 + vs[size_t(y)];
                             const uint16_t w = t.words[size_t(v) * size_t(t.width) + size_t(u)];
                             if (w) f.put(r.x + x, r.y + y, tint(w, e.color));
                         }
@@ -1439,7 +1490,7 @@ std::vector<uint32_t> render(const splash::Scene& scene, const std::vector<bool>
                     if (font.empty()) {
                         systemText.push_back({r.x, r.y, flat(e.color), &e.text});
                     } else if (const splash::FontSheet* sh = assets.font(scene, font)) {
-                        drawFontText(f, r.x, r.y, e.text, *sh, tint(0x7fff, e.color));
+                        drawFontText(f, r.x, r.y, e.text, *sh, e.color);
                     }
                     break;
                 }
@@ -1447,14 +1498,19 @@ std::vector<uint32_t> render(const splash::Scene& scene, const std::vector<bool>
         }
     // System-font text goes out after the ordering table, queued from the
     // front-most element back, so the back-most one ends up on top.
+    f.blend = splash::UIBlend::Opaque;
     for (auto it = systemText.rbegin(); it != systemText.rend(); ++it) drawSystemText(f, it->x, it->y, *it->text, it->col);
 
     std::vector<uint32_t> out(f.px.size(), background);
     for (size_t i = 0; i < f.px.size(); i++) {
         if (!f.cov[i]) continue;
-        auto ex = [](int c5) { return uint32_t((c5 << 3) | (c5 >> 2)); };
+        if (f.cov[i] == 2) {
+            out[i] = f.over[i];
+            f.cov[i] = 1;
+            continue;
+        }
         const uint16_t w = f.px[i];
-        out[i] = 0xff000000u | (ex((w >> 10) & 31) << 16) | (ex((w >> 5) & 31) << 8) | ex(w & 31);
+        out[i] = 0xff000000u | (widen5((w >> 10) & 31) << 16) | (widen5((w >> 5) & 31) << 8) | widen5(w & 31);
     }
     if (covered) *covered = std::move(f.cov);
     return out;

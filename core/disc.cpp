@@ -13,6 +13,8 @@
 #include <stdexcept>
 #include <system_error>
 
+#include <lz4.h>
+#include <lz4hc.h>
 #include <nlohmann/json.hpp>
 
 namespace fs = std::filesystem;
@@ -24,6 +26,8 @@ namespace {
 constexpr size_t kSector = 2048;
 constexpr uint32_t kFirstFree = 18;  // after the system area, the PVD and the terminator
 constexpr uint32_t kTrailingGap = 150;
+// What the BIOS reads to boot the disc: PSX.EXE in the root.
+constexpr const char* kSystemCnf = "BOOT = cdrom:\\PSX.EXE;1\r\nTCB = 4\r\nEVENT = 10\r\nSTACK = 801FFF00\r\n";
 
 struct Tables {
     uint8_t eccF[256], eccB[256];
@@ -227,17 +231,19 @@ void encodeForm1(uint8_t* out, uint32_t lba, const uint8_t* data, uint8_t submod
 
 namespace {
 
-// A licence sector at `lba`, its subheader as the file has it.
-void encodeLicence(uint8_t* out, uint32_t lba, const LicenceSector& s) {
-    mode2Header(out, lba, s.sub);
-    if (s.sub[2] & 0x20) {
-        std::memcpy(out + 24, s.data, kForm2Data);
+// A sector at `lba` with the subheader it came with: Form 2 when sub[2] & 0x20.
+void encodeSubheader(uint8_t* out, uint32_t lba, const uint8_t* sub, const uint8_t* data) {
+    mode2Header(out, lba, sub);
+    if (sub[2] & 0x20) {
+        std::memcpy(out + 24, data, kForm2Data);
         le32(out + 24 + kForm2Data, edc(out + 16, 8 + kForm2Data));
     } else {
-        std::memcpy(out + 24, s.data, kSector);
+        std::memcpy(out + 24, data, kSector);
         finishForm1(out);
     }
 }
+
+void encodeLicence(uint8_t* out, uint32_t lba, const LicenceSector& s) { encodeSubheader(out, lba, s.sub, s.data); }
 
 const uint8_t kPsxsplashLicence[] = {
 #include "licence_psxsplash.inc"
@@ -447,8 +453,14 @@ DiscSettings readDiscSettings(const fs::path& file) {
     if (tr != j.end() && tr->is_array())
         for (const auto& t : *tr)
             if (t.is_string()) s.tracks.push_back(t.get<std::string>());
+    auto mv = j.find("movies");
+    if (mv != j.end() && mv->is_array())
+        for (const auto& m : *mv)
+            if (m.is_string()) s.movies.push_back(m.get<std::string>());
     auto logo = j.find("bootLogo");
     if (logo != j.end() && logo->is_boolean()) s.bootLogo = logo->get<bool>();
+    auto speed = j.find("singleSpeed");
+    if (speed != j.end() && speed->is_boolean()) s.singleSpeed = speed->get<bool>();
     return s;
 }
 
@@ -458,7 +470,9 @@ bool writeDiscSettings(const fs::path& file, const DiscSettings& s) {
     j["volume"] = s.volume;
     j["licence"] = s.licence;
     if (!s.tracks.empty()) j["tracks"] = s.tracks;  // written only when there is music
+    if (!s.movies.empty()) j["movies"] = s.movies;  // and when there are movies
     if (!s.bootLogo) j["bootLogo"] = false;  // written only when it is off
+    if (s.singleSpeed) j["singleSpeed"] = true;  // and this only when it is on
     std::ofstream out(file, std::ios::binary | std::ios::trunc);
     if (!out) return false;
     out << j.dump(2) << '\n';
@@ -511,12 +525,184 @@ std::string cueTime(uint32_t lba) {
     return b;
 }
 
+namespace {
+
+// Recording date, in the 7-byte directory form and the 17-byte PVD form.
+struct DiscDate {
+    uint8_t d7[7];
+    char d17[17];
+};
+DiscDate discDate() {
+    std::time_t now = std::time(nullptr);
+    std::tm tm{};
+#ifdef _WIN32
+    gmtime_s(&tm, &now);
+#else
+    gmtime_r(&now, &tm);
+#endif
+    DiscDate d{{uint8_t(tm.tm_year), uint8_t(tm.tm_mon + 1), uint8_t(tm.tm_mday), uint8_t(tm.tm_hour),
+                uint8_t(tm.tm_min), uint8_t(tm.tm_sec), 0},
+               {}};
+    char b[40];
+    std::snprintf(b, sizeof b, "%04d%02d%02d%02d%02d%02d00", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour,
+                  tm.tm_min, tm.tm_sec);
+    std::memcpy(d.d17, b, 16);
+    d.d17[16] = 0;
+    return d;
+}
+
+// The primary volume descriptor. `lOpt`/`mOpt` 0 = no optional path table.
+std::array<uint8_t, kSector> makePvd(const std::string& volume, uint32_t total, uint32_t pathTableSize, uint32_t lTable,
+                                     uint32_t lOpt, uint32_t mTable, uint32_t mOpt, uint32_t rootLba,
+                                     uint32_t rootBytes, const DiscDate& date) {
+    const char noDate[17] = {'0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', 0};
+    std::array<uint8_t, kSector> pvd{};
+    pvd[0] = 1;
+    std::memcpy(&pvd[1], "CD001", 5);
+    pvd[6] = 1;
+    padded(&pvd[8], 32, "PLAYSTATION");
+    padded(&pvd[40], 32, volume);
+    both32(&pvd[80], total);
+    both16(&pvd[120], 1);
+    both16(&pvd[124], 1);
+    both16(&pvd[128], kSector);
+    both32(&pvd[132], pathTableSize);
+    le32(&pvd[140], lTable);
+    le32(&pvd[144], lOpt);
+    be32(&pvd[148], mTable);
+    be32(&pvd[152], mOpt);
+    writeRecord(&pvd[156], std::string(1, '\0'), rootLba, rootBytes, true, date.d7);
+    padded(&pvd[190], 128, volume);
+    padded(&pvd[318], 128, "");
+    padded(&pvd[446], 128, "");
+    padded(&pvd[574], 128, "PLAYSTATION");
+    padded(&pvd[702], 37, "");
+    padded(&pvd[739], 37, "");
+    padded(&pvd[776], 37, "");
+    std::memcpy(&pvd[813], date.d17, 17);
+    std::memcpy(&pvd[830], date.d17, 17);
+    std::memcpy(&pvd[847], noDate, 17);
+    std::memcpy(&pvd[864], noDate, 17);
+    pvd[881] = 1;
+    return pvd;
+}
+
+std::array<uint8_t, kSector> makeTerminator() {
+    std::array<uint8_t, kSector> term{};
+    term[0] = 255;
+    std::memcpy(&term[1], "CD001", 5);
+    term[6] = 1;
+    return term;
+}
+
+void checkTrackCount(size_t tracks) {
+    if (tracks + 1 > kMaxDiscTracks)
+        throw std::runtime_error("A disc holds at most " + std::to_string(kMaxDiscTracks) + " tracks; this one has " +
+                                 std::to_string(tracks + 1) + " (the data and " + std::to_string(tracks) + " music)");
+}
+
+// Raw sectors in order into a .bin, then its .cue.
+class ImageWriter {
+  public:
+    explicit ImageWriter(const fs::path& bin) : m_bin(bin) {
+        std::error_code ec;
+        if (bin.has_parent_path()) fs::create_directories(bin.parent_path(), ec);
+        m_out.open(bin, std::ios::binary | std::ios::trunc);
+        if (!m_out) throw std::runtime_error("Cannot write " + utf8(bin));
+    }
+    uint32_t lba() const { return m_lba; }
+
+    void emit(const uint8_t* data, uint8_t submode) {
+        encodeForm1(m_raw, m_lba++, data, submode);
+        m_out.write(reinterpret_cast<const char*>(m_raw), kRawSectorSize);
+    }
+    // Mode 2 sectors as they are stored (8-byte subheader, then 2328 bytes),
+    // each written with its own subheader, as a movie needs.
+    void emitMode2(const uint8_t* data, size_t bytes) {
+        for (size_t off = 0; off < bytes; off += kMode2Sector) {
+            encodeSubheader(m_raw, m_lba++, data + off, data + off + 8);
+            m_out.write(reinterpret_cast<const char*>(m_raw), kRawSectorSize);
+        }
+    }
+    // A run of sectors; the last one closes the record and the file.
+    void emitRun(const uint8_t* data, size_t bytes, uint32_t sectors) {
+        uint8_t buf[kSector];
+        for (uint32_t s = 0; s < sectors; s++) {
+            std::memset(buf, 0, kSector);
+            size_t off = size_t(s) * kSector;
+            if (off < bytes) std::memcpy(buf, data + off, std::min(kSector, bytes - off));
+            emit(buf, uint8_t(kSubmodeData | (s + 1 == sectors ? kSubmodeEor | kSubmodeEof : 0)));
+        }
+    }
+    // Sectors 0-15: the licence, then blank Form 2 up to the PVD (mkpsxiso's
+    // LBA 12-15); with no licence, empty Form 1 data sectors.
+    void systemArea(const std::vector<LicenceSector>& licence) {
+        if (licence.empty()) {
+            while (m_lba < 16) emit(nullptr, kSubmodeData);
+            return;
+        }
+        for (; m_lba < 16; m_lba++) {
+            if (m_lba < licence.size())
+                encodeLicence(m_raw, m_lba, licence[m_lba]);
+            else
+                encodeForm2(m_raw, m_lba, nullptr, 0x20);
+            m_out.write(reinterpret_cast<const char*>(m_raw), kRawSectorSize);
+        }
+    }
+    // The data track ends here: the CD-DA tracks (a 150-sector silent
+    // pregap, then the PCM, last sector padded), then the .cue.
+    DiscInfo finish(const std::vector<std::vector<int16_t>>& tracks) {
+        DiscInfo info;
+        info.dataSectors = m_lba;
+        std::memset(m_raw, 0, kRawSectorSize);
+        for (const std::vector<int16_t>& pcm : tracks) {
+            for (uint32_t s = 0; s < kAudioPregap; s++, m_lba++)
+                m_out.write(reinterpret_cast<const char*>(m_raw), kRawSectorSize);
+            const size_t bytes = pcm.size() * 2;
+            const uint32_t sectors = uint32_t((bytes + kRawSectorSize - 1) / kRawSectorSize);
+            info.tracks.push_back({m_lba, sectors});
+            uint8_t buf[kRawSectorSize];
+            for (uint32_t s = 0; s < sectors; s++, m_lba++) {
+                std::memset(buf, 0, kRawSectorSize);
+                const size_t first = size_t(s) * (kRawSectorSize / 2);
+                const size_t n = std::min(kRawSectorSize / 2, pcm.size() - first);
+                for (size_t k = 0; k < n; k++) le16(buf + 2 * k, uint16_t(pcm[first + k]));
+                m_out.write(reinterpret_cast<const char*>(buf), kRawSectorSize);
+            }
+        }
+        info.sectors = m_lba;
+        m_out.close();
+        if (!m_out) throw std::runtime_error("Cannot write " + utf8(m_bin));
+
+        fs::path cue = m_bin;
+        cue.replace_extension(".cue");
+        std::ofstream c(cue, std::ios::binary | std::ios::trunc);
+        c << "FILE \"" << utf8(m_bin.filename()) << "\" BINARY\r\n"
+          << "  TRACK 01 MODE2/2352\r\n"
+          << "    INDEX 01 00:00:00\r\n";
+        for (size_t i = 0; i < info.tracks.size(); i++) {
+            char num[8];
+            std::snprintf(num, sizeof num, "%02u", unsigned(i + 2));
+            c << "  TRACK " << num << " AUDIO\r\n"
+              << "    INDEX 00 " << cueTime(info.tracks[i].start - kAudioPregap) << "\r\n"
+              << "    INDEX 01 " << cueTime(info.tracks[i].start) << "\r\n";
+        }
+        if (!c) throw std::runtime_error("Cannot write " + utf8(cue));
+        return info;
+    }
+
+  private:
+    fs::path m_bin;
+    std::ofstream m_out;
+    uint8_t m_raw[kRawSectorSize];
+    uint32_t m_lba = 0;
+};
+
+}  // namespace
+
 DiscInfo writeDiscImage(const std::vector<DiscFile>& files, const std::string& volume, const fs::path& bin,
                         const std::vector<LicenceSector>& licence, const std::vector<std::vector<int16_t>>& tracks) {
-    if (tracks.size() + 1 > kMaxDiscTracks)
-        throw std::runtime_error("A disc holds at most " + std::to_string(kMaxDiscTracks) + " tracks; this one has " +
-                                 std::to_string(tracks.size() + 1) + " (the data and " + std::to_string(tracks.size()) +
-                                 " music)");
+    checkTrackCount(tracks.size());
     // Directories: the root plus one level, which is all the loader uses.
     std::map<std::string, Dir> dirs;
     dirs[""];
@@ -541,7 +727,8 @@ DiscInfo writeDiscImage(const std::vector<DiscFile>& files, const std::string& v
         }
         for (const Entry& e : dirs[dir].entries)
             if (e.id == name + ";1") throw std::runtime_error("Two files named " + f.path);
-        dirs[dir].entries.push_back({name + ";1", false, 0, uint32_t(f.data.size())});
+        const size_t bytes = f.mode2 ? f.data.size() / kMode2Sector * kSector : f.data.size();
+        dirs[dir].entries.push_back({name + ";1", false, 0, uint32_t(bytes)});
         placed.push_back({&f, dir, 0});
     }
     // ISO 9660 orders records by name (directories sort among the files).
@@ -601,139 +788,420 @@ DiscInfo writeDiscImage(const std::vector<DiscFile>& files, const std::string& v
     lt.resize(tableSectors * kSector);
     mt.resize(tableSectors * kSector);
 
-    // Recording date, in the 7-byte directory form and the 17-byte PVD form.
-    std::time_t now = std::time(nullptr);
-    std::tm tm{};
-#ifdef _WIN32
-    gmtime_s(&tm, &now);
-#else
-    gmtime_r(&now, &tm);
-#endif
-    uint8_t date7[7] = {uint8_t(tm.tm_year), uint8_t(tm.tm_mon + 1), uint8_t(tm.tm_mday), uint8_t(tm.tm_hour),
-                        uint8_t(tm.tm_min), uint8_t(tm.tm_sec), 0};
-    char date17[40];
-    std::snprintf(date17, sizeof date17, "%04d%02d%02d%02d%02d%02d00", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
-                  tm.tm_hour, tm.tm_min, tm.tm_sec);
-    const char noDate[17] = {'0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', 0};
-
+    const DiscDate date = discDate();
     const Dir& root = dirs[""];
-    std::array<uint8_t, kSector> pvd{};
-    pvd[0] = 1;
-    std::memcpy(&pvd[1], "CD001", 5);
-    pvd[6] = 1;
-    padded(&pvd[8], 32, "PLAYSTATION");
-    padded(&pvd[40], 32, volume);
-    both32(&pvd[80], total);
-    both16(&pvd[120], 1);
-    both16(&pvd[124], 1);
-    both16(&pvd[128], kSector);
-    both32(&pvd[132], uint32_t(pathTable.size()));
-    le32(&pvd[140], lTable);
-    be32(&pvd[148], mTable);
-    writeRecord(&pvd[156], std::string(1, '\0'), root.lba, root.sectors * kSector, true, date7);
-    padded(&pvd[190], 128, volume);
-    padded(&pvd[318], 128, "");
-    padded(&pvd[446], 128, "");
-    padded(&pvd[574], 128, "PLAYSTATION");
-    padded(&pvd[702], 37, "");
-    padded(&pvd[739], 37, "");
-    padded(&pvd[776], 37, "");
-    std::memcpy(&pvd[813], date17, 17);
-    std::memcpy(&pvd[830], date17, 17);
-    std::memcpy(&pvd[847], noDate, 17);
-    std::memcpy(&pvd[864], noDate, 17);
-    pvd[881] = 1;
-    std::array<uint8_t, kSector> term{};
-    term[0] = 255;
-    std::memcpy(&term[1], "CD001", 5);
-    term[6] = 1;
+    const std::array<uint8_t, kSector> pvd = makePvd(volume, total, uint32_t(pathTable.size()), lTable, 0, mTable, 0,
+                                                     root.lba, root.sectors * kSector, date);
+    const std::array<uint8_t, kSector> term = makeTerminator();
 
-    std::error_code ec;
-    if (bin.has_parent_path()) fs::create_directories(bin.parent_path(), ec);
-    std::ofstream out(bin, std::ios::binary | std::ios::trunc);
-    if (!out) throw std::runtime_error("Cannot write " + utf8(bin));
-    uint8_t raw[kRawSectorSize];
-    uint32_t lba = 0;
-    auto emit = [&](const uint8_t* data, uint8_t submode) {
-        encodeForm1(raw, lba++, data, submode);
-        out.write(reinterpret_cast<const char*>(raw), kRawSectorSize);
-    };
-    // A run of sectors; the last one closes the record and the file.
-    auto emitRun = [&](const uint8_t* data, size_t bytes, uint32_t sectors) {
-        uint8_t buf[kSector];
-        for (uint32_t s = 0; s < sectors; s++) {
-            std::memset(buf, 0, kSector);
-            size_t off = size_t(s) * kSector;
-            if (off < bytes) std::memcpy(buf, data + off, std::min(kSector, bytes - off));
-            emit(buf, uint8_t(kSubmodeData | (s + 1 == sectors ? kSubmodeEor | kSubmodeEof : 0)));
-        }
-    };
-    if (licence.empty()) {
-        for (; lba < 16;) emit(nullptr, kSubmodeData);
-    } else {
-        // The licence, then blank Form 2 up to the PVD (mkpsxiso's LBA 12-15).
-        for (; lba < 16; lba++) {
-            if (lba < licence.size())
-                encodeLicence(raw, lba, licence[lba]);
-            else
-                encodeForm2(raw, lba, nullptr, 0x20);
-            out.write(reinterpret_cast<const char*>(raw), kRawSectorSize);
-        }
-    }
-    emit(pvd.data(), kSubmodeData | kSubmodeEor);
-    emit(term.data(), kSubmodeData | kSubmodeEor | kSubmodeEof);
-    emitRun(lt.data(), lt.size(), tableSectors);
-    emitRun(mt.data(), mt.size(), tableSectors);
+    ImageWriter w(bin);
+    w.systemArea(licence);
+    w.emit(pvd.data(), kSubmodeData | kSubmodeEor);
+    w.emit(term.data(), kSubmodeData | kSubmodeEor | kSubmodeEof);
+    w.emitRun(lt.data(), lt.size(), tableSectors);
+    w.emitRun(mt.data(), mt.size(), tableSectors);
     for (const std::string& n : order) {
         const Dir& d = dirs[n];
-        std::vector<uint8_t> b = dirBytes(d, root.lba, root.sectors * kSector, date7);
-        emitRun(b.data(), b.size(), d.sectors);
+        std::vector<uint8_t> b = dirBytes(d, root.lba, root.sectors * kSector, date.d7);
+        w.emitRun(b.data(), b.size(), d.sectors);
     }
     for (const Placed& p : placed) {
         const Entry& e = dirs[p.dir].entries[p.entry];
-        if (lba != e.lba) throw std::runtime_error("disc layout drifted at " + p.file->path);
-        emitRun(p.file->data.data(), p.file->data.size(),
-                std::max<uint32_t>(1, uint32_t((e.size + kSector - 1) / kSector)));
+        if (w.lba() != e.lba) throw std::runtime_error("disc layout drifted at " + p.file->path);
+        if (p.file->mode2) {
+            w.emitMode2(p.file->data.data(), p.file->data.size());
+            continue;
+        }
+        w.emitRun(p.file->data.data(), p.file->data.size(),
+                  std::max<uint32_t>(1, uint32_t((e.size + kSector - 1) / kSector)));
     }
-    while (lba < total) emit(nullptr, 0);
+    while (w.lba() < total) w.emit(nullptr, 0);
+    return w.finish(tracks);
+}
 
-    // CD-DA tracks: a 150-sector silent pregap, then the PCM, last sector padded.
-    DiscInfo info;
-    info.dataSectors = total;
-    std::memset(raw, 0, kRawSectorSize);
-    for (const std::vector<int16_t>& pcm : tracks) {
-        for (uint32_t s = 0; s < kAudioPregap; s++, lba++) out.write(reinterpret_cast<const char*>(raw), kRawSectorSize);
-        const size_t bytes = pcm.size() * 2;
-        const uint32_t sectors = uint32_t((bytes + kRawSectorSize - 1) / kRawSectorSize);
-        info.tracks.push_back({lba, sectors});
-        uint8_t buf[kRawSectorSize];
-        for (uint32_t s = 0; s < sectors; s++, lba++) {
-            std::memset(buf, 0, kRawSectorSize);
-            const size_t first = size_t(s) * (kRawSectorSize / 2);
-            const size_t n = std::min(kRawSectorSize / 2, pcm.size() - first);
-            for (size_t k = 0; k < n; k++) le16(buf + 2 * k, uint16_t(pcm[first + k]));
-            out.write(reinterpret_cast<const char*>(buf), kRawSectorSize);
+uint64_t archiveHash(const std::string& name) {
+    uint64_t h = 5381;
+    for (unsigned char c : name) h = ((h << 5) + h) ^ c;
+    return h;
+}
+
+DiscInfo writeArchiveImage(const std::vector<ArchiveFile>& files, const std::vector<uint8_t>& exe,
+                           const std::string& volume, const fs::path& bin, const std::vector<LicenceSector>& licence,
+                           const std::vector<std::vector<int16_t>>& tracks, uint32_t tail) {
+    checkTrackCount(tracks.size());
+    // The index entry's fields (psyqo-paths archive-manager.hh): 21-bit size,
+    // 11-bit padding, 19-bit sector offset, 10-bit sector count, 3-bit method.
+    constexpr size_t kMaxFileBytes = (size_t(1) << 21) - 1;
+    constexpr uint32_t kMaxEntrySectors = 1023;
+    constexpr uint32_t kMaxLba = (1u << 19) - 1;
+    constexpr uint32_t kMethodStored = 0, kMethodLz4 = 2, kMethodStream = 3;
+    // The header keeps the margin as one byte of 16-byte blocks, read as (byte + 1) * 16.
+    constexpr uint32_t kMaxMargin = 4095;
+    struct Packed {
+        uint64_t hash = 0;
+        uint32_t size = 0, padding = 0, sectors = 0, method = kMethodStored, lba = 0;
+        std::vector<uint8_t> bytes;  // what goes on the disc, front padding included
+    };
+    std::vector<Packed> packed;
+    uint32_t margin = 0;
+    std::map<uint64_t, std::string> names;
+    for (const ArchiveFile& f : files) {
+        Packed p;
+        p.hash = archiveHash(f.name);
+        auto [it, fresh] = names.emplace(p.hash, f.name);
+        if (!fresh) throw std::runtime_error("Two archive files named " + f.name + " (or with the hash of " + it->second + ")");
+        if (f.stream) {
+            // Raw sectors, each written with its own subheader; the entry's
+            // first word is the sector count (psyqo-paths' STREAM method).
+            if (f.data.empty() || f.data.size() % kMode2Sector != 0)
+                throw std::runtime_error(f.name + " is not whole Mode 2 sectors of " + std::to_string(kMode2Sector) +
+                                         " bytes");
+            p.method = kMethodStream;
+            p.sectors = uint32_t(f.data.size() / kMode2Sector);
+            p.bytes = f.data;
+            packed.push_back(std::move(p));
+            continue;
+        }
+        if (f.data.size() > kMaxFileBytes)
+            throw std::runtime_error(f.name + " is " + std::to_string(f.data.size()) +
+                                     " bytes; an archive file must be under 2 MiB");
+        p.size = uint32_t(f.data.size());
+        const uint32_t plain = std::max<uint32_t>(1, uint32_t((f.data.size() + kSector - 1) / kSector));
+        if (!f.stored && !f.data.empty()) {
+            std::vector<uint8_t> out(size_t(LZ4_compressBound(int(f.data.size()))));
+            const int n = LZ4_compress_HC(reinterpret_cast<const char*>(f.data.data()), reinterpret_cast<char*>(out.data()),
+                                          int(f.data.size()), int(out.size()), LZ4HC_CLEVEL_MAX);
+            const uint32_t sectors = n > 0 ? uint32_t((size_t(n) + kSector - 1) / kSector) : plain;
+            // Compressed only when it saves a sector; padded at the front so the
+            // data ends on the sector the in-place decompression reads last.
+            if (n > 0 && sectors < plain) {
+                p.method = kMethodLz4;
+                p.sectors = sectors;
+                p.padding = sectors * uint32_t(kSector) - uint32_t(n);
+                p.bytes.assign(p.padding, 0);
+                p.bytes.insert(p.bytes.end(), out.begin(), out.begin() + n);
+                // LZ4's in-place margin (lz4.h LZ4_DECOMPRESS_INPLACE_MARGIN).
+                margin = std::max(margin, (uint32_t(n) >> 8) + 32);
+            }
+        }
+        if (p.method == kMethodStored) {
+            p.sectors = plain;
+            p.bytes = f.data;
+        }
+        if (p.sectors > kMaxEntrySectors)
+            throw std::runtime_error(f.name + " takes " + std::to_string(p.sectors) +
+                                     " sectors on the disc; an archive entry holds at most " +
+                                     std::to_string(kMaxEntrySectors));
+        packed.push_back(std::move(p));
+    }
+    if (margin > kMaxMargin)
+        throw std::runtime_error("The archive's LZ4 decompression margin is " + std::to_string(margin) +
+                                 " bytes; its header holds at most " + std::to_string(kMaxMargin));
+
+    // Layout: index, entries, SYSTEM.CNF, PSX.EXE, the tail.
+    const uint32_t indexSectors = uint32_t(((packed.size() + 1) * 16 + kSector - 1) / kSector);
+    uint32_t next = kArchiveLba + indexSectors;
+    for (Packed& p : packed) {
+        p.lba = next;
+        next += p.sectors;
+    }
+    if (next > kMaxLba) throw std::runtime_error("The archive runs past LBA " + std::to_string(kMaxLba));
+    const std::string cnf = kSystemCnf;
+    const uint32_t cnfLba = next++;
+    const uint32_t exeLba = next;
+    const uint32_t exeSectors = std::max<uint32_t>(1, uint32_t((exe.size() + kSector - 1) / kSector));
+    next += exeSectors;
+    const uint32_t total = next + tail;
+
+    // The index: header, then the entries sorted by hash for its binary search.
+    std::vector<uint8_t> index(indexSectors * kSector, 0);
+    std::memcpy(index.data(), "PSX-ARC1", 8);
+    le32(&index[8], uint32_t(packed.size()) | ((margin >> 4) << 24));
+    le32(&index[12], total);
+    std::vector<const Packed*> sorted;
+    for (const Packed& p : packed) sorted.push_back(&p);
+    std::sort(sorted.begin(), sorted.end(), [](const Packed* a, const Packed* b) { return a->hash < b->hash; });
+    for (size_t i = 0; i < sorted.size(); i++) {
+        uint8_t* e = &index[16 * (i + 1)];
+        const Packed& p = *sorted[i];
+        le32(e, uint32_t(p.hash));
+        le32(e + 4, uint32_t(p.hash >> 32));
+        if (p.method == kMethodStream) {
+            // The sector count does not fit the 10-bit size field, so it takes the first word.
+            le32(e + 8, p.sectors);
+            le32(e + 12, p.lba | (p.method << 29));
+            continue;
+        }
+        le32(e + 8, p.size | (p.padding << 21));
+        le32(e + 12, p.lba | (p.sectors << 19) | (p.method << 29));
+    }
+
+    // ISO 9660: one directory, the root at 22, which the BIOS boots from.
+    const DiscDate date = discDate();
+    constexpr uint32_t kRootLba = 22;
+    Dir root;
+    root.lba = kRootLba;
+    root.entries = {{"PSX.EXE;1", false, exeLba, uint32_t(exe.size())},
+                    {"SYSTEM.CNF;1", false, cnfLba, uint32_t(cnf.size())}};
+    if (sectorsFor(root) != 1) throw std::runtime_error("archive root directory overflows its sector");
+    std::array<uint8_t, kSector> lt{}, mt{};
+    lt[0] = mt[0] = 1;  // the root: an identifier of one 0 byte
+    le32(&lt[2], kRootLba);
+    le16(&lt[6], 1);
+    be32(&mt[2], kRootLba);
+    be16(&mt[6], 1);
+    const std::array<uint8_t, kSector> pvd = makePvd(volume, total, 10, 18, 19, 20, 21, kRootLba, kSector, date);
+    const std::array<uint8_t, kSector> term = makeTerminator();
+
+    ImageWriter w(bin);
+    w.systemArea(licence);
+    w.emit(pvd.data(), kSubmodeData | kSubmodeEor);
+    w.emit(term.data(), kSubmodeData | kSubmodeEor | kSubmodeEof);
+    for (const auto* t : {&lt, &lt, &mt, &mt}) w.emitRun(t->data(), t->size(), 1);
+    std::vector<uint8_t> rootBytes = dirBytes(root, kRootLba, kSector, date.d7);
+    w.emitRun(rootBytes.data(), rootBytes.size(), 1);
+    w.emitRun(index.data(), index.size(), indexSectors);
+    for (const Packed& p : packed) {
+        if (w.lba() != p.lba) throw std::runtime_error("archive layout drifted at " + names[p.hash]);
+        if (p.method == kMethodStream)
+            w.emitMode2(p.bytes.data(), p.bytes.size());
+        else
+            w.emitRun(p.bytes.data(), p.bytes.size(), p.sectors);
+    }
+    w.emitRun(reinterpret_cast<const uint8_t*>(cnf.data()), cnf.size(), 1);
+    if (w.lba() != exeLba) throw std::runtime_error("archive layout drifted at PSX.EXE");
+    w.emitRun(exe.data(), exe.size(), exeSectors);
+    while (w.lba() < total) w.emit(nullptr, 0);
+    return w.finish(tracks);
+}
+
+namespace {
+
+const uint8_t kVideoChunk[4] = {0x60, 0x01, 0x01, 0x80};  // the first bytes of every video sector
+
+std::string lowerExtension(const fs::path& file) {
+    std::string ext = utf8(file.extension());
+    for (char& ch : ext)
+        if (ch >= 'A' && ch <= 'Z') ch = char(ch + 32);
+    return ext;
+}
+
+// The sector layout a file's first bytes show: `stride` bytes a sector with its
+// subheader `skip` in, -t strv's having none. 0 when it is none of psxavenc's.
+void movieLayout(const uint8_t* in, size_t size, size_t& stride, size_t& skip) {
+    static const uint8_t sync[12] = {0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0};
+    stride = skip = 0;
+    if (size >= kRawSectorSize && std::memcmp(in, sync, sizeof sync) == 0) {
+        stride = kRawSectorSize;
+        skip = 16;
+    } else if (size >= kSector && std::memcmp(in, kVideoChunk, sizeof kVideoChunk) == 0) {
+        stride = kSector;
+    } else if (size >= kMode2Sector && std::memcmp(in, in + 4, 4) == 0) {
+        stride = kMode2Sector;
+    }
+}
+
+}  // namespace
+
+bool isMovieFile(const fs::path& file) {
+    const std::string ext = lowerExtension(file);
+    return ext == ".str" || ext == ".sbs" || ext == ".srt";
+}
+
+namespace {
+
+// psxsplash's src/movieplayer.cpp, line for line: what its player does with each block of an .SRT.
+bool srtTime(const char*& p, const char* end, uint32_t& ms) {
+    uint32_t v[4] = {};
+    while (p < end && *p == ' ') p++;
+    for (int i = 0; i < 4; i++) {
+        if (p >= end || *p < '0' || *p > '9') return false;
+        while (p < end && *p >= '0' && *p <= '9') v[i] = v[i] * 10 + uint32_t(*p++ - '0');
+        if (i < 3) {
+            if (p >= end || (*p != (i < 2 ? ':' : ',') && !(i == 2 && *p == '.'))) return false;
+            p++;
         }
     }
-    info.sectors = lba;
-    out.close();
-    if (!out) throw std::runtime_error("Cannot write " + utf8(bin));
+    if (v[1] > 59 || v[2] > 59 || v[3] > 999) return false;
+    ms = ((v[0] * 60 + v[1]) * 60 + v[2]) * 1000 + v[3];
+    return true;
+}
 
-    fs::path cue = bin;
-    cue.replace_extension(".cue");
-    std::ofstream c(cue, std::ios::binary | std::ios::trunc);
-    c << "FILE \"" << utf8(bin.filename()) << "\" BINARY\r\n"
-      << "  TRACK 01 MODE2/2352\r\n"
-      << "    INDEX 01 00:00:00\r\n";
-    for (size_t i = 0; i < info.tracks.size(); i++) {
-        char num[8];
-        std::snprintf(num, sizeof num, "%02u", unsigned(i + 2));
-        c << "  TRACK " << num << " AUDIO\r\n"
-          << "    INDEX 00 " << cueTime(info.tracks[i].start - kAudioPregap) << "\r\n"
-          << "    INDEX 01 " << cueTime(info.tracks[i].start) << "\r\n";
+bool srtLine(const char*& p, const char* end, const char*& from, const char*& to) {
+    if (p >= end) return false;
+    from = p;
+    while (p < end && *p != '\n') p++;
+    to = p;
+    if (to > from && to[-1] == '\r') to--;
+    if (p < end) p++;
+    return true;
+}
+
+void readSubtitles(const std::vector<uint8_t>& file, MovieInfo& info) {
+    const char* s = reinterpret_cast<const char*>(file.data());
+    const char* end = s + file.size();
+    if (file.size() >= 3 && file[0] == 0xef && file[1] == 0xbb && file[2] == 0xbf) s += 3;
+    uint32_t number = 0;
+    const char *from = nullptr, *to = nullptr;
+    while (srtLine(s, end, from, to)) {
+        if (from == to) continue;
+        number++;
+        bool digits = true;
+        for (const char* c = from; c < to; c++) digits = digits && *c >= '0' && *c <= '9';
+        if (digits && !srtLine(s, end, from, to)) {
+            info.leftOut.push_back(number);
+            break;
+        }
+        uint32_t a = 0, b = 0;
+        const char* p = from;
+        bool ok = srtTime(p, to, a);
+        while (ok && p < to && *p == ' ') p++;
+        ok = ok && to - p >= 3 && p[0] == '-' && p[1] == '-' && p[2] == '>';
+        p += 3;
+        ok = ok && srtTime(p, to, b) && b > a;
+        unsigned rows = 0;
+        bool wide = false;
+        while (srtLine(s, end, from, to) && from != to) {
+            rows++;
+            wide = wide || to - from > 40;
+        }
+        if (!ok || !rows) {
+            info.leftOut.push_back(number);
+            continue;
+        }
+        info.subtitles++;
+        if (rows > 2 || wide) info.wide.push_back(number);
     }
-    if (!c) throw std::runtime_error("Cannot write " + utf8(cue));
+}
+
+std::string numbers(const std::vector<uint32_t>& v) {
+    std::string out;
+    for (size_t i = 0; i < v.size() && i < 8; i++) out += (i ? ", " : "") + std::to_string(v[i]);
+    if (v.size() > 8) out += " and " + std::to_string(v.size() - 8) + " more";
+    return out;
+}
+
+}  // namespace
+
+bool movieNameFits(const fs::path& file) {
+    std::string stem = utf8(file.stem());
+    for (char& ch : stem)
+        if (ch >= 'a' && ch <= 'z') ch = char(ch - 32);
+    return !stem.empty() && stem.size() <= 8 && std::all_of(stem.begin(), stem.end(), nameChar);
+}
+
+MovieInfo movieInfo(const fs::path& file) {
+    MovieInfo info;
+    std::error_code ec;
+    const uintmax_t bytes = fs::file_size(file, ec);
+    std::ifstream in(file, std::ios::binary);
+    if (ec || !in) return info;
+    if (lowerExtension(file) == ".srt") {
+        info.ok = info.srt = true;
+        info.sectors = uint32_t((bytes + kSector - 1) / kSector);
+        readSubtitles(readFile(file), info);
+        return info;
+    }
+    std::vector<uint8_t> head(size_t(std::min<uintmax_t>(bytes, 32 * kRawSectorSize)));
+    in.read(reinterpret_cast<char*>(head.data()), std::streamsize(head.size()));
+    if (!in) return info;
+
+    if (lowerExtension(file) == ".sbs") {
+        info.ok = head.size() >= 8 && head[2] == 0x00 && head[3] == 0x38;
+        info.sbs = true;
+        info.sectors = uint32_t((bytes + kSector - 1) / kSector);
+        return info;
+    }
+    size_t stride = 0, skip = 0;
+    movieLayout(head.data(), head.size(), stride, skip);
+    if (stride == 0 || bytes % stride != 0) return info;
+    info.sectors = uint32_t(bytes / stride);
+    const size_t subheader = stride == kSector ? 0 : skip + 8;
+    for (size_t s = 0; (s + 1) * stride <= head.size(); s++) {
+        const uint8_t* sector = head.data() + s * stride;
+        if (stride != kSector && (sector[skip + 2] & 0x04)) info.audio = true;
+        if (info.ok || std::memcmp(sector + subheader, kVideoChunk, sizeof kVideoChunk) != 0) continue;
+        info.ok = true;
+        info.width = uint32_t(sector[subheader + 16] | (sector[subheader + 17] << 8));
+        info.height = uint32_t(sector[subheader + 18] | (sector[subheader + 19] << 8));
+    }
     return info;
+}
+
+DiscFile loadMovie(const fs::path& file) {
+    const std::vector<uint8_t> in = readFile(file);
+    std::string stem = utf8(file.stem());
+    for (char& ch : stem)
+        if (ch >= 'a' && ch <= 'z') ch = char(ch - 32);
+
+    // Subtitles for the movie of the same name: plain data, read by the player.
+    if (lowerExtension(file) == ".srt") return {"MOVIES/" + stem + ".SRT", in, false};
+
+    // A row of BS frames for a mesh: plain data, every frame starts with this mark.
+    if (lowerExtension(file) == ".sbs") {
+        if (in.size() < 8 || in[2] != 0x00 || in[3] != 0x38) throw std::runtime_error("not a psxavenc -t sbs file");
+        return {"MOVIES/" + stem + ".SBS", in, false};
+    }
+
+    DiscFile movie{"MOVIES/" + stem + ".STR", {}, true};
+
+    constexpr size_t kChunkAt = 8;  // past the subheader
+    size_t stride = 0, skip = 0;
+    movieLayout(in.data(), in.size(), stride, skip);
+    if (stride == 0 || in.size() % stride != 0) throw std::runtime_error("not a psxavenc movie");
+
+    const size_t sectors = in.size() / stride;
+    movie.data.assign(sectors * kMode2Sector, 0);
+    bool video = false;
+    for (size_t s = 0; s < sectors; s++) {
+        const uint8_t* from = in.data() + s * stride;
+        uint8_t* to = movie.data.data() + s * kMode2Sector;
+        if (stride == kSector) {
+            // Video only, so no subheader to keep: realtime data, on channel 1.
+            static const uint8_t sub[8] = {1, 1, 0x48, 0, 1, 1, 0x48, 0};
+            std::memcpy(to, sub, 8);
+            std::memcpy(to + kChunkAt, from, kSector);
+        } else {
+            std::memcpy(to, from + skip, kMode2Sector);
+        }
+        video = video || std::memcmp(to + kChunkAt, kVideoChunk, sizeof kVideoChunk) == 0;
+    }
+    if (!video) throw std::runtime_error("no video in it");
+    return movie;
+}
+
+namespace {
+fs::path scenePart(size_t i, const char* kind) { return "scene_" + std::to_string(i) + kind; }
+}  // namespace
+
+std::string writePcdrvImage(const fs::path& dir, size_t scenes) {
+    // The kinds in the order loadScene reads them, as the disc has them.
+    static const char* const kOrder[] = {".loading", ".vram", ".spu", ".splashpack", ".geo"};
+    std::error_code ec;
+    std::vector<ArchiveFile> files;
+    try {
+        for (size_t i = 0; i < scenes && fs::is_regular_file(dir / scenePart(i, ".splashpack"), ec); ++i)
+            for (const char* kind : kOrder) {
+                const fs::path part = dir / scenePart(i, kind);
+                if (!fs::is_regular_file(part, ec)) continue;
+                std::ifstream in(part, std::ios::binary);
+                std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+                if (!in.eof() && in.fail()) return "Cannot read " + utf8(part);
+                // StreamReader reads streamed geometry's sectors as they are.
+                files.push_back({utf8(part.filename()), std::move(bytes), std::strcmp(kind, ".geo") == 0});
+            }
+        if (files.empty()) return "No scene_0.splashpack in " + utf8(dir);
+        // Written beside the image and moved over it, so psxsplash never opens half of one.
+        // Over PCdrv nothing reads past the archive, so no executable and no tail.
+        const fs::path next = dir / "psxsplash-next.bin";
+        writeArchiveImage(files, {}, "PSXSPLASH", next, {}, {}, 0);
+        fs::remove(dir / "psxsplash-next.cue", ec);
+        fs::rename(next, dir / kPcdrvImage, ec);
+        if (ec) return "Cannot replace " + utf8(dir / kPcdrvImage) + ": " + ec.message();
+    } catch (const std::exception& e) {
+        return e.what();
+    }
+    return {};
 }
 
 DiscInfo writeLicenceImage(const std::vector<LicenceSector>& licence, const fs::path& bin) {
@@ -746,6 +1214,8 @@ EngineKind engineKind(const std::vector<uint8_t>& exe) {
         size_t n = std::strlen(s);
         return std::search(exe.begin(), exe.end(), s, s + n) != exe.end();
     };
+    // The archive loader keys its files by the PCdrv names, so it goes first.
+    if (has("FileLoader: archive of")) return EngineKind::Archive;
     // Each loader names its files differently (psxsplash src/fileloader.cpp).
     if (has("scene_%d.splashpack")) return EngineKind::Pcdrv;
     return EngineKind::Cdrom;
@@ -758,9 +1228,13 @@ std::string sceneTag(size_t index, size_t count, const std::string& name) {
     return tag + ": ";
 }
 
-DiscResult exportDisc(const std::vector<const Scene*>& scenes, const fs::path& projectRoot, const fs::path& engine,
-                      const fs::path& bin, const std::string& title, const std::vector<std::string>& names,
-                      const VramSettings& vram, const DiscSettings& disc) {
+namespace {
+
+// exportDisc and exportArchiveDisc: the same scenes, settings and checks,
+// written as an ISO tree or as an archive.
+DiscResult buildDisc(const std::vector<const Scene*>& scenes, const fs::path& projectRoot, const fs::path& engine,
+                     const fs::path& bin, const std::string& title, const std::vector<std::string>& names,
+                     const VramSettings& vram, const DiscSettings& disc, bool archive) {
     DiscResult r;
     if (scenes.empty()) {
         r.exported.errors.push_back("No scene to put on the disc.");
@@ -778,10 +1252,20 @@ DiscResult exportDisc(const std::vector<const Scene*>& scenes, const fs::path& p
             r.exported.errors.push_back(utf8(engine) + " is not a PS-X EXE.");
             return r;
         case EngineKind::Pcdrv:
-            r.exported.errors.push_back(utf8(engine.filename()) +
-                                        " is the PCdrv build of psxsplash; a disc needs the CD-ROM build (LOADER=cdrom)");
+            r.exported.errors.push_back(utf8(engine.filename()) + " is the PCdrv build of psxsplash; a disc needs the " +
+                                        (archive ? "archive build (LOADER=archive)" : "CD-ROM build (LOADER=cdrom)"));
             return r;
         case EngineKind::Cdrom:
+            if (archive) {
+                r.exported.errors.push_back(utf8(engine.filename()) +
+                                            " is the CD-ROM build of psxsplash; an archive disc needs the archive "
+                                            "build (LOADER=archive)");
+                return r;
+            }
+            break;
+        case EngineKind::Archive:
+            // The only loader psxsplash has had since its archive loader: it reads nothing else.
+            archive = true;
             break;
     }
     std::string licenceError;
@@ -808,6 +1292,55 @@ DiscResult exportDisc(const std::vector<const Scene*>& scenes, const fs::path& p
             r.exported.errors.push_back(tag + e.what());
         }
     }
+    // Movies: MOVIES/<NAME>.STR, each with the subheaders it was encoded with.
+    std::vector<DiscFile> movies;
+    for (const std::string& m : disc.movies) {
+        fs::path p = fs::path(std::u8string(m.begin(), m.end()));
+        if (p.is_relative() && !projectRoot.empty()) p = projectRoot / p;
+        const std::string tag = "movie " + utf8(p.filename()) + ": ";
+        std::error_code fe;
+        if (!fs::is_regular_file(p, fe)) {
+            r.exported.errors.push_back(tag + utf8(p) + ": no such file");
+            continue;
+        }
+        try {
+            movies.push_back(loadMovie(p));
+        } catch (const std::exception& e) {
+            r.exported.errors.push_back(tag + e.what());
+            continue;
+        }
+        if (lowerExtension(p) != ".srt") continue;
+        const MovieInfo info = movieInfo(p);
+        const bool manyOut = info.leftOut.size() > 1, manyWide = info.wide.size() > 1;
+        if (!info.leftOut.empty())
+            r.exported.warnings.push_back(tag + (manyOut ? "subtitles " : "subtitle ") + numbers(info.leftOut) +
+                                          (manyOut ? " have" : " has") +
+                                          " no time line (00:00:01,500 --> 00:00:04,000) and text: the player leaves " +
+                                          (manyOut ? "them" : "it") + " out");
+        if (!info.wide.empty())
+            r.exported.warnings.push_back(tag + (manyWide ? "subtitles " : "subtitle ") + numbers(info.wide) +
+                                          (manyWide ? " have" : " has") +
+                                          " more than two rows of 40 characters: the rest is off screen");
+        const std::string str = movies.back().path.substr(0, movies.back().path.size() - 3) + "STR";
+        bool shown = false;
+        for (const std::string& o : disc.movies) {
+            const fs::path q = fs::path(std::u8string(o.begin(), o.end()));
+            std::string stem = utf8(q.stem());
+            for (char& ch : stem)
+                if (ch >= 'a' && ch <= 'z') ch = char(ch - 32);
+            shown = shown || ("MOVIES/" + stem + ".STR" == str && lowerExtension(q) == ".str");
+        }
+        if (!shown) r.exported.warnings.push_back(tag + "no movie of its name in the list, so nothing shows it");
+    }
+    // The engine reads this before it can read anything else, so it goes in the engine.
+    if (disc.singleSpeed) {
+        static const char tag[] = "psxsplash disc read speed 2";
+        auto at = std::search(exe.begin(), exe.end(), tag, tag + sizeof(tag) - 1);
+        if (at == exe.end())
+            r.exported.errors.push_back(utf8(engine.filename()) + " has no read speed to set: a psxsplash from before single speed.");
+        else
+            *(at + sizeof(tag) - 2) = '1';
+    }
     if (!r.exported.errors.empty()) return r;
 
     std::error_code ec;
@@ -822,10 +1355,13 @@ DiscResult exportDisc(const std::vector<const Scene*>& scenes, const fs::path& p
         ExportOptions opt;
         opt.luaBytecode = true;
         opt.vram = vram;
-        const char* cnf = "BOOT = cdrom:\\PSX.EXE;1\r\nTCB = 4\r\nEVENT = 10\r\nSTACK = 801FFF00\r\n";
+        const char* cnf = kSystemCnf;
         std::vector<DiscFile> files;
-        files.push_back({"SYSTEM.CNF", std::vector<uint8_t>(cnf, cnf + std::strlen(cnf))});
-        files.push_back({"PSX.EXE", std::move(exe)});
+        std::vector<ArchiveFile> entries;
+        if (!archive) {
+            files.push_back({"SYSTEM.CNF", std::vector<uint8_t>(cnf, cnf + std::strlen(cnf))});
+            files.push_back({"PSX.EXE", exe});
+        }
         // Prefab instances filled in from their files as they are now; scene
         // 0's render buffers the build's largest (exportBuild).
         auto spkOf = [&](size_t i) { return tmp / ("scene_" + std::to_string(i) + ".splashpack"); };
@@ -838,6 +1374,17 @@ DiscResult exportDisc(const std::vector<const Scene*>& scenes, const fs::path& p
             for (const std::string& m : one.warnings) r.exported.warnings.push_back(tag + m);
             if (i == 0) r.exported.stats = std::move(one.stats);
             if (!one.errors.empty()) continue;
+            if (archive) {
+                // Under the names the engine asks for, in the order it loads them.
+                for (const char* kind : {".loading", ".vram", ".spu", ".splashpack", ".geo"}) {
+                    fs::path part = spk;
+                    part.replace_extension(kind);
+                    if (!fs::exists(part)) continue;
+                    // StreamReader reads streamed geometry's sectors as they are.
+                    entries.push_back({utf8(part.filename()), readFile(part), std::strcmp(kind, ".geo") == 0});
+                }
+                continue;
+            }
             const std::string dir = "SCENE" + std::to_string(i) + "/SCENE_" + std::to_string(i);
             fs::path part = spk;
             files.push_back({dir + ".SPK", readFile(spk)});
@@ -848,15 +1395,23 @@ DiscResult exportDisc(const std::vector<const Scene*>& scenes, const fs::path& p
             // The loading screen psxsplash draws while this scene loads.
             if (fs::exists(part.replace_extension(".loading"))) files.push_back({dir + ".LDG", readFile(part)});
         }
+        for (DiscFile& m : movies) {
+            // An .STR is a STREAM entry the player reads sector by sector; .SBS and .SRT are loaded whole.
+            if (archive)
+                entries.push_back({m.path, std::move(m.data), m.mode2, m.mode2});
+            else
+                files.push_back(std::move(m));
+        }
         if (r.exported.errors.empty()) {
             // The length check needs the layout; write, then drop an over-long image.
-            r.disc = writeDiscImage(files, discVolume(disc.volume, title), bin, licence, music);
+            r.disc = archive ? writeArchiveImage(entries, exe, discVolume(disc.volume, title), bin, licence, music)
+                             : writeDiscImage(files, discVolume(disc.volume, title), bin, licence, music);
             const double minutes = double(r.disc.sectors) / (60.0 * kSectorsPerSecond);
             char len[32];
             std::snprintf(len, sizeof len, "%.1f", minutes);
             if (r.disc.sectors > kDiscMaxSectors) {
                 r.exported.errors.push_back("The disc is " + std::string(len) +
-                                            " minutes long; a CD holds at most 80 minutes (remove music tracks)");
+                                            " minutes long; a CD holds at most 80 minutes (remove music tracks or movies)");
                 fs::path cue = bin;
                 cue.replace_extension(".cue");
                 fs::remove(bin, ec);
@@ -872,6 +1427,21 @@ DiscResult exportDisc(const std::vector<const Scene*>& scenes, const fs::path& p
     }
     fs::remove_all(tmp, ec);
     return r;
+}
+
+}  // namespace
+
+DiscResult exportDisc(const std::vector<const Scene*>& scenes, const fs::path& projectRoot, const fs::path& engine,
+                      const fs::path& bin, const std::string& title, const std::vector<std::string>& names,
+                      const VramSettings& vram, const DiscSettings& disc) {
+    return buildDisc(scenes, projectRoot, engine, bin, title, names, vram, disc, false);
+}
+
+DiscResult exportArchiveDisc(const std::vector<const Scene*>& scenes, const fs::path& projectRoot,
+                             const fs::path& engine, const fs::path& bin, const std::string& title,
+                             const std::vector<std::string>& names, const VramSettings& vram,
+                             const DiscSettings& disc) {
+    return buildDisc(scenes, projectRoot, engine, bin, title, names, vram, disc, true);
 }
 
 DiscResult exportDisc(const Scene& scene, const fs::path& projectRoot, const fs::path& engine, const fs::path& bin,
