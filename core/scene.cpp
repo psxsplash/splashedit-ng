@@ -690,6 +690,7 @@ json writeFont(const UIFont& fo) {
         j["source"] = fo.source;
         j["size"] = fo.size;
     }
+    if (fo.greyLevels) j["greyLevels"] = true;
     putExtras(j, fo.extra);
     return j;
 }
@@ -705,6 +706,7 @@ UIFont readFont(const json& j) {
     fo.monospace = j.value("monospace", fo.monospace);
     fo.gap = j.value("gap", fo.gap);
     if (j.contains("advances")) fo.advances = j["advances"].get<std::vector<int>>();
+    fo.greyLevels = j.value("greyLevels", false);
     if (fo.source.empty() == fo.bitmap.empty()) fail("font '" + fo.name + "': set exactly one of source and bitmap");
     if (!fo.source.empty() && (fo.size < 4 || fo.size > 64)) fail("font '" + fo.name + "': size must be 4..64");
     if (!fo.bitmap.empty() && (fo.glyphWidth < 1 || fo.glyphWidth > 64 || fo.glyphHeight < 1 || fo.glyphHeight > 64))

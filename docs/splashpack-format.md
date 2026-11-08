@@ -325,6 +325,13 @@ This exporter (`core/splashpack.cpp`, `writeUi`) writes the same records with th
   at most 2. Glyph cells can be any width, not only 4/8/16/32 (the reader only needs
   `256 / glyphW` per row). Sheets come from `core/font.cpp`: TrueType glyphs are rendered at the
   subpixel offset that leaves the fewest half-covered pixels, then thresholded at 96/255.
+- A `greyLevels` font (docs/scene-format.md) has `dataSize` `128 * textureH + 32`: the sheet is
+  followed by a 16-entry BGR555 palette (0 transparent, 1 white, 2..15 greys of level `16 - i` out
+  of 15). psxsplash (font palettes, `UIFontDesc::clutY`) uploads it as a 16x1 CLUT at
+  `(vramX, vramY + textureH)` and draws the font with it; a record of exactly `128 * textureH`, as
+  every binary font still is, gets the white CLUT over row 0. So the row below a grey sheet is the
+  font's: the placement keeps it free, inside its bin or, for a sheet ending on row 255, on row 256
+  while the second bin is empty. An older psxsplash ignores the palette and draws index 1 white.
 - Anchors are still bytes read as `byte * res >> 8`, so 1.0 lands 2 px short at 320 wide. The
   rounding error of each anchor at the project resolution is added to x/w (y/h), and the element
   lands on the pixel the scene asks for: a bar anchored 0..1 at 320 wide resolves to 320 px, where
@@ -458,7 +465,7 @@ public static int ConvertWorldToFixed12(float value)
 - Atlas rectangles `(PositionX, PositionY, Width, 256)` are in the `.vram` file (and, redundantly, in 2.10).
 
 ### 4.4 `.vram` file
-`{ 'V','R'; u16 atlasCount; u16 clutCount; u8 fontCount; u8 0 }` (8 B), then per atlas `{u16 x, u16 y, u16 width, u16 256}` + `width*256` u16 pixels (row-major, `vramPixels[x,y]` iterated y outer) + pad to 4; per CLUT `{u16 clutPackingX, u16 clutPackingY, u16 length, u16 0}` + `length` u16 + pad to 4 (the texture CLUTs, then the fog mask CLUTs, so `clutCount` here can be up to 2 more than the header's); per font `{u8 glyphW, u8 glyphH, u16 vramX, u16 vramY, u16 textureH, u32 dataSize}` + 4bpp bitmap (`256/2 * textureH` bytes, two texels per byte, low nibble = left, row 0 = top, 1 = alpha>0.5) + pad to 4. Reader (R:scenemanager.cpp `uploadVramData`) uploads atlas `width x height` at `(x,y)`, CLUT at `(clutPackingX*16, clutPackingY)`, `length x 1`, font `64 x textureH` at `(vramX,vramY)`, then overwrites 2x1 words at the same `(vramX,vramY)` with a white CLUT `{0x0000,0x7FFF}`.
+`{ 'V','R'; u16 atlasCount; u16 clutCount; u8 fontCount; u8 0 }` (8 B), then per atlas `{u16 x, u16 y, u16 width, u16 256}` + `width*256` u16 pixels (row-major, `vramPixels[x,y]` iterated y outer) + pad to 4; per CLUT `{u16 clutPackingX, u16 clutPackingY, u16 length, u16 0}` + `length` u16 + pad to 4 (the texture CLUTs, then the fog mask CLUTs, so `clutCount` here can be up to 2 more than the header's); per font `{u8 glyphW, u8 glyphH, u16 vramX, u16 vramY, u16 textureH, u32 dataSize}` + 4bpp bitmap (`256/2 * textureH` bytes, two texels per byte, low nibble = left, row 0 = top, 1 = alpha>0.5) [+ 32-byte palette when `dataSize >= 128 * textureH + 32`, ng `greyLevels` fonts] + pad to 4. Reader (R:scenemanager.cpp `uploadVramData`) uploads atlas `width x height` at `(x,y)`, CLUT at `(clutPackingX*16, clutPackingY)`, `length x 1`, font `64 x textureH` at `(vramX,vramY)`, then overwrites 2x1 words at the same `(vramX,vramY)` with a white CLUT `{0x0000,0x7FFF}`; with the palette, it uploads that as 16x1 at `(vramX, vramY + textureH)` instead and writes no white CLUT.
 
 Fog mask CLUTs: when fog is on and a mesh uses a 4bpp (or 8bpp) cutout texture, one 16 (or 256) entry CLUT `{0x0000, 0xFFFF, ...}` is placed after the texture CLUTs and its position written to the header. psxsplash draws the fog pass over such a triangle as the same textured triangle through that CLUT, additive: entry 0 is the transparent texel, so the holes get no fog. 16bpp textures, and packs without the CLUTs, keep the untextured fog pass.
 
