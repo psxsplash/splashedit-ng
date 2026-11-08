@@ -51,6 +51,12 @@ void Emulator::addText(const char* data, size_t n) {
     }
 }
 
+void Emulator::note(const std::string& line) {
+    m_lines.push_back(line);
+    ++m_total;
+    if (m_lines.size() > kMaxLines) m_lines.pop_front();
+}
+
 void Emulator::drain() {
     SDL_IOStream* out = SDL_GetProcessOutput(m_proc);
     if (!out) return;

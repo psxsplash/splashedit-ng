@@ -354,6 +354,7 @@ static void togglePlay(State& st, const editor::Document& doc) {
     p.playLaunch = launchOf(files, openSceneFile(doc));
     p.players = std::clamp(p.tools.players, 1, editor::kMaxPlayers);
     p.relayed = editor::usesRelay(p.tools);
+    p.pcdrvNet = false;
     p.focus = 0;
     for (State::Play::Console& c : p.cons) c.link.reset();
     p.linkError.clear();
@@ -649,20 +650,26 @@ static void updatePlay(State& st, const editor::Document& doc) {
             std::string err;
             const editor::PlayTools eff = editor::withDefaults(p.tools, p.bundleDir);
             State::Play::Console& c = p.cons[size_t(k)];
-            if (!c.emu.start(editor::reduxCommand(eff, playDir(), p.captureScript, editor::consoleDir(playDir(), k)), &err)) {
+            if (!c.emu.start(editor::reduxCommand(eff, playDir(), p.captureScript, editor::consoleDir(playDir(), k), p.pcdrvNet), &err)) {
                 p.linkError = "Console " + std::to_string(k + 1) + " could not start pcsx-redux: " + err;
                 p.starting = 0;
             } else {
                 editor::restartLog(c.log);
                 scriptLine(nullptr, "play: console " + std::to_string(k + 1) + " started, " +
-                                        (p.relayed ? "relay port " + std::to_string(p.relay->port())
+                                        (p.relayed ? "relay port " + std::to_string(p.relay->port()) +
+                                                         (p.pcdrvNet ? " tcp " + std::to_string(p.relay->rawPort()) : "")
                                                    : "link port " + std::to_string(p.linkPort)));
                 p.starting = k + 1 < p.players ? k + 1 : 0;
                 p.startSince = SDL_GetTicks();
             }
         } else if (waited > (p.relayed ? 30000u : 15000u)) {
             p.starting = 0;
-            p.linkError = p.relayed ? "Console " + std::to_string(k + 1) + " not started: console " + std::to_string(k) +
+            p.linkError = p.relayed && p.pcdrvNet
+                              ? "Console " + std::to_string(k + 1) + " not started: console " + std::to_string(k) +
+                                    " never connected to the relay over PCDRV tcp://127.0.0.1:" +
+                                    std::to_string(p.relay ? p.relay->rawPort() : 0) +
+                                    "; its game must call Net.Connect() (with no address, or that one) soon after it boots"
+                          : p.relayed ? "Console " + std::to_string(k + 1) + " not started: console " + std::to_string(k) +
                                           " never connected to the relay (port " + std::to_string(p.relay ? p.relay->port() : 0) +
                                           "); this pcsx-redux may lack SIO1 client support"
                                     : "Not started: console 1 never opened its link port (" + std::to_string(p.linkPort) +
@@ -710,20 +717,33 @@ static void updatePlay(State& st, const editor::Document& doc) {
     }
     std::string err;
     std::filesystem::path console;  // console 1's directory with linked consoles
+    std::vector<std::string> relayNotes;  // put in console 1's output once it starts
     if (p.players >= 2) {
         // Relayed, every console is a client of the relay, which listens
         // first; linked directly, console 1 is the server of console 2.
+        // An engine and redux with the PCDRV socket reach it on its raw port
+        // (where Net.Connect() looks by default); when that port is taken,
+        // or either lacks the socket, over SIO1 as before.
         if (p.relayed) {
             if (!p.relay) p.relay = std::make_unique<editor::relay::Relay>();
             p.netFrozen.clear();
             p.netPaused = false;
-            if (p.relay->start(&err)) p.linkPort = p.relay->port();
+            const editor::RelayWire wire = editor::relayWire(eff);
+            if (!wire.note.empty()) relayNotes.push_back(wire.note);
+            std::string rawErr;
+            if (p.relay->start(&err, wire.pcdrvNet ? std::optional<uint16_t>(editor::relay::kRawPort) : std::nullopt, &rawErr))
+                p.linkPort = p.relay->port();
+            p.pcdrvNet = wire.pcdrvNet && p.relay->running() && p.relay->rawPort() != 0;
+            if (wire.pcdrvNet && !rawErr.empty())
+                relayNotes.push_back("Play could not take tcp://127.0.0.1:" + std::to_string(editor::relay::kRawPort) +
+                                     ", where the consoles' Net.Connect() looks: " + rawErr +
+                                     ". Stop that server to link them over PCDRV; they link over SIO1 instead.");
         } else {
             p.linkPort = editor::pickLinkPort();
             if (!p.linkPort) err = "no free TCP port for the link between the consoles";
         }
         for (int i = 0; i < p.players && err.empty(); ++i)
-            editor::prepareConsole(editor::consoleDir(playDir(), i), !p.relayed && i == 0, p.linkPort, &err);
+            editor::prepareConsole(editor::consoleDir(playDir(), i), !p.relayed && i == 0, p.linkPort, &err, !p.pcdrvNet);
         if (!err.empty()) {
             if (p.relay) p.relay->stop();
             p.message = "Could not start " + std::to_string(p.players) + " linked consoles: " + err;
@@ -731,8 +751,12 @@ static void updatePlay(State& st, const editor::Document& doc) {
         }
         console = editor::consoleDir(playDir(), 0);
         if (p.relayed) scriptLine(nullptr, "play: relay listening, port " + std::to_string(p.linkPort));
+        if (p.relayed)
+            scriptLine(nullptr, p.pcdrvNet ? "play: relay wire tcp, raw port " + std::to_string(p.relay->rawPort())
+                                           : std::string("play: relay wire sio1"));
+        for (const std::string& n : relayNotes) scriptLine(nullptr, "play: relay note: " + n);
     }
-    if (!p.cons[0].emu.start(editor::reduxCommand(eff, playDir(), p.captureScript, console), &err))
+    if (!p.cons[0].emu.start(editor::reduxCommand(eff, playDir(), p.captureScript, console, p.pcdrvNet), &err))
     {
         p.message = "Could not start pcsx-redux: " + err;
         if (p.relay) p.relay->stop();
@@ -740,6 +764,7 @@ static void updatePlay(State& st, const editor::Document& doc) {
     else {
         p.startedAt = SDL_GetTicks();
         editor::restartLog(p.cons[0].log);
+        for (const std::string& n : relayNotes) p.cons[0].emu.note("splashedit: " + n);
         scriptLine(nullptr, "play: boots " + utf8(engine.filename()));
         scriptLine(nullptr, "play: started");
         if (p.players >= 2) {
@@ -13896,7 +13921,9 @@ static void networkView(State& st) {
         joined += c.open && c.joined;
         if (c.open && c.isAuthority()) authority += (authority.empty() ? "" : ", ") + std::to_string(c.slot);
     }
-    const std::string head = p.relay->running() ? "Relay on 127.0.0.1:" + std::to_string(p.relay->port()) + "  \xc2\xb7  " +
+    const std::string head = p.relay->running() ? "Relay on 127.0.0.1:" + std::to_string(p.relay->port()) +
+                                                      (p.relay->rawPort() ? " and tcp " + std::to_string(p.relay->rawPort()) : std::string()) +
+                                                      "  \xc2\xb7  " +
                                                       std::to_string(joined) + " of " + std::to_string(p.players) + " consoles in a room" +
                                                       (authority.empty() ? std::string() : "  \xc2\xb7  authority: slot " + authority)
                                                 : "Relay stopped  \xc2\xb7  what it routed last Play";
@@ -13927,7 +13954,7 @@ static void networkView(State& st) {
     ImVec2 at(o.x + labelW, y);
     if (netChip("net.slot.all", at, o.x + labelW, maxX, "All", color::accent, p.netFilter.slot < 0, "Packets from and to every console"))
         p.netFilter.slot = -1;
-    std::string connLine;
+    std::string connLine, wireLine;
     for (const rl::Connection& c : conns) {
         const bool in = c.open && c.joined;
         const std::string label = "Console " + std::to_string(c.index) +
@@ -13936,7 +13963,8 @@ static void networkView(State& st) {
                                             : "  gone");
         char ago[48];
         std::snprintf(ago, sizeof ago, "last heard from %.1f s ago", std::max(0.0, p.relay->seconds() - c.lastSeen));
-        const std::string tip = "Relay connection " + std::to_string(c.index) + (in ? ", slot " + std::to_string(c.slot) : "") +
+        const std::string tip = "Relay connection " + std::to_string(c.index) +
+                                (c.wire == rl::Wire::Raw ? " (PCDRV tcp://)" : " (SIO1)") + (in ? ", slot " + std::to_string(c.slot) : "") +
                                 (in && c.isAuthority() ? ", the room's authority (psxsplash's host: its world objects go to the others)" : "") +
                                 ": " +
                                 std::to_string(c.framesIn) + " frames in, " + std::to_string(c.framesOut) + " out, " +
@@ -13946,9 +13974,11 @@ static void networkView(State& st) {
             in)
             p.netFilter.slot = on ? -1 : c.slot;
         connLine += " " + std::to_string(c.index) + ":" + (in ? std::to_string(c.slot) : std::string("-"));
+        wireLine += " " + std::to_string(c.index) + ":" + rl::wireName(c.wire);
     }
     if (conns.empty()) text(dl, ImVec2(at.x + space::sm, y + 4), f.regular, type::caption, color::textFaint, "No console has connected yet");
     scriptLine("net.conns", "net: connections" + (connLine.empty() ? std::string(" none") : connLine));
+    scriptLine("net.wires", "net: wires" + (wireLine.empty() ? std::string(" none") : wireLine));
 
     // Types, each with how many came.
     y = at.y + 24 + space::sm;

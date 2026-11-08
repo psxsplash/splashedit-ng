@@ -31,6 +31,8 @@ public:
     const std::deque<std::string>& output() const { return m_lines; }
     // Lines printed since start(), including those output() has dropped.
     uint64_t lineCount() const { return m_total; }
+    // Adds a line of the editor's own to the output, as if printed (start() clears it).
+    void note(const std::string& line);
 
 private:
     void drain();
