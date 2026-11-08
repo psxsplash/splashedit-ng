@@ -57,7 +57,7 @@ VramLayout packVram(std::vector<PsxTexture*>& all, const VramSettings& s, std::v
     reserved.push_back({960, 0, 64, kVramH});
 
     std::vector<Atlas> atlases;
-    using Key = std::tuple<std::string, int, bool, std::string>;
+    using Key = std::tuple<std::string, int, bool, std::string, bool>;
     std::map<Key, PsxTexture*> unique;
     std::vector<std::pair<PsxTexture*, PsxTexture*>> duplicates;
 
@@ -72,7 +72,7 @@ VramLayout packVram(std::vector<PsxTexture*>& all, const VramSettings& s, std::v
         int aw = atlasWidthFor(depth);
         atlases.push_back({depth, 0, 0, aw, {}, {}});
         for (PsxTexture* t : group) {
-            Key k{t->source, int(t->bitDepth), t->cutout, t->paletteGroup};
+            Key k{t->source, int(t->bitDepth), t->cutout, t->paletteGroup, t->semiTransparent};
             auto it = unique.find(k);
             if (it != unique.end()) {
                 duplicates.push_back({t, it->second});

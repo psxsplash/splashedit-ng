@@ -4,7 +4,8 @@
 # its frames, each landing in the saved scene's spriteSheets and in the
 # section's scripted "scene: sprite" lines; each of those edits goes back in
 # one Ctrl+Z; the preview steps through the animation's cells; a cell size
-# that does not divide the texture is reported; a sheet's trash deletes it.
+# that does not divide the texture is reported; a sheet's trash deletes it;
+# the Semi-transparent toggle saves semiTransparent and undoes in one Ctrl+Z.
 # With more images than fit, the Add sheet list stays on screen and scrolls (#285).
 # Controls are clicked by name (--click @scene.spriteadd): the editor aims at
 # where the frame before drew them, so no pixel positions live here.
@@ -109,6 +110,16 @@ check('Add sheet adds hero.png as sheet "hero"',
       summary(s) == [('hero', 'textures/hero.png', 4, 16, 16, [('idle', 0, 1, 6, True)])], f'{summary(s)} | ' + out[-200:])
 check('the section reports the sheet and its grid',
       'scene: sprite 0 hero texture textures/hero.png bpp 4 cell 16x16 grid 4x2 anims idle:0+1@6L' in out, out[-400:])
+
+# Semi-transparent: off by default and not written; the toggle writes it, one
+# Ctrl+Z takes it back.
+check('a new sheet is not semi-transparent', s is not None and 'semiTransparent' not in s[0], s)
+s, out = run(ADD + click('scene.spritesemi'), onscreen=('scene.spritesemi',))
+check('the Semi-transparent toggle saves semiTransparent: true', s is not None and s[0].get('semiTransparent') is True,
+      f'{s} | ' + out[-200:])
+s, out = run(ADD + click('scene.spritesemi') + SAVE_MID + UNDO)
+check('one Ctrl+Z turns Semi-transparent back off',
+      mid is not None and mid[0].get('semiTransparent') is True and s is not None and 'semiTransparent' not in s[0], f'{mid} then {s}')
 
 # Cell size, then an animation whose frames are typed: all saved.
 EDITS = ADD + typed('scene.spritecellw', '32') + click('scene.spriteanimadd') + SCROLL + typed('scene.animcount', '3') + \

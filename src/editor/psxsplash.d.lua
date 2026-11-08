@@ -1474,6 +1474,28 @@ function UI.DrawLine(p1, p2, color) end
 ---@return any
 function UI.DrawTriangle(p1, p2, p3, c1, c2, c3) end
 
+--- Draw a textured gouraud triangle from a scene sprite sheet (sheet: its name or index). p1/p2/p3
+--- are {x, y} points; uv1/uv2/uv3 are {u, v} texels from the sheet texture's top-left. c1/c2/c3 are
+--- optional per-vertex {r, g, b} tints, all three or none (128 is the plain texture). blend is
+--- optional: "half", "add", "subtract", "addQuarter" or 1-4 (omitted is opaque); a textured
+--- triangle only blends a sheet whose Semi-transparent option is on. An unknown sheet draws a
+--- magenta triangle and logs its name once.
+---
+--- `UI.DrawTexturedTriangle(sheet, p1, p2, p3, uv1, uv2, uv3 [, c1, c2, c3] [, blend])`
+---@param sheet any
+---@param p1 any
+---@param p2 any
+---@param p3 any
+---@param uv1 any
+---@param uv2 any
+---@param uv3 any
+---@param c1? any
+---@param c2? any
+---@param c3? any
+---@param blend? any
+---@return any
+function UI.DrawTexturedTriangle(sheet, p1, p2, p3, uv1, uv2, uv3, c1, c2, c3, blend) end
+
 ---@class Sprite
 Sprite = {}
 
