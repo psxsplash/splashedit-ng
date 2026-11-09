@@ -2960,9 +2960,8 @@ void testPlayOverlays() {
     CHECK(editor::missingDiscTools(eff).empty());
 }
 
-// Build > Boot Logo in Test Runs and the Disc section's Boot logo: with the
-// logo off, Play, Run on hardware and Export boot the -nologo build beside
-// the chosen one, or the build with the logo when there is none (saying so).
+// Play and Run on hardware warn when the engine is older or newer than the
+// splashpack version the exported scenes carry.
 void testEngineVersionNote() {
     namespace fs = std::filesystem;
     std::error_code ec;
@@ -2992,6 +2991,9 @@ void testEngineVersionNote() {
     CHECK(editor::engineVersionNote(old, dir).empty());  // nothing exported, nothing to say
 }
 
+// Build > Boot Logo in Test Runs and the Disc section's Boot logo: with the
+// logo off, Play, Run on hardware and Export boot the -nologo build beside
+// the chosen one, or the build with the logo when there is none (saying so).
 void testPlayBootLogo() {
     namespace fs = std::filesystem;
     std::error_code ec;
