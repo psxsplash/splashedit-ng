@@ -53,6 +53,7 @@
 #include "ui/colour_hex.hh"
 #include "ui/file_dialog.h"
 #include "ui/icons.h"
+#include "ui/list_reorder.hh"
 #include "ui/list_scroll.hh"
 #include "ui/scrub.hh"
 #include "ui/texture_image.h"
@@ -1306,6 +1307,123 @@ static bool treeMatches(const splash::Object& o, const std::string& filter) {
 static bool isUnder(const editor::ObjectPath& p, const editor::ObjectPath& ancestor) {
     return p.size() >= ancestor.size() && std::equal(ancestor.begin(), ancestor.end(), p.begin());
 }
+
+// Dragging a row of a flat list to reorder it (Build scenes, disc tracks,
+// patrol and path points, the Strings window), as rows move in the Scene
+// panel: pressing a row's grip and moving starts it, a line shows the gap it
+// would land in, releasing there moves it, and Escape or a release off the
+// list leaves it. A press that does not move is left to the row's widgets.
+// One list drags at a time; the drag holds ImGui's active item, so hovers
+// and Escape-to-close wait for it.
+struct RowDragState {
+    ImGuiID list = 0;
+    int pressed = -1;  // pressed, not moved past the threshold yet
+    bool dragging = false;
+    int from = -1;
+    std::string label;
+    int frame = -1;  // the last frame the list was drawn
+};
+static RowDragState& rowDragState() {
+    static RowDragState s;
+    return s;
+}
+static int g_rowDragEscaped = -1;  // the frame Escape ended a drag
+// A row is dragged, or Escape ended a drag this frame (so it closes nothing).
+static bool rowDragging() { return rowDragState().dragging || g_rowDragEscaped == ImGui::GetFrameCount(); }
+
+class RowDrag {
+public:
+    // `count` rows; `clip` is the list's visible part (a row outside it takes
+    // no press or drop), by default the window's clip rectangle as it is now.
+    // Disabled, it neither starts nor takes a drag.
+    RowDrag(const char* id, int count, bool enabled = true, std::optional<ImRect> clip = std::nullopt)
+        : m_id(ImGui::GetID(id)), m_count(count), m_enabled(enabled),
+          m_clip(clip ? *clip : ImRect(ImGui::GetWindowDrawList()->GetClipRectMin(), ImGui::GetWindowDrawList()->GetClipRectMax())) {
+        RowDragState& s = rowDragState();
+        // A list that was not drawn last frame (closed, scrolled away) lets go.
+        if (s.list == m_id && s.frame < ImGui::GetFrameCount() - 1) reset();
+    }
+    // Row `index` of the list, drawn at `r`; a press in `grip` may drag it.
+    void row(int index, ImRect r, ImRect grip, const std::string& label) {
+        RowDragState& s = rowDragState();
+        ImRect shown = r;
+        shown.ClipWith(m_clip);
+        grip.ClipWith(m_clip);
+        if (!m_enabled || shown.GetWidth() <= 0 || shown.GetHeight() <= 0) return;
+        const ImVec2 m = ImGui::GetIO().MousePos;
+        if (!s.dragging && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && grip.Contains(m) && !ImGui::GetIO().WantTextInput &&
+            ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem)) {
+            s.list = m_id;
+            s.pressed = index;
+            s.label = label;
+        }
+        if (!s.dragging || s.list != m_id || !shown.Contains(m)) return;
+        // The upper half drops before it, the lower half after it.
+        const bool before = m.y < r.GetCenter().y;
+        const int slot = before ? index : index + 1;
+        m_hasDrop = ui::dropIndex(s.from, slot, m_count) >= 0;
+        m_slot = slot;
+        const float y = before ? r.Min.y : r.Max.y;
+        m_mark = ImRect(ImVec2(r.Min.x, y - 1), ImVec2(r.Max.x, y + 1));
+    }
+    // After the rows: the gap line and the label at the pointer. The move a
+    // release made this frame, {from, to} with `to` the row's new index.
+    std::optional<std::pair<int, int>> end(ImDrawList* dl) {
+        RowDragState& s = rowDragState();
+        if (s.list != m_id) return std::nullopt;
+        s.frame = ImGui::GetFrameCount();
+        if (s.pressed >= 0 && !s.dragging) {
+            if (!ImGui::IsMouseDown(ImGuiMouseButton_Left) || !m_enabled || s.pressed >= m_count) {
+                s.pressed = -1;
+            } else if (ImGui::IsMouseDragging(ImGuiMouseButton_Left, 6)) {
+                s.dragging = true;
+                s.from = s.pressed;
+                s.pressed = -1;
+                ImGui::SetActiveID(m_id, ImGui::GetCurrentWindow());
+            }
+            return std::nullopt;
+        }
+        if (!s.dragging) return std::nullopt;
+        if (ImGui::GetActiveID() == m_id) ImGui::KeepAliveID(m_id);
+        if (m_hasDrop) {
+            dl->PushClipRect(m_clip.Min, m_clip.Max, true);
+            dl->AddRectFilled(m_mark.Min, m_mark.Max, color::accent, 1);
+            dl->PopClipRect();
+        }
+        // The dragged row's label follows the pointer.
+        ImDrawList* fg = ImGui::GetForegroundDrawList();
+        const ImVec2 at = ImGui::GetIO().MousePos + ImVec2(14, 4);
+        const ImVec2 ts = measure(fonts().regular, type::body, s.label.c_str());
+        const ImRect tag(at, at + ts + ImVec2(space::md * 2, space::xs * 2));
+        fg->AddRectFilled(tag.Min, tag.Max, color::raised, radius::field);
+        fg->AddRect(tag.Min, tag.Max, m_hasDrop ? color::accent : color::borderStrong, radius::field);
+        text(fg, tag.Min + ImVec2(space::md, space::xs), fonts().regular, type::body, color::text, s.label.c_str());
+        std::optional<std::pair<int, int>> moved;
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape, false) || !m_enabled || s.from >= m_count) {
+            if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) g_rowDragEscaped = ImGui::GetFrameCount();
+            reset();
+        } else if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+            const int to = m_hasDrop ? ui::dropIndex(s.from, m_slot, m_count) : -1;
+            if (to >= 0) moved = std::make_pair(s.from, to);
+            reset();
+        }
+        return moved;
+    }
+
+private:
+    void reset() {
+        RowDragState& s = rowDragState();
+        if (ImGui::GetActiveID() == s.list && s.dragging) ImGui::ClearActiveID();
+        s = RowDragState{};
+    }
+    ImGuiID m_id;
+    int m_count;
+    bool m_enabled;
+    ImRect m_clip;
+    bool m_hasDrop = false;
+    int m_slot = -1;
+    ImRect m_mark{};
+};
 
 // While a row is dragged: the drop the mouse points at over row `rr`, which
 // shows the object at `path` (its top quarter drops before it, the bottom
@@ -2994,6 +3112,7 @@ static void unityImportModal(State& st, editor::Document& doc, ImVec2 size) {
         // Rows placed from the list's top: the switch and arrows move ImGui's cursor.
         const ImVec2 base = ImGui::GetCursorScreenPos();
         const ImRect clip(ImVec2(box.Min.x, box.Min.y + 2), ImVec2(box.Max.x, box.Max.y - 2));
+        RowDrag drag("unity.scenedrag", int(ui.scenes.size()), !busy, clip);
         for (size_t i = 0; i < ui.scenes.size(); ++i) {
             State::UnityImportDialog::Row& row = ui.scenes[i];
             const ImVec2 p(base.x, base.y + float(i) * sceneRowH);
@@ -3025,6 +3144,7 @@ static void unityImportModal(State& st, editor::Document& doc, ImVec2 size) {
             ImGui::PopClipRect();
             const ImRect up(ImVec2(rr.Max.x - 2 * bw2 - 2, rr.Min.y + 4), ImVec2(rr.Max.x - bw2 - 2, rr.Max.y - 4));
             const ImRect down(ImVec2(rr.Max.x - bw2, rr.Min.y + 4), ImVec2(rr.Max.x, rr.Max.y - 4));
+            drag.row(int(i), rr, ImRect(rr.Min, ImVec2(up.Min.x - 2, rr.Max.y)), row.name);
             name("unity.up." + row.name, up);
             name("unity.down." + row.name, down);
             if (iconButton("up", up, icon::arrowUp, false, "Move up: earlier in the build", color::textDim, i > 0 && !busy)) {
@@ -3041,10 +3161,12 @@ static void unityImportModal(State& st, editor::Document& doc, ImVec2 size) {
             ImGui::SetCursorScreenPos(base);
             ImGui::Dummy(ImVec2(inner - space::sm * 2, float(ui.scenes.size()) * sceneRowH));
         }
+        const auto dropped = drag.end(cl);
         ImGui::EndChild();
         ImGui::PopStyleVar(3);
         ImGui::PopStyleColor();
         if (move >= 0) std::swap(ui.scenes[size_t(move)], ui.scenes[size_t(move + moveBy)]);
+        else if (dropped) ui::moveItem(ui.scenes, dropped->first, dropped->second);
         y += listH + space::md;
 
         // CD music: not in the Unity project, so asked for here.
@@ -3141,7 +3263,7 @@ static void unityImportModal(State& st, editor::Document& doc, ImVec2 size) {
             textCentered(dl, r, f.medium, type::body, color::textFaint, busy ? "Importing..." : "Import");
         }
         if (!busy && (button("unity.cancel", ImVec2(bx - cw - space::sm, y), icon::x, "Cancel", ButtonKind::Ghost) ||
-                      (ImGui::IsKeyPressed(ImGuiKey_Escape, false) && !ImGui::IsAnyItemActive())))
+                      (ImGui::IsKeyPressed(ImGuiKey_Escape, false) && !ImGui::IsAnyItemActive() && !rowDragging())))
             close = true;
         y += size::field + 6;
         if (go) {
@@ -8595,6 +8717,7 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
         y += 34 + space::xs;
         int move = -1, moveBy = 0, remove = -1, shown = 0;
         std::error_code ec;
+        RowDrag drag("build.drag", int(list.size()));
         for (size_t i = 0; i < list.size(); ++i) {
             const ImRect rr(ImVec2(x0 + space::sm, y), ImVec2(x1 - space::sm, y + 28));
             const bool there = fs::is_regular_file(root / list[i], ec);
@@ -8611,6 +8734,7 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
             const ImRect up(ImVec2(rr.Max.x - 3 * bw - 4, rr.Min.y + 3), ImVec2(rr.Max.x - 2 * bw - 4, rr.Max.y - 3));
             const ImRect down(ImVec2(rr.Max.x - 2 * bw - 2, rr.Min.y + 3), ImVec2(rr.Max.x - bw - 2, rr.Max.y - 3));
             const ImRect del(ImVec2(rr.Max.x - bw, rr.Min.y + 3), ImVec2(rr.Max.x, rr.Max.y - 3));
+            drag.row(int(i), rr, ImRect(rr.Min, ImVec2(up.Min.x - 2, rr.Max.y)), utf8(list[i].generic_u8string()));
             nameRect("build.up." + std::to_string(i), up);
             nameRect("build.down." + std::to_string(i), down);
             nameRect("build.remove." + std::to_string(i), del);
@@ -8626,9 +8750,14 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
             ImGui::PopID();
             y += 28;
         }
+        const auto dropped = drag.end(dl);
         if (move >= 0) {
             std::vector<fs::path> next = list;
             std::swap(next[size_t(move)], next[size_t(move + moveBy)]);
+            save(std::move(next));
+        } else if (dropped) {
+            std::vector<fs::path> next = list;
+            ui::moveItem(next, dropped->first, dropped->second);
             save(std::move(next));
         } else if (remove >= 0) {
             std::vector<fs::path> next = list;
@@ -9442,6 +9571,7 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
 
         caption("Music (CD-DA)", color::textDim);
         int tMove = -1, tMoveBy = 0, tRemove = -1;
+        RowDrag tDrag("disc.trackdrag", int(tracks.size()));
         for (size_t i = 0; i < tracks.size(); ++i) {
             const ImRect rr(ImVec2(x0 + space::sm, y), ImVec2(x1 - space::sm, y + 28));
             nameRect("disc.track" + std::to_string(i), rr);
@@ -9461,6 +9591,7 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
             const ImRect up(ImVec2(rr.Max.x - 3 * bw - 4, rr.Min.y + 3), ImVec2(rr.Max.x - 2 * bw - 4, rr.Max.y - 3));
             const ImRect down(ImVec2(rr.Max.x - 2 * bw - 2, rr.Min.y + 3), ImVec2(rr.Max.x - bw - 2, rr.Max.y - 3));
             const ImRect del(ImVec2(rr.Max.x - bw, rr.Min.y + 3), ImVec2(rr.Max.x, rr.Max.y - 3));
+            tDrag.row(int(i), rr, ImRect(rr.Min, ImVec2(up.Min.x - 2, rr.Max.y)), file);
             nameRect("disc.track" + std::to_string(i) + ".up", up);
             nameRect("disc.track" + std::to_string(i) + ".down", down);
             nameRect("disc.track" + std::to_string(i) + ".remove", del);
@@ -9476,9 +9607,14 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
             ImGui::PopID();
             y += 28;
         }
+        const auto tDropped = tDrag.end(dl);
         if (tMove >= 0) {
             splash::DiscSettings next = ds;
             std::swap(next.tracks[size_t(tMove)], next.tracks[size_t(tMove + tMoveBy)]);
+            save(std::move(next));
+        } else if (tDropped) {
+            splash::DiscSettings next = ds;
+            ui::moveItem(next.tracks, tDropped->first, tDropped->second);
             save(std::move(next));
         } else if (tRemove >= 0) {
             splash::DiscSettings next = ds;
@@ -13307,12 +13443,15 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
             const viewport::Vec3 pv = view.pivot();
             // On the object's own height: the camera's pivot is often up in the air.
             const splash::Vec3 centre{pv.x, here.y, -pv.z};
+            // A waypoint dragged by its number moves along the patrol.
+            RowDrag wpDrag("agwpdrag", int(ag.waypoints.size()));
             for (size_t i = 0; i < ag.waypoints.size(); i++) {
                 ImGui::PushID(int(i));
                 const std::string lid = "lagwp" + std::to_string(i), label = std::to_string(i + 1);
                 // A narrow label (the number), so the three fields keep their width.
                 const ImRect wrow(ImVec2(x0 + space::sm, y), ImVec2(x1 - space::sm, y + rowH));
                 y += rowH;
+                wpDrag.row(int(i), wrow, ImRect(wrow.Min, ImVec2(wrow.Min.x + 22, wrow.Max.y)), "Waypoint " + label);
                 const ImRect wr = property(lid.c_str(), wrow, 22, label.c_str(),
                                            i < 8 ? "A waypoint's world position, in metres." : "Past the 8th: the export leaves it out.");
                 const float bs = 24, gap = 2;
@@ -13342,6 +13481,8 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                     doc.edit(path, [i](splash::Object& ob) { ob.agent->waypoints.erase(ob.agent->waypoints.begin() + long(i)); });
                 ImGui::PopID();
             }
+            if (auto mv = wpDrag.end(dl))
+                doc.edit(path, [mv](splash::Object& ob) { ui::moveItem(ob.agent->waypoints, mv->first, mv->second); });
             float bw = 0;
             const ImVec2 bat(x0 + space::sm, y + space::xs);
             if (button("agaddobj", bat, icon::plus, "At object", ButtonKind::Secondary, &bw,
@@ -13507,11 +13648,14 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
             const std::string count = std::to_string(pc.points.size());
             text(dl, ImVec2(hr.Min.x, centerY(f.regular, type::body, hr.Min.y, hr.Max.y)), f.regular, type::body,
                  pc.points.size() < 2 ? color::warn : color::textDim, count.c_str());
+            // A point dragged by its number moves along the path.
+            RowDrag ptDrag("pathptdrag", int(pc.points.size()));
             for (size_t i = 0; i < pc.points.size(); i++) {
                 ImGui::PushID(int(i) + 4000);
                 const std::string lid = "lpathpt" + std::to_string(i), label = std::to_string(i + 1);
                 const ImRect wrow(ImVec2(x0 + space::sm, y), ImVec2(x1 - space::sm, y + rowH));
                 y += rowH;
+                ptDrag.row(int(i), wrow, ImRect(wrow.Min, ImVec2(wrow.Min.x + 22, wrow.Max.y)), "Point " + label);
                 const ImRect wr = property(lid.c_str(), wrow, 22, label.c_str(), "A point, in the object's space, in metres.");
                 const float bs = 24, gap = 2;
                 const ImRect fr(wr.Min, ImVec2(wr.Max.x - 4 * (bs + gap), wr.Max.y));
@@ -13552,6 +13696,8 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                     doc.edit(path, [i](splash::Object& ob) { ob.path->points.erase(ob.path->points.begin() + long(i)); });
                 ImGui::PopID();
             }
+            if (auto mv = ptDrag.end(dl))
+                doc.edit(path, [mv](splash::Object& ob) { ui::moveItem(ob.path->points, mv->first, mv->second); });
             const viewport::Vec3 pv = view.pivot();
             const float hereY = found ? me.worldPosition.y : o->transform.position.y;
             const splash::Vec3 centre = toLocal({pv.x, hereY, -pv.z});
@@ -14830,6 +14976,11 @@ static void stringsWindow(State& st, editor::Document& doc, ImVec2 size) {
                                utf8(doc.projectRoot() / "strings.csv").c_str());
     if (actButton("strundo", "strings.undo", icon::undo, "Undo", sd.canUndo(), "Undo the last change to the table (Ctrl+Z)")) act = [&] { sd.undo(); };
     if (actButton("strredo", "strings.redo", icon::redo, "Redo", sd.canRedo(), "Redo (Ctrl+Y)")) act = [&] { sd.redo(); };
+    if (actButton("strsort", "strings.sort", icon::arrowDown, "Sort by key", haveProject && t.entries.size() > 1,
+                  "Puts the rows in order of their keys (one undo step); drag a row to move one key"))
+        act = [&] {
+            if (!sd.sortByKey()) say("the keys are in order already", false);
+        };
     {
         // Remember the language on the memory card (the boot read).
         const char* lab = "Remember language on memory card";
@@ -14922,10 +15073,16 @@ static void stringsWindow(State& st, editor::Document& doc, ImVec2 size) {
     if (ImGui::IsMouseHoveringRect(rowsR.Min, rowsR.Max) && io.MouseWheel != 0) sw.scroll -= io.MouseWheel * rowH * 3;
     sw.scroll = std::clamp(sw.scroll, 0.0f, std::max(0.0f, contentH - rowsR.GetHeight()));
     dl->PushClipRect(rowsR.Min, rowsR.Max, true);
+    // A row dragged by its key or a text moves the key (filtered, it lands
+    // next to the row it is dropped on).
+    RowDrag drag("strdrag", int(t.entries.size()), haveProject, rowsR);
     for (size_t i = 0; i < shown.size(); i++) {
         const float y = rowsR.Min.y + rowH * float(i) - sw.scroll;
         if (y + rowH < rowsR.Min.y || y > rowsR.Max.y) continue;
         const splash::StringEntry& e = t.entries[size_t(shown[i])];
+        // The gap below the fields split between this row and the one above, so the line falls in a gap.
+        const ImRect rowR(ImVec2(o.x, y - 3), ImVec2(o.x + inner, y + rowH - 3));
+        drag.row(shown[i], rowR, ImRect(rowR.Min, ImVec2(o.x + inner - delW, rowR.Max.y)), e.key);
         const ImRect kr(ImVec2(o.x, y), ImVec2(o.x + keyW, y + size::field + 2));
         nameRect("strings.key/" + e.key, kr);
         std::string typed;
@@ -14965,6 +15122,7 @@ static void stringsWindow(State& st, editor::Document& doc, ImVec2 size) {
             act = [&, k = e.key] { sd.deleteKey(k); };
     }
     dl->PopClipRect();
+    if (auto mv = drag.end(dl)) act = [&sd, mv] { sd.moveKey(mv->first, mv->second); };
     if (t.languages.empty())
         text(dl, ImVec2(rowsR.Min.x + space::xs, rowsR.Min.y + space::sm), f.regular, type::body, color::textFaint,
              "No languages yet. Add language makes the first one, the default.");
@@ -14982,7 +15140,7 @@ static void stringsWindow(State& st, editor::Document& doc, ImVec2 size) {
         if (io.KeyCtrl && !io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_Z, true)) act = [&] { sd.undo(); };
         if (io.KeyCtrl && ((io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_Z, true)) || ImGui::IsKeyPressed(ImGuiKey_Y, true)))
             act = [&] { sd.redo(); };
-        if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) close = true;
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape, false) && !rowDragging()) close = true;
     }
     if (act) act();
     if (close) ImGui::CloseCurrentPopup();
