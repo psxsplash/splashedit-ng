@@ -28,6 +28,10 @@ public:
     bool addKey(const std::string& key, std::string* error);
     bool renameKey(const std::string& from, const std::string& to, std::string* error);
     bool deleteKey(const std::string& key);
+    // Entry `from` moved to index `to` (the grid's order, kept in the file).
+    bool moveKey(int from, int to);
+    // The entries in ascending key order (byte order); false when they are already.
+    bool sortByKey();
     bool addLanguage(const std::string& id, const std::string& name, std::string* error);
     bool setLanguage(int lang, const std::string& id, const std::string& name, std::string* error);
     bool deleteLanguage(int lang, std::string* error);

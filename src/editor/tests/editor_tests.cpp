@@ -76,6 +76,7 @@
 #include "ui/dialog_gate.hh"
 #include "ui/window_chrome.hh"
 #include "ui/ui_scale.hh"
+#include "ui/list_reorder.hh"
 #include "ui/list_scroll.hh"
 #include "ui/popup_place.hh"
 #include "ui/scrub.hh"
@@ -19854,6 +19855,57 @@ static void testStringsDoc() {
     CHECK(editor::filterStrings(t, "SAL") == std::vector<int>{0} && editor::filterStrings(t, "zz").empty());
 }
 
+// Dragging a row of a list (#341, #342): the gap it is dropped in gives its
+// new index, and the move shifts the rows between by one.
+static void testListReorder() {
+    // Gaps 0..n of 4 rows; the gaps either side of the dragged row are no move.
+    CHECK(ui::dropIndex(0, 4, 4) == 3 && ui::dropIndex(3, 0, 4) == 0 && ui::dropIndex(1, 3, 4) == 2);
+    CHECK(ui::dropIndex(2, 2, 4) == -1 && ui::dropIndex(2, 3, 4) == -1);
+    CHECK(ui::dropIndex(-1, 0, 4) == -1 && ui::dropIndex(4, 0, 4) == -1 && ui::dropIndex(0, 5, 4) == -1 && ui::dropIndex(0, -1, 4) == -1);
+    std::vector<int> v{0, 1, 2, 3};
+    CHECK(ui::moveItem(v, 0, 3) && (v == std::vector<int>{1, 2, 3, 0}));  // first to last
+    CHECK(ui::moveItem(v, 3, 0) && (v == std::vector<int>{0, 1, 2, 3}));  // last to first
+    CHECK(ui::moveItem(v, 1, 2) && (v == std::vector<int>{0, 2, 1, 3}));  // by one: the arrows' swap
+    CHECK(!ui::moveItem(v, 2, 2) && (v == std::vector<int>{0, 2, 1, 3}));  // onto itself
+    CHECK(!ui::moveItem(v, 0, 4) && !ui::moveItem(v, -1, 0) && !ui::moveItem(v, 4, 1) && (v == std::vector<int>{0, 2, 1, 3}));
+    std::vector<int> none;
+    CHECK(!ui::moveItem(none, 0, 0));
+}
+
+// The Strings window's row drag and Sort by key: one undo step each, saved
+// at once, strings.json keeping the order.
+static void testStringsReorder() {
+    namespace fs = std::filesystem;
+    const fs::path dir = g_outDir / "strings-reorder";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    editor::StringsDoc d;
+    d.sync(dir);
+    std::string err;
+    CHECK(d.addLanguage("en", "English", &err));
+    for (const char* k : {"menu.start", "hud.score", "menu.quit", "boot.title"}) CHECK(d.addKey(k, &err));
+    CHECK(d.setText("hud.score", 0, "Score"));
+    auto keys = [](const splash::StringTable& t) {
+        std::vector<std::string> out;
+        for (const splash::StringEntry& e : t.entries) out.push_back(e.key);
+        return out;
+    };
+    using V = std::vector<std::string>;
+    CHECK(d.moveKey(0, 3) && (keys(d.table()) == V{"hud.score", "menu.quit", "boot.title", "menu.start"}));
+    // The file has the new order and the texts go with their keys.
+    const splash::StringTable read = splash::readStringTable(splash::stringTablePath(dir));
+    CHECK((keys(read) == V{"hud.score", "menu.quit", "boot.title", "menu.start"}) && read.entries[0].text[0] == "Score");
+    CHECK(d.moveKey(3, 0) && (keys(d.table()) == V{"menu.start", "hud.score", "menu.quit", "boot.title"}));
+    CHECK(!d.moveKey(1, 1) && !d.moveKey(0, 4) && !d.moveKey(-1, 0));  // no step
+    CHECK(d.sortByKey() && (keys(d.table()) == V{"boot.title", "hud.score", "menu.quit", "menu.start"}) && !d.sortByKey());
+    CHECK((keys(splash::readStringTable(splash::stringTablePath(dir))) == V{"boot.title", "hud.score", "menu.quit", "menu.start"}));
+    // Undo: the sort, then the two moves.
+    CHECK(d.undo() && (keys(d.table()) == V{"menu.start", "hud.score", "menu.quit", "boot.title"}));
+    CHECK(d.undo() && (keys(d.table()) == V{"hud.score", "menu.quit", "boot.title", "menu.start"}));
+    CHECK(d.undo() && (keys(d.table()) == V{"menu.start", "hud.score", "menu.quit", "boot.title"}));
+    CHECK(d.table().find("hud.score")->text[0] == "Score" && d.redo() && keys(d.table())[3] == "menu.start");
+}
+
 // Meter fixes (#194): every one-click fix's saving is the meters' change once
 // it is applied to the document, measured by exporting the edited scene; undo
 // puts the scene and the meters back. A texture shared by two meshes drops for
@@ -21260,6 +21312,8 @@ int main(int argc, char** argv) {
     testStringsExport();
     testStringsBlocks();
     testStringsDoc();
+    testListReorder();
+    testStringsReorder();
     testMeterFixes();
     testMeterFixCarriers();
     testMeterFixMaterialDepth();

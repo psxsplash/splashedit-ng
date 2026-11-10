@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <system_error>
 
+#include "ui/list_reorder.hh"
+
 namespace fs = std::filesystem;
 
 namespace editor {
@@ -93,6 +95,20 @@ bool StringsDoc::deleteKey(const std::string& key) {
     auto it = std::find_if(t.entries.begin(), t.entries.end(), [&](const splash::StringEntry& e) { return e.key == key; });
     if (it == t.entries.end()) return false;
     t.entries.erase(it);
+    return commit(std::move(t), nullptr);
+}
+
+bool StringsDoc::moveKey(int from, int to) {
+    splash::StringTable t = m_table;
+    if (!ui::moveItem(t.entries, from, to)) return false;
+    return commit(std::move(t), nullptr);
+}
+
+bool StringsDoc::sortByKey() {
+    auto byKey = [](const splash::StringEntry& a, const splash::StringEntry& b) { return a.key < b.key; };
+    if (std::is_sorted(m_table.entries.begin(), m_table.entries.end(), byKey)) return false;
+    splash::StringTable t = m_table;
+    std::stable_sort(t.entries.begin(), t.entries.end(), byKey);
     return commit(std::move(t), nullptr);
 }
 
