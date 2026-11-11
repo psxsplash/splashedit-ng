@@ -16,8 +16,9 @@ here = os.path.dirname(os.path.abspath(__file__))
 example = os.path.join(here, '..', 'examples', 'courtyard')
 fails = 0
 work = tempfile.mkdtemp()
-FOLDS = ['--click', '@s_sequences', '--wait', '3', '--click', '@s_rendering', '--wait', '3', '--click', '@s_loading', '--wait', '3',
-         '--click', '@s_vram', '--wait', '5']
+# The Disc section is in the inspector's Project settings tab (#343); folding
+# VRAM layout above it brings it into view.
+FOLDS = ['--click', '@inspector.tab/Project settings', '--wait', '3', '--click', '@s_vram', '--wait', '5']
 SIM = 'disc: licence preview 640x480 simulated'
 
 # A stand-in redux that only records that it ran (a simulated preview runs nothing).
@@ -101,7 +102,8 @@ def run(args, bios=None, licence=None, files=()):
 
 PREVIEW = ['--scroll-to', '@disc.licence.preview', '--wait', '3', '--click', '@disc.licence.preview', '--wait', '3', '--wait-play',
            '--wait', '5']
-SHOW = ['--scroll-to', '@disc.licence.previewimage', '--wait', '5']
+# The mouse off the Preview button, so its tooltip does not cover the frame.
+SHOW = ['--scroll-to', '@disc.licence.previewimage', '--wait', '5', '--move', '760,700', '--wait', '5']
 
 
 def previews(discs):

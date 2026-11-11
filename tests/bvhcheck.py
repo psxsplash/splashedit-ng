@@ -17,7 +17,7 @@ fails = 0
 ENV = dict(os.environ, SPLASHEDIT_REDUX='/nonexistent/pcsx-redux', SPLASHEDIT_PSXSPLASH='/nonexistent/psxsplash.ps-exe')
 # The Scene inspector's sections above BVH start open; folding them brings BVH into the panel.
 FOLDS = []
-for s in ('s_scenescript', 's_sequences', 's_rendering', 's_loading', 's_build', 's_vram', 's_disc', 's_render'):
+for s in ('s_scenescript', 's_sequences', 's_rendering', 's_loading', 's_render'):
     FOLDS += ['--click', '@' + s, '--wait', '3']
 AWAY = ['--move', '760,940', '--wait', '10']
 

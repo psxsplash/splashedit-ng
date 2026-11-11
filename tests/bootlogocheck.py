@@ -8,7 +8,7 @@
 #    emulator_tests with SPLASHEDIT_FAKE_REDUX set, as restartcheck.sh uses).
 #    With no -nologo build beside the chosen one, the logo build boots and
 #    the build report carries one more warning saying so.
-#  - The scene inspector's Disc section, Boot logo (per project, on by
+#  - The Disc section in the inspector's Project settings tab, Boot logo (per project, on by
 #    default, saved in disc.json as "bootLogo": false only when off): off,
 #    Export puts psxsplash-cdrom-nologo.ps-exe on the disc as PSX.EXE. The
 #    disc's PSX.EXE is read back and compared byte for byte; with no
@@ -26,9 +26,9 @@ here = os.path.dirname(os.path.abspath(__file__))
 example = os.path.join(here, '..', 'examples', 'courtyard')
 fails = 0
 work = tempfile.mkdtemp()
-# Folding the sections above it brings the Disc section into view at 1600x960 (as discsettingscheck.py).
-FOLDS = ['--click', '@s_sequences', '--wait', '3', '--click', '@s_rendering', '--wait', '3', '--click', '@s_loading', '--wait', '3',
-         '--click', '@s_vram', '--wait', '5']
+# The Disc section is in the inspector's Project settings tab (#343); folding
+# VRAM layout above it brings it into view.
+FOLDS = ['--click', '@inspector.tab/Project settings', '--wait', '3', '--click', '@s_vram', '--wait', '5']
 
 
 def check(name, ok, detail=''):

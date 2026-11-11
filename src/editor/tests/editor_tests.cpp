@@ -3091,6 +3091,54 @@ void testPlayBootLogo() {
 }
 
 // File menu: a new project on disk, Save As inside it, and the recent list.
+// The project-level File menu (#343): what makes a folder a project, the
+// scene Open Project opens, New Scene and Export's default disc name.
+void testProjectScenes() {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    fs::path dir = g_outDir / "projectscenes";
+    fs::remove_all(dir, ec);
+    fs::path proj = dir / "Game";
+    CHECK(!editor::isProject(proj) && editor::projectStartScene(proj).empty());
+    fs::create_directories(proj, ec);
+    CHECK(!editor::isProject(proj));
+    editor::NewProject made = editor::createProject(proj);
+    CHECK(made.error.empty() && editor::isProject(proj));
+    CHECK(editor::projectStartScene(proj) == fs::path("Game.scene"));
+    // New Project refuses it, naming the project.
+    editor::NewProject again = editor::createProject(proj);
+    CHECK(again.scene.empty() && again.error.find("already holds a project (Game.scene)") != std::string::npos);
+
+    // New Scene: written beside the others, the open scene put first in an empty build list.
+    editor::NewProject sc = editor::createScene(proj, "  Level 2 ", "Game.scene");
+    CHECK(sc.error.empty() && sc.scene == fs::path("Level 2.scene") && fs::is_regular_file(proj / sc.scene));
+    CHECK((editor::loadBuildList(proj) == std::vector<fs::path>{"Game.scene", "Level 2.scene"}));
+    editor::Document doc;
+    CHECK(!doc.load(proj, sc.scene) && doc.objectCount() == 0);
+    // Appended to a list that has entries; refused when taken or badly named.
+    CHECK(editor::createScene(proj, "boss.scene", "Level 2.scene").scene == fs::path("boss.scene"));
+    CHECK((editor::loadBuildList(proj) == std::vector<fs::path>{"Game.scene", "Level 2.scene", "boss.scene"}));
+    CHECK(!editor::createScene(proj, "boss", "Game.scene").error.empty());
+    CHECK(!editor::createScene(proj, "a/b", "Game.scene").error.empty());
+    CHECK(!editor::createScene(proj, "  ", "Game.scene").error.empty());
+    CHECK(!editor::createScene({}, "x", {}).error.empty());
+    CHECK(editor::loadBuildList(proj).size() == 3);
+    // Open Project starts on the build list's first scene.
+    CHECK(editor::saveBuildList(proj, {"boss.scene", "Game.scene"}));
+    CHECK(editor::projectStartScene(proj) == fs::path("boss.scene"));
+
+    // Export's default name: the disc volume, else the folder, else the scene.
+    CHECK(editor::exportFileStem(proj, "Game") == "Game");
+    splash::DiscSettings ds;
+    ds.volume = "MY_DISC";
+    CHECK(editor::saveDiscSettings(proj, ds));
+    CHECK(editor::exportFileStem(proj, "Game") == "MY_DISC");
+    CHECK(editor::exportFileStem({}, "lvl:1") == "lvl1");
+    CHECK(editor::exportFileStem({}, "??") == "disc");
+    CHECK(editor::safeFileStem(" a<b>c|d. ") == "abcd");
+    CHECK(editor::safeFileStem("CON") == "CON_" && editor::safeFileStem("com3") == "com3_" && editor::safeFileStem("COM10") == "COM10");
+}
+
 void testProject() {
     namespace fs = std::filesystem;
     std::error_code ec;
@@ -21147,6 +21195,7 @@ int main(int argc, char** argv) {
     testBuildReport();
     testVramLayout();
     testProject();
+    testProjectScenes();
     testProjectTemplates();
     testAdoptAsset();
     testNewScript();

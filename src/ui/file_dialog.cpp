@@ -99,7 +99,14 @@ bool showSaveFileDialog(const char* kind, SDL_DialogFileCallback callback, void*
 bool showOpenFolderDialog(const char* kind, SDL_DialogFileCallback callback, void* userdata, const char* defaultLocation, bool allowMany) {
     std::string folder;
     if (!begin(kind, callback, userdata, defaultLocation, &folder)) return false;
-    if (!held()) SDL_ShowOpenFolderDialog(answered, nullptr, g_window, orNull(folder), allowMany);
+    if (const char* file = picked()) {
+        std::printf("file dialog: %s picked %s\n", kind, file);
+        std::fflush(stdout);
+        const char* const files[2] = {file, nullptr};
+        answered(nullptr, files, 0);
+    } else if (!held()) {
+        SDL_ShowOpenFolderDialog(answered, nullptr, g_window, orNull(folder), allowMany);
+    }
     return true;
 }
 

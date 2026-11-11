@@ -1,4 +1,4 @@
-# The scene inspector's Build scenes section, driven through the GUI on a copy
+# The Build scenes section (the inspector's Project settings tab), driven through the GUI on a copy
 # of the courtyard with a second scene, level2.scene, beside it: add the open
 # scene and level2 from the Add dropdown, move level2 up, remove the other;
 # and, on a fresh copy, add level2 to the empty list, which puts the open
@@ -30,7 +30,7 @@ def run(args):
     project = os.path.join(tempfile.mkdtemp(), 'courtyard')
     shutil.copytree(example, project)
     shutil.copyfile(os.path.join(project, 'courtyard.scene'), os.path.join(project, 'level2.scene'))
-    cmd = [editor, '--size', '1600x960', '--project', project, '--wait', '5'] + args + [
+    cmd = [editor, '--size', '1600x960', '--project', project, '--wait', '5'] + TAB + args + [
         '--wait', '5', '--screenshot', os.path.join(project, 'shot.png')]
     r = subprocess.run(cmd, capture_output=True, text=True, env=ENV, timeout=120)
     lines = (r.stdout + r.stderr).strip().splitlines()
@@ -40,6 +40,10 @@ def run(args):
     listed = os.path.join(project, 'scenes.list')
     text = open(listed, 'rb').read().decode('utf-8') if os.path.exists(listed) else None
     return [l for l in lines if l.startswith('build:')], lines, text
+
+
+# The Build scenes section is in the inspector's Project settings tab (#343).
+TAB = ['--click', '@inspector.tab/Project settings', '--wait', '3']
 
 
 def click(name):

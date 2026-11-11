@@ -15,13 +15,16 @@ here = os.path.dirname(os.path.abspath(__file__))
 example = os.path.join(here, '..', 'examples', 'courtyard')
 model = os.path.join(here, 'fixtures', 'licence-logo', 'L.obj')
 fails = 0
-FOLDS = ['--click', '@s_sequences', '--wait', '3', '--click', '@s_rendering', '--wait', '3', '--click', '@s_loading', '--wait', '3',
-         '--click', '@s_vram', '--wait', '5']
+# The Disc section is in the inspector's Project settings tab (#343); folding
+# VRAM layout above it brings it into view.
+FOLDS = ['--click', '@inspector.tab/Project settings', '--wait', '3', '--click', '@s_vram', '--wait', '5']
 OPEN = ['--click', '@disc.licence', '--wait', '3', '--click', '@disc.licence/Build...', '--wait', '5',
         '--scroll-to', '@disc.licence.cancel', '--wait', '3', '--click', '@disc.licence.tmd', '--wait', '5']
 BUILD = ['--scroll-to', '@disc.licence.build', '--wait', '3', '--click', '@disc.licence.build', '--wait', '5']
 PREVIEW = ['--scroll-to', '@disc.licence.preview', '--wait', '3', '--click', '@disc.licence.preview', '--wait', '3', '--wait-play',
-           '--wait', '5', '--scroll-to', '@disc.licence.previewimage', '--wait', '5']
+           '--wait', '5', '--scroll-to', '@disc.licence.previewimage', '--wait', '5',
+           # The mouse off the Preview button, so its tooltip does not cover the frame.
+           '--move', '760,700', '--wait', '5']
 CONVERTED = 'L.obj converted: 24 triangles, 584 bytes'
 
 

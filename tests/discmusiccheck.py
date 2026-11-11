@@ -1,4 +1,4 @@
-# The scene inspector's Disc section "Music (CD-DA)" sub-list, driven through
+# The Disc section (the inspector's Project settings tab) "Music (CD-DA)" sub-list, driven through
 # the GUI on copies of the courtyard. Each step adds, reorders or removes a
 # track and checks both the scripted lines the editor prints
 # ("disc music: <n> tracks", "disc music: track <N> <path> <m:ss|missing|
@@ -15,10 +15,9 @@ example = os.path.join(here, '..', 'examples', 'courtyard')
 fmt = os.path.join(here, 'audio', 'formats')
 fails = 0
 ENV = dict(os.environ, SPLASHEDIT_REDUX='/nonexistent/pcsx-redux', SPLASHEDIT_PSXSPLASH='/nonexistent/psxsplash.ps-exe')
-# Folding the sections above Disc brings the Disc section and its short music
-# sub-list fully into view at 1600x960, so no scrolling is needed here.
-FOLDS = ['--click', '@s_sequences', '--wait', '3', '--click', '@s_rendering', '--wait', '3', '--click', '@s_loading', '--wait', '3',
-         '--click', '@s_vram', '--wait', '5']
+# The Disc section is in the inspector's Project settings tab (#343); folding
+# VRAM layout above it brings it into view.
+FOLDS = ['--click', '@inspector.tab/Project settings', '--wait', '3', '--click', '@s_vram', '--wait', '5']
 TONE_WAV = open(os.path.join(fmt, 'tone.wav'), 'rb').read()
 TONE_FLAC = open(os.path.join(fmt, 'tone.flac'), 'rb').read()
 

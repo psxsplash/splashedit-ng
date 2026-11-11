@@ -58,8 +58,9 @@ std::vector<std::filesystem::path> buildScenes(const std::filesystem::path& proj
                                                const std::filesystem::path& openScene);
 
 // Makes `dir` a project: creates it and meshes/, textures/, scripts/, and
-// writes an empty scene named after the folder. A folder that already holds a
-// scene is refused, so New never overwrites one; open it instead. On success
+// writes an empty scene named after the folder. A folder that is a project
+// already (isProject) is refused, so New never overwrites one; open it
+// instead. On success
 // returns the new scene's file name, relative to `dir`.
 //
 // New Project's templates: the editor's templates/ folder holds one folder
@@ -89,6 +90,35 @@ struct NewProject {
     std::string error;  // empty on success
 };
 NewProject createProject(const std::filesystem::path& dir, const TemplateInfo* tmpl = nullptr);
+
+// What makes a folder a project: a .scene directly in it (firstScene), the
+// test New Project refuses a folder by and Open Project opens a folder by.
+bool isProject(const std::filesystem::path& dir);
+
+// The scene Open Project opens in `dir`: the first entry of its build list
+// that is a scene file directly in `dir`, else firstScene(dir). Empty when
+// `dir` is no project.
+std::filesystem::path projectStartScene(const std::filesystem::path& dir);
+
+// File > New Scene: an empty scene <name>.scene directly in `project`, where
+// its scenes live, added to the end of the build list the way the Build
+// scenes section adds one (to an empty list, `openScene`, the open scene's
+// project-relative path, goes first). The name is trimmed; an empty one, one
+// holding / \ or :, or one whose file is there already is refused. On
+// success `scene` is the new file, relative to `project`.
+NewProject createScene(const std::filesystem::path& project, const std::string& name,
+                            const std::filesystem::path& openScene);
+
+// `name` as a file name stem any file system takes: characters Windows
+// refuses (< > : " / \ | ? * and control characters) dropped, spaces and
+// dots trimmed from the ends, and a reserved device name (CON, NUL, COM1...)
+// given a trailing '_'. Empty when nothing is left.
+std::string safeFileStem(const std::string& name);
+// The file name stem Export offers for the disc image: the project's disc
+// volume name (disc.json), else the project folder's name, else
+// `sceneStem`, else "disc"; each through safeFileStem.
+std::string exportFileStem(const std::filesystem::path& project, const std::string& sceneStem);
+
 
 // Where Save As may put a scene: inside `project`, since every asset path in
 // it is relative to the project folder. Returns the path relative to the

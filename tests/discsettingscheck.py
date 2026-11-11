@@ -1,4 +1,4 @@
-# The scene inspector's Disc section, driven through the GUI on copies of the
+# The Disc section (the inspector's Project settings tab), driven through the GUI on copies of the
 # courtyard: type a volume label (typed letters are upper-cased and anything
 # but A-Z 0-9 _ dropped as they are typed), switch the Licence dropdown
 # between None and the built-in psxsplash licence (the default, also for an
@@ -17,10 +17,9 @@ here = os.path.dirname(os.path.abspath(__file__))
 example = os.path.join(here, '..', 'examples', 'courtyard')
 fails = 0
 ENV = dict(os.environ, SPLASHEDIT_REDUX='/nonexistent/pcsx-redux', SPLASHEDIT_PSXSPLASH='/nonexistent/psxsplash.ps-exe')
-# Folding the sections above it brings the Disc section (open from the
-# start) into view at 1600x960.
-FOLDS = ['--click', '@s_sequences', '--wait', '3', '--click', '@s_rendering', '--wait', '3', '--click', '@s_loading', '--wait', '3',
-         '--click', '@s_vram', '--wait', '5']
+# The Disc section is in the inspector's Project settings tab (#343); folding
+# VRAM layout above it brings it into view.
+FOLDS = ['--click', '@inspector.tab/Project settings', '--wait', '3', '--click', '@s_vram', '--wait', '5']
 
 
 def check(name, ok, detail=''):

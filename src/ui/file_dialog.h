@@ -24,6 +24,8 @@ bool fileDialogOpen();
 // tests: with SPLASHEDIT_FILE_DIALOG=hold in the environment no dialog shows;
 // the editor prints "file dialog: <kind> in <folder>" (or "file dialog: refused
 // <kind>, one is open") and acts as if one stayed open.
+// With SPLASHEDIT_FILE_DIALOG=pick:<path> an open-file or open-folder dialog
+// answers <path> at once, printing "file dialog: <kind> picked <path>".
 bool showOpenFileDialog(const char* kind, SDL_DialogFileCallback callback, void* userdata, const SDL_DialogFileFilter* filters,
                         int nfilters, const char* defaultLocation, bool allowMany);
 bool showSaveFileDialog(const char* kind, SDL_DialogFileCallback callback, void* userdata, const SDL_DialogFileFilter* filters,

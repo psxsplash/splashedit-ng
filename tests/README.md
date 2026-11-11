@@ -803,7 +803,7 @@ paths keep the Title and Bare screenshots. Needs a display.
 
     python3 loadingscreencheck.py <splashedit> [title.png [bare.png]]
 
-`buildscenescheck.py` drives the scene inspector's Build scenes section on copies of the courtyard example
+`buildscenescheck.py` drives the Build scenes section (the inspector's Project settings tab) on copies of the courtyard example
 with a second scene, `level2.scene`, beside it: adds both from the Add menu (`@build.add/level2.scene`),
 moves level2 up (`@build.up.1`) and removes the other (`@build.remove.1`), checking the editor's
 `build: 0 a.scene | 1 b.scene` line after each change, `scenes.list` and what the Add menu still offers;
@@ -827,6 +827,20 @@ editor; unfetched, that fails unless `--allow-missing` is given. `--sample-shots
 with Lamplighter picked and the project it made. Needs a display.
 
     python3 newprojectcheck.py <splashedit> [modal.png] [--allow-missing] [--sample-shots <dir>]
+
+`projectmenucheck.py` drives the project-level File menu and the inspector's Project settings tab
+(#343) on copies of the courtyard example. The Inspector tab draws no build list, VRAM or disc control;
+the Project settings tab (`@inspector.tab/Project settings`) draws them whatever is selected. New
+Project refuses a folder that is a project already (it holds a `.scene`) with `newproject: failed ...
+already holds a project`, leaving it as it was. New Scene (`@newscene.name`, `@newscene.create`)
+prints `newscene: created level2.scene`, writes an empty scene beside the others and appends it to
+`scenes.list` after the open scene; a taken name prints `newscene: failed`. Open Project (Ctrl+Shift+O,
+answered with `SPLASHEDIT_FILE_DIALOG=pick:<folder>`) prints `openproject: opened <folder> <scene>`
+and lists the folder under Recent projects, or `openproject: failed` for a folder holding no scene.
+Export (Ctrl+B, dialog held) offers `<disc volume>.bin`, else `<project folder>.bin`, cleaned for a file
+system. Needs a display.
+
+    python3 projectmenucheck.py <splashedit>
 
 `templatecheck.py` checks the shipped templates (`templates/<id>/`, made by `make_templates`): each
 template.json has a name, description and order, and each scene exports with the CLI without warnings,
@@ -854,7 +868,7 @@ Needs a display.
 
     python3 buildproblemscheck.py <splashedit> [screenshot.png]
 
-`vramlayoutcheck.py` drives the scene inspector's VRAM layout section on copies of the courtyard example:
+`vramlayoutcheck.py` drives the VRAM layout section (the inspector's Project settings tab) on copies of the courtyard example:
 Add area (`@vram.add`, a 64 x 64 area at 320,0), types a width into `@vram.w.0`, drags on the map
 (`--drag @vram.map,dx0,dy0,dx1,dy1`, offsets from the control's centre) to draw a second area snapped to
 8, and removes the first (`@vram.remove.0`), checking the editor's `vram: x,y,w,h | x,y,w,h` line after
