@@ -3,7 +3,9 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cctype>
 #include <cmath>
+#include <cstring>
 #include <exception>
 #include <fstream>
 #include <iterator>
@@ -133,7 +135,8 @@ NewProject createProject(const fs::path& dir, const TemplateInfo* tmpl) {
         return r;
     }
     if (fs::path existing = firstScene(dir); !existing.empty()) {
-        r.error = utf8(dir.filename()) + " already holds " + utf8(existing) + "; open it instead";
+        r.error = utf8(dir.filename()) + " already holds a project (" + utf8(existing) +
+                  "): use File > Open Project";
         return r;
     }
     std::string stem = utf8(dir.filename());
@@ -221,6 +224,86 @@ NewProject createProject(const fs::path& dir, const TemplateInfo* tmpl) {
     }
     r.scene = scene;
     return r;
+}
+
+bool isProject(const fs::path& dir) { return !dir.empty() && !firstScene(dir).empty(); }
+
+fs::path projectStartScene(const fs::path& dir) {
+    if (!isProject(dir)) return {};
+    std::error_code ec;
+    for (const fs::path& p : loadBuildList(dir))
+        if (!p.has_parent_path() && p.extension() == ".scene" && fs::is_regular_file(dir / p, ec)) return p;
+    return firstScene(dir);
+}
+
+NewProject createScene(const fs::path& project, const std::string& rawName, const fs::path& openScene) {
+    NewProject r;
+    std::string name = rawName;
+    while (!name.empty() && (name.back() == ' ' || name.back() == '\t')) name.pop_back();
+    name.erase(0, std::min(name.size(), name.find_first_not_of(" \t")));
+    if (name.size() > 6 && name.compare(name.size() - 6, 6, ".scene") == 0) name.resize(name.size() - 6);
+    if (project.empty()) {
+        r.error = "no project is open";
+        return r;
+    }
+    if (name.empty()) {
+        r.error = "enter a scene name";
+        return r;
+    }
+    if (name.find_first_of("/\\:") != std::string::npos || name == "." || name == "..") {
+        r.error = "a scene name cannot hold / \\ or :";
+        return r;
+    }
+    const fs::path scene = fromUtf8(name + ".scene");
+    std::error_code ec;
+    if (fs::exists(project / scene, ec)) {
+        r.error = utf8(scene) + " already exists in " + utf8(project.filename());
+        return r;
+    }
+    try {
+        splash::saveScene(splash::Scene{}, project / scene);
+    } catch (const std::exception& e) {
+        r.error = e.what();
+        return r;
+    }
+    std::vector<fs::path> list = loadBuildList(project);
+    if (list.empty() && !openScene.empty() && openScene.lexically_normal() != scene) list.push_back(openScene);
+    list.push_back(scene);
+    if (!saveBuildList(project, list)) {
+        r.error = "could not write " + utf8(project / "scenes.list");
+        fs::remove(project / scene, ec);
+        return r;
+    }
+    r.scene = scene;
+    return r;
+}
+
+std::string safeFileStem(const std::string& name) {
+    std::string out;
+    for (unsigned char c : name)
+        if (c >= 0x20 && c != 0x7f && !std::strchr("<>:\"/\\|?*", c)) out += char(c);
+    while (!out.empty() && (out.back() == ' ' || out.back() == '.')) out.pop_back();
+    out.erase(0, std::min(out.size(), out.find_first_not_of(" .")));
+    std::string upper = out.substr(0, out.find('.'));
+    for (char& c : upper) c = char(std::toupper(static_cast<unsigned char>(c)));
+    static const char* kReserved[] = {"CON", "PRN", "AUX", "NUL"};
+    bool reserved = false;
+    for (const char* n : kReserved) reserved |= upper == n;
+    if (upper.size() == 4 && (upper.rfind("COM", 0) == 0 || upper.rfind("LPT", 0) == 0) && upper[3] >= '1' && upper[3] <= '9')
+        reserved = true;
+    if (reserved) out += '_';
+    return out;
+}
+
+std::string exportFileStem(const fs::path& project, const std::string& sceneStem) {
+    if (!project.empty()) {
+        if (std::string v = safeFileStem(loadDiscSettings(project).volume); !v.empty()) return v;
+        fs::path folder = project.filename();
+        if (folder.empty()) folder = project.parent_path().filename();  // a trailing separator
+        if (std::string v = safeFileStem(utf8(folder)); !v.empty()) return v;
+    }
+    if (std::string v = safeFileStem(sceneStem); !v.empty()) return v;
+    return "disc";
 }
 
 std::optional<fs::path> sceneInProject(const fs::path& project, const fs::path& file) {

@@ -1,4 +1,4 @@
-# The scene inspector's VRAM layout section, driven through the GUI on copies
+# The VRAM layout section (the inspector's Project settings tab), driven through the GUI on copies
 # of the courtyard: Add area (a 64 x 64 area at the first free spot, 320,0),
 # type a new width into its W field, drag on the VRAM map to draw a second
 # area (snapped to 8 words and lines), remove the first. Every change is saved
@@ -15,8 +15,9 @@ here = os.path.dirname(os.path.abspath(__file__))
 example = os.path.join(here, '..', 'examples', 'courtyard')
 fails = 0
 ENV = dict(os.environ, SPLASHEDIT_REDUX='/nonexistent/pcsx-redux', SPLASHEDIT_PSXSPLASH='/nonexistent/psxsplash.ps-exe')
-# Scrolls the scene inspector so the whole section is on screen.
-SCROLL = ['--scroll-to', '@vram.add', '--wait', '5']
+# Scrolls the Project settings tab so the whole section is on screen.
+# VRAM layout is in the inspector's Project settings tab (#343).
+SCROLL = ['--click', '@inspector.tab/Project settings', '--wait', '3', '--scroll-to', '@vram.add', '--wait', '5']
 
 
 def check(name, ok, detail=''):

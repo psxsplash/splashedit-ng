@@ -2219,7 +2219,7 @@ static float centerY(ImFont* font, float size, float y0, float y1) {
 }
 
 // File dialogs answer on their own thread; the result is picked up next frame.
-enum class FileAsk { None, Open, SaveAs, ExportDisc, ExportPlayer, ExportWeb };
+enum class FileAsk { None, Open, SaveAs, ExportDisc, ExportPlayer, ExportWeb, OpenProject };
 static std::mutex g_fileMutex;
 static FileAsk g_fileAsk = FileAsk::None;
 static std::string g_filePath;
@@ -2334,7 +2334,8 @@ static void startExport(State& st, const editor::Document& doc) {
         buildDisc(st, doc, p.exportTo);
         return;
     }
-    const std::string loc = utf8(doc.projectRoot() / (doc.sceneStem() + ".bin"));
+    // Named after the project's disc (its volume name), not the open scene.
+    const std::string loc = utf8(doc.projectRoot() / fromUtf8(editor::exportFileStem(doc.projectRoot(), doc.sceneStem()) + ".bin"));
     ui::showSaveFileDialog("export", onFilePicked, reinterpret_cast<void*>(static_cast<intptr_t>(FileAsk::ExportDisc)), kDiscFilter, 1,
                            loc.c_str());
 }
@@ -2503,8 +2504,34 @@ static bool openScene(State& st, editor::Document& doc, const std::filesystem::p
         return false;
     }
     st.recent.add(abs);
+    st.recentProjects.add(abs.parent_path());
     st.saveError.clear();
     notify(st, "Opened " + utf8(abs.parent_path().filename()) + " / " + name, false);
+    return true;
+}
+
+// File > Open Project... and Recent projects: opens `dir`'s start scene
+// (editor::projectStartScene). A folder that is no project (no .scene in it)
+// is refused and leaves Recent projects. Scripted runs print "openproject:
+// opened <folder> <scene>" or "openproject: failed <reason>".
+static bool openProject(State& st, editor::Document& doc, const std::filesystem::path& folder) {
+    std::error_code ec;
+    std::filesystem::path dir = std::filesystem::absolute(folder, ec);
+    if (ec) dir = folder;
+    if (!dir.has_filename()) dir = dir.parent_path();  // a trailing separator
+    const std::filesystem::path scene = editor::projectStartScene(dir);
+    if (scene.empty()) {
+        const std::string why = utf8(dir.filename()) + " is not a project: it holds no .scene file";
+        scriptLine(nullptr, "openproject: failed " + why);
+        notify(st, "Could not open " + why + ". Use File > New Project... to make one.", true);
+        st.recentProjects.remove(dir);
+        return false;
+    }
+    if (!openScene(st, doc, dir / scene)) {
+        scriptLine(nullptr, "openproject: failed could not open " + utf8(scene));
+        return false;
+    }
+    scriptLine(nullptr, "openproject: opened " + utf8(dir.filename()) + " " + utf8(scene));
     return true;
 }
 
@@ -2553,6 +2580,21 @@ static void perform(State& st, editor::Document& doc, State::Pending what, const
         case State::Pending::Recent:
             openScene(st, doc, path);
             break;
+        case State::Pending::NewScene:
+            st.newScene.name.clear();
+            st.newScene.error.clear();
+            st.newScene.open = true;
+            break;
+        case State::Pending::OpenProject: {
+            // The folder that holds the open project, so a sibling is a click away.
+            const std::string loc = utf8(doc.projectRoot().parent_path());
+            ui::showOpenFolderDialog("open-project", onFilePicked, reinterpret_cast<void*>(static_cast<intptr_t>(FileAsk::OpenProject)),
+                                     doc.projectRoot().empty() ? nullptr : loc.c_str(), false);
+            break;
+        }
+        case State::Pending::RecentProject:
+            openProject(st, doc, path);
+            break;
         case State::Pending::Quit:
             st.quit = true;
             break;
@@ -2594,6 +2636,8 @@ static void filesPending(State& st, editor::Document& doc) {
     const std::filesystem::path path = fromUtf8(picked);
     if (ask == FileAsk::Open) {
         openScene(st, doc, path);
+    } else if (ask == FileAsk::OpenProject) {
+        openProject(st, doc, path);
     } else if (ask == FileAsk::ExportDisc) {
         buildDisc(st, doc, path);
     } else if (ask == FileAsk::ExportPlayer || ask == FileAsk::ExportWeb) {
@@ -2799,9 +2843,15 @@ static void newProjectModal(State& st, editor::Document& doc, ImVec2 size) {
         reason = "A project name cannot hold / \\ or :";
     else if (location.empty()) reason = "Choose a location";
     const std::filesystem::path dir = reason.empty() ? fromUtf8(location) / fromUtf8(name) : std::filesystem::path();
-    const std::string where = reason.empty() ? "Creates " + utf8(dir) : reason;
+    // A folder that is a project already (editor::isProject) is said before
+    // Create, which refuses it: that is File > Open Project's job.
+    const bool taken = reason.empty() && editor::isProject(dir);
+    const std::string where = taken ? utf8(dir.filename()) + " is already a project (" + utf8(editor::firstScene(dir)) +
+                                          "): use File > Open Project..."
+                              : reason.empty() ? "Creates " + utf8(dir)
+                                               : reason;
     ImGui::PushClipRect(ImVec2(o.x, y), ImVec2(o.x + inner, y + 20), true);
-    text(dl, ImVec2(o.x + labelW, y), f.regular, type::caption, reason.empty() ? color::textFaint : color::warn, where.c_str());
+    text(dl, ImVec2(o.x + labelW, y), f.regular, type::caption, reason.empty() && !taken ? color::textFaint : color::warn, where.c_str());
     ImGui::PopClipRect();
     y += 20;
     if (!np.error.empty()) {
@@ -2869,6 +2919,122 @@ static std::string trimmedPath(std::string v) {
     while (!v.empty() && (v.back() == ' ' || v.back() == '\t')) v.pop_back();
     const size_t a = v.find_first_not_of(" \t");
     return a == std::string::npos ? std::string() : v.substr(a);
+}
+
+// File > New Scene: a name, then Create, which writes an empty scene beside
+// the open project's scenes, adds it to the build list (editor::createScene)
+// and opens it. Scripted runs print "newscene: created <scene>" or
+// "newscene: failed <reason>".
+static void newSceneModal(State& st, editor::Document& doc, ImVec2 size) {
+    State::NewSceneDialog& ns = st.newScene;
+    const char* id = "##newscene";
+    if (ns.open) {
+        ns.open = false;
+        ImGui::OpenPopup(id);
+    }
+    const float w = 520;
+    ImGui::SetNextWindowPos(ImVec2(size.x * 0.5f, size.y * 0.42f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(w, 0));
+    pushPopupStyle();
+    const bool open = ImGui::BeginPopupModal(id, nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoMove);
+    ImGui::PopStyleVar(4);
+    ImGui::PopStyleColor(2);
+    ns.shown = open;
+    if (!open) return;
+    Fonts& f = fonts();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 o = ImGui::GetCursorScreenPos();
+    const float inner = w - space::lg * 2;
+    float y = o.y;
+    const std::filesystem::path root = doc.projectRoot();
+    text(dl, ImVec2(o.x, y), f.semibold, type::title, color::text, "New Scene");
+    y += 26;
+    const std::string sub = "An empty scene in the project " + utf8(root.filename()) + ", added to its build list.";
+    text(dl, ImVec2(o.x, y), f.regular, type::label, color::textDim, sub.c_str());
+    y += 30;
+
+    const float labelW = 110, rowH = size::field + 8;
+    text(dl, ImVec2(o.x, centerY(f.medium, type::body, y, y + rowH)), f.medium, type::body, color::text, "Scene name");
+    {
+        const float fx = o.x + labelW, fw = inner - labelW;
+        ImGui::SetCursorScreenPos(ImVec2(fx, y + (rowH - size::field) * 0.5f));
+        ImGui::SetNextItemWidth(fw);
+        ImGui::PushFont(f.regular, type::body);
+        ImGui::PushStyleColor(ImGuiCol_FrameBg, color::field);
+        ImGui::PushStyleColor(ImGuiCol_Text, color::text);
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(space::sm, (size::field - type::body) * 0.5f - 1));
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, radius::field);
+        if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
+        ImGui::InputTextWithHint("##newscenename", "level2", ns.name.data(), ns.name.capacity() + 1,
+                                 ImGuiInputTextFlags_CallbackResize | ImGuiInputTextFlags_AutoSelectAll, resizePort, &ns.name);
+        const ImRect fr(ImVec2(fx, y), ImVec2(fx + fw, y + rowH));
+        interactiveRects().push_back(fr);
+        nameRect("newscene.name", fr);
+        ImGui::PopStyleVar(2);
+        ImGui::PopStyleColor(2);
+        ImGui::PopFont();
+    }
+    y += rowH + space::sm;
+
+    const std::string name = trimmedPath(ns.name);
+    std::string reason;
+    if (root.empty()) reason = "Open or create a project first";
+    else if (name.empty()) reason = "Enter a scene name";
+    else if (name.find_first_of("/\\:") != std::string::npos || name == "." || name == "..")
+        reason = "A scene name cannot hold / \\ or :";
+    const std::string where = reason.empty() ? "Creates " + utf8(root.filename()) + "/" + name +
+                                                   (name.size() > 6 && name.ends_with(".scene") ? "" : ".scene")
+                                             : reason;
+    ImGui::PushClipRect(ImVec2(o.x, y), ImVec2(o.x + inner, y + 20), true);
+    text(dl, ImVec2(o.x + labelW, y), f.regular, type::caption, reason.empty() ? color::textFaint : color::warn, where.c_str());
+    ImGui::PopClipRect();
+    y += 20;
+    if (!ns.error.empty()) {
+        ImGui::PushClipRect(ImVec2(o.x, y), ImVec2(o.x + inner, y + 20), true);
+        text(dl, ImVec2(o.x + labelW, y), f.regular, type::caption, color::bad, ("Could not create it: " + ns.error).c_str());
+        ImGui::PopClipRect();
+    }
+    y += 20 + space::sm;
+
+    const float crw = buttonWidth(icon::plus, "Create"), cw = buttonWidth(icon::x, "Cancel");
+    const float bx = o.x + inner - crw;
+    bool create = false;
+    if (reason.empty()) {
+        create = button("newscene.create", ImVec2(bx, y), icon::plus, "Create", ButtonKind::Primary) ||
+                 ImGui::IsKeyPressed(ImGuiKey_Enter, false);
+    } else {
+        const ImRect r(ImVec2(bx, y), ImVec2(bx + crw, y + size::field + 6));
+        nameRect("newscene.create", r);
+        dl->AddRectFilled(r.Min, r.Max, color::raised, radius::button);
+        dl->AddRect(r.Min, r.Max, color::border, radius::button);
+        textCentered(dl, r, f.medium, type::body, color::textFaint, "Create");
+    }
+    bool close = false;
+    if (button("newscene.cancel", ImVec2(bx - cw - space::sm, y), icon::x, "Cancel", ButtonKind::Ghost) ||
+        ImGui::IsKeyPressed(ImGuiKey_Escape, false))
+        close = true;
+    y += size::field + 6;
+    ImGui::SetCursorScreenPos(o);
+    ImGui::Dummy(ImVec2(inner, y - o.y));
+
+    if (create) {
+        editor::NewProject made = editor::createScene(root, name, openSceneFile(doc));
+        if (!made.error.empty()) {
+            ns.error = made.error;
+            scriptLine(nullptr, "newscene: failed " + made.error);
+        } else {
+            scriptLine(nullptr, "newscene: created " + utf8(made.scene));
+            close = true;
+            ns.error.clear();
+            if (openScene(st, doc, root / made.scene))
+                notify(st, "Created scene " + utf8(made.scene.stem()) + " in " + utf8(root.filename()), false);
+        }
+    }
+    if (close) {
+        ImGui::CloseCurrentPopup();
+        ns.shown = false;
+    }
+    ImGui::EndPopup();
 }
 
 // Import Unity Project: the Unity project folder and the new project's
@@ -3371,11 +3537,27 @@ static std::vector<MenuEntry> menuEntries(int which, State& st, editor::Document
     std::vector<MenuEntry> m;
     switch (which) {
         case 0:  // File
-            m.push_back(item("New Project...", "Ctrl+N", true, [&] { request(st, doc, State::Pending::New); }));
-            m.push_back(item("Open...", "Ctrl+O", true, [&] { request(st, doc, State::Pending::Open); }));
+            // A project is a folder of scenes sharing disc, VRAM, strings and
+            // the build list; a scene is one level in the open project.
+            m.push_back(item("New Project (New Folder)...", "Ctrl+N", true, [&] { request(st, doc, State::Pending::New); }));
+            {
+                MenuEntry e = item("New Scene in Project...", "", !doc.projectRoot().empty(),
+                                   [&] { request(st, doc, State::Pending::NewScene); });
+                e.tip = doc.projectRoot().empty() ? "Open or create a project first" : "An empty scene in " + utf8(doc.projectRoot().filename());
+                m.push_back(std::move(e));
+            }
+            m.push_back(item("Open Project...", "Ctrl+Shift+O", true, [&] { request(st, doc, State::Pending::OpenProject); }));
+            m.push_back(item("Open Scene...", "Ctrl+O", true, [&] { request(st, doc, State::Pending::Open); }));
             m.push_back(item("Import Unity Project...", "", true, [&] { request(st, doc, State::Pending::ImportUnity); }));
             m.push_back(separator());
-            m.push_back(heading("Recent"));
+            m.push_back(heading("Recent projects"));
+            if (st.recentProjects.items().empty()) m.push_back(item("No recent projects", "", false, nullptr));
+            for (const std::filesystem::path& p : st.recentProjects.items()) {
+                std::filesystem::path dir = p;
+                // The folder it is in, faint on the right, tells two of one name apart.
+                m.push_back(item(utf8(p.filename()), "in " + utf8(p.parent_path().filename()), true, [&st, &doc, dir] { request(st, doc, State::Pending::RecentProject, dir); }));
+            }
+            m.push_back(heading("Recent scenes"));
             if (st.recent.items().empty()) m.push_back(item("No recent scenes", "", false, nullptr));
             for (const std::filesystem::path& p : st.recent.items()) {
                 std::filesystem::path scene = p;
@@ -8379,23 +8561,29 @@ static void tilemapSection(State& st, ImDrawList* dl, editor::Document& doc, flo
     }
 }
 
-static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor::Document& doc) {
+// The Project settings tab of the inspector (#343): what the whole project
+// shares, kept in files at its root, not in any scene: the build list
+// (scenes.list), the VRAM layout (vram.json) and the disc (disc.json). The
+// string table (strings.json) has its own window, opened from here or View >
+// Strings. Shown whatever is selected; every change is saved at once and is
+// not part of undo.
+static void projectSettings(State& st, ImDrawList* dl, ImRect r, float y, editor::Document& doc) {
     Fonts& f = fonts();
     ImGui::PushClipRect(ImVec2(r.Min.x, y), ImVec2(r.Max.x, r.Max.y - 1), true);
-    // The scene inspector's visible body: --scroll-to wheels it until a control is inside.
-    nameRect("scene.panel", ImRect(ImVec2(r.Min.x, y), ImVec2(r.Max.x, r.Max.y - 1)));
+    // The tab's visible body: --scroll-to wheels it until a control is inside.
+    nameRect("project.panel", ImRect(ImVec2(r.Min.x, y), ImVec2(r.Max.x, r.Max.y - 1)));
     const float x0 = r.Min.x + space::md, x1 = r.Max.x - space::md;
-    const splash::SceneSettings& set = doc.scene().settings;
-    // Taller than the panel, it scrolls with the wheel.
     static float scroll = 0;
     const float top0 = y;
     y -= scroll;
 
     ImRect ic(ImVec2(x0, y), ImVec2(x0 + 40, y + 40));
     dl->AddRectFilled(ic.Min, ic.Max, (color::accentHover & 0x00ffffffu) | (34u << IM_COL32_A_SHIFT), radius::card);
-    textCentered(dl, ic, f.medium, type::icon + 3, color::accentHover, icon::layers);
-    text(dl, ImVec2(ic.Max.x + space::md, y + 2), f.semibold, type::title, color::text, doc.sceneStem().c_str());
-    text(dl, ImVec2(ic.Max.x + space::md, y + 22), f.regular, type::caption, color::textFaint, "Scene settings");
+    textCentered(dl, ic, f.medium, type::icon + 3, color::accentHover, icon::folderOpen);
+    const std::string projName = doc.projectRoot().empty() ? std::string("No project") : utf8(doc.projectRoot().filename());
+    text(dl, ImVec2(ic.Max.x + space::md, y + 2), f.semibold, type::title, color::text, projName.c_str());
+    text(dl, ImVec2(ic.Max.x + space::md, y + 22), f.regular, type::caption, color::textFaint,
+         "Project settings, shared by every scene");
     y += 40 + space::lg;
 
     const std::optional<splash::ExportResult>& res = st.live.result();
@@ -8411,264 +8599,8 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
         dl->AddText(f.regular, type::caption, ImVec2(tx, y - 2), col, s.c_str(), nullptr, x1 - space::sm - tx);
         y += f.regular->CalcTextSizeA(type::caption, FLT_MAX, x1 - space::sm - tx, s.c_str()).y + space::xs;
     };
-
-    // The scene's own script: onSceneCreationStart/End and anything scene-wide.
-    {
-        const float stop = y;
-        const bool open = section("s_scenescript", ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), icon::script, kind::script, "Script",
-                                  true, true, false);
-        if (!open) ImGui::PushClipRect(ImVec2(0, 0), ImVec2(0, 0), false);
-        y += 34 + space::xs;
-        const std::string& lua = set.script;
-        const bool found = !lua.empty() && doc.fileExists(lua);
-        if (slotField(st, doc, static_cast<int>(AssetSlot::SceneLua), {}, "scenelua", "scene.lua", row("lscenelua", "File", "The script, blocks or Lua, that runs for the whole scene. Click to pick one."),
-                       icon::fileCode, lua.empty() || found ? kind::script : color::warn, lua.empty() ? "None" : fileName(lua).c_str(),
-                       nullptr))
-            pickAsset(AssetSlot::SceneLua, {});
-        const ImVec2 at(x0 + space::sm + lw, y + space::xxs);
-        if (lua.empty()) {
-            if (auto lang = newScriptButtons("newsceneblocks", "newscenelua", at, x1 - space::sm,
-                                             "Writes scripts/<scene name>.blocks with a when-the-scene-starts stack, and opens it.",
-                                             "Writes scripts/<scene name>.lua with onSceneCreationStart and onSceneCreationEnd, and opens it."))
-                newScript(st, doc, nullptr, *lang);
-        } else {
-            float ew = 0;
-            if (button("editscenelua", at, icon::fileCode, found ? "Edit script" : "Create script", ButtonKind::Secondary, &ew,
-                       "Opens the file in the script editor, beside the Scene."))
-                openScript(st, doc, lua);
-            if (button("removescenelua", ImVec2(at.x + ew + space::sm, at.y), icon::trash, "Remove", ButtonKind::Ghost, nullptr,
-                       "The scene runs no script; the file stays on disk (Ctrl+Z brings it back)"))
-                doc.editSettings([](splash::SceneSettings& s) { s.script.clear(); });
-        }
-        y += size::field + space::sm;
-        if (!open) {
-            ImGui::PopClipRect();
-            y = stop + 34 + space::md;
-        } else {
-            dl->AddRect(ImVec2(x0, stop), ImVec2(x1, y + space::sm), rgb(0xffffff, 10), radius::card);
-            y += space::sm + space::md;
-        }
-    }
-
-    // Cutscenes and animations, each with Edit in timeline.
-    {
-        const float stop = y;
-        const bool open = section("s_sequences", ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), icon::camera, rgb(0x5ccfe0),
-                                  "Cutscenes and animations", true, true, false);
-        if (!open) ImGui::PushClipRect(ImVec2(0, 0), ImVec2(0, 0), false);
-        y = st.timeline.sequenceList(dl, x0 + space::sm, x1 - space::sm, y + 34 + space::xs, doc);
-        if (!open) {
-            ImGui::PopClipRect();
-            y = stop + 34 + space::md;
-        } else {
-            dl->AddRect(ImVec2(x0, stop), ImVec2(x1, y + space::sm), rgb(0xffffff, 10), radius::card);
-            y += space::sm + space::md;
-        }
-    }
-
-    // Fog, GTE scaling and scene type: what the old exporter inspector had.
-    {
-        const float stop = y;
-        const bool open = section("s_rendering", ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), icon::eye, color::textDim, "Rendering",
-                                  true, true, false);
-        if (!open) ImGui::PushClipRect(ImVec2(0, 0), ImVec2(0, 0), false);
-        y += 34 + space::xs;
-        const float gteNow = set.gteScaling > 0 ? set.gteScaling : 100.f;
-        // psxsplash clears the screen to this colour every frame (renderer.cpp
-        // SetFog), fog or not; the pack keeps it in the fog block.
-        const ImRect colRow = row("lfogcol", "Background",
-                                  "The screen clears to this colour every frame, fog on or off. With fog or the edge fade "
-                                  "on, distant triangles also fade to it. Click to pick one.");
-        nameRect("scene.fogcol", colRow);
-        const ColorFieldHit fogHit = colorField("fogcol", colRow, set.fog.color, "scene.fogcol");
-        if (fogHit.clicked) ImGui::OpenPopup("##fogcolpick");
-        // Paste from the field's right-click menu: one undo step.
-        if (fogHit.pasted) doc.editSettings([&](splash::SceneSettings& s) { s.fog.color = *fogHit.pasted; });
-        placePopupBelow("##fogcolpick", colRow, ImVec2(1, 0));
-        pushPopupStyle();
-        if (ImGui::BeginPopup("##fogcolpick")) {
-            float c[3] = {set.fog.color[0], set.fog.color[1], set.fog.color[2]};
-            ImGui::SetNextItemWidth(220);
-            if (ImGui::ColorPicker3("##fogcolwheel", c, ImGuiColorEditFlags_NoSidePreview | ImGuiColorEditFlags_DisplayHex |
-                                                            ImGuiColorEditFlags_NoAlpha))
-                doc.editSettings([&](splash::SceneSettings& s) { s.fog.color = {c[0], c[1], c[2]}; }, "fogcol");
-            if (ImGui::IsItemDeactivated()) doc.endMerge();
-            nameRect("scene.fogcolpick", ImGui::GetCurrentWindow()->Rect());
-            ImGui::EndPopup();
-        }
-        ImGui::PopStyleVar(4);
-        ImGui::PopStyleColor(2);
-        ImRect v = row("lfog", "Fog", "Fades distant triangles to the background colour, and culls anything wholly past the fog wall.");
-        const ImRect fogSw(ImVec2(v.Min.x, v.GetCenter().y - 8), ImVec2(v.Min.x + 30, v.GetCenter().y + 8));
-        nameRect("scene.fog", fogSw);
-        if (toggle("fogon", fogSw, set.fog.enabled))
-            doc.editSettings([](splash::SceneSettings& s) { s.fog.enabled = !s.fog.enabled; });
-        const int density = std::clamp(set.fog.density, 1, 10), wall = 20000 / density;
-        char tip[256];
-        std::snprintf(tip, sizeof tip,
-                      "1 to 10: higher is thicker. The fog wall sits at 20000 / density depth units, %d now (%.1f m at this "
-                      "GTE scaling); nothing wholly past it is drawn.",
-                      wall, double(wall) * gteNow / 4096.0);
-        const ImRect denRow = row("lfogden", "Density", tip);
-        nameRect("scene.fogdensity", denRow);
-        float dv = float(density);
-        FieldEdit fe = numberField("fogden", denRow, std::to_string(density).c_str(), nullptr, 0, nullptr, &dv);
-        if (fe.changed) {
-            const int n = std::clamp(int(std::lround(dv)), 1, 10);
-            doc.editSettings([n](splash::SceneSettings& s) { s.fog.density = n; }, "fogdensity");
-        }
-        if (fe.done) doc.endMerge();
-        if (!set.fog.enabled) caption("Off: density is kept for when fog is on.", color::textFaint);
-        // psxsplash renderer.cpp (fade.hh): the last eighth of the way to the
-        // nearer of the ordering table end and the fog wall fades to the
-        // background, so nothing appears all at once at the edge.
-        v = row("ledgefade", "Edge fade",
-                "Distant objects fade in from the background colour as they come within drawing distance, instead "
-                "of appearing all at once. Works with fog on or off.");
-        const ImRect edgeSw(ImVec2(v.Min.x, v.GetCenter().y - 8), ImVec2(v.Min.x + 30, v.GetCenter().y + 8));
-        nameRect("scene.edgefade", edgeSw);
-        if (toggle("edgefadeon", edgeSw, set.edgeFade))
-            doc.editSettings([](splash::SceneSettings& s) { s.edgeFade = !s.edgeFade; });
-        const ImRect gteRow = row("lgte", "GTE scaling",
-                                  "Editor units per PS1 unit. Positions export as value / scaling in 16-bit 4.12 fixed point, so "
-                                  "everything must sit within 8 x scaling of the origin. Smaller is finer, larger reaches farther.");
-        nameRect("scene.gte", gteRow);
-        float gv = gteNow;
-        fe = numberField("gte", gteRow, fmtShort(gteNow).c_str(), nullptr, 0, nullptr, &gv);
-        if (fe.changed) {
-            const float g = std::clamp(gv, 0.1f, 10000.f);
-            doc.editSettings([g](splash::SceneSettings& s) { s.gteScaling = g; }, "gte");
-        }
-        if (fe.done) doc.endMerge();
-        const ImRect typeRow = row("lscenetype", "Scene type",
-                                   "Written to the pack, but psxsplash does not read it: culling follows the Room objects. With "
-                                   "any Room the scene draws room by room through portals; with none it frustum-culls the "
-                                   "BVH. Both types draw the same way.");
-        nameRect("scene.scenetype", typeRow);
-        const bool interior = set.sceneType == splash::SceneType::Interior;
-        int pick = dropdownMenu("scenetype", typeRow, nullptr, interior ? "Interior" : "Exterior", {"Exterior", "Interior"}, interior);
-        if (pick >= 0) {
-            const splash::SceneType t = pick ? splash::SceneType::Interior : splash::SceneType::Exterior;
-            if (t != set.sceneType) doc.editSettings([t](splash::SceneSettings& s) { s.sceneType = t; });
-        }
-        // The culling psxsplash will use, from the Room objects the exporter
-        // writes (rooms.cpp collectRoomObjects: on in the hierarchy).
-        size_t roomCount = 0;
-        {
-            const std::vector<splash::FlatObject> flat = splash::flatten(doc.scene());
-            std::vector<std::string> roomErrors;
-            roomCount = splash::collectRoomObjects(flat, roomErrors).rooms.size();
-        }
-        const float cullTop = y;
-        caption(roomCount ? "Culling: rooms and portals, " + std::to_string(roomCount) + (roomCount == 1 ? " room." : " rooms.")
-                          : std::string("Culling: frustum (BVH). Add a Room to cull by rooms and portals."),
-                color::textFaint);
-        nameRect("scene.culling", ImRect(ImVec2(x0, cullTop - 2), ImVec2(x1, y)));
-        if (namedRectsOn()) {
-            // Scripted tests: the section's values when they change.
-            char now[160];
-            std::snprintf(now, sizeof now, "scene: fog %d density %d colour %s gte %g type %s culling %s edgefade %d",
-                          set.fog.enabled ? 1 : 0, set.fog.density, colourHex(set.fog.color).c_str(), double(set.gteScaling),
-                          interior ? "interior" : "exterior", roomCount ? ("rooms " + std::to_string(roomCount)).c_str() : "frustum",
-                          set.edgeFade ? 1 : 0);
-            static std::string reported;
-            if (reported != now) {
-                reported = now;
-                std::printf("%s\n", now);
-                std::fflush(stdout);
-            }
-        }
-        if (!open) {
-            ImGui::PopClipRect();
-            y = stop + 34 + space::md;
-        } else {
-            dl->AddRect(ImVec2(x0, stop), ImVec2(x1, y + space::sm), rgb(0xffffff, 10), radius::card);
-            y += space::sm + space::md;
-        }
-    }
-
-    // The loading screen: one of the scene's UI canvases, shown by psxsplash
-    // while the scene loads and left out of the scene itself.
-    {
-        const float stop = y;
-        const bool open = section("s_loading", ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), icon::layoutTemplate, color::textDim,
-                                  "Loading screen", true, true, false);
-        if (!open) ImGui::PushClipRect(ImVec2(0, 0), ImVec2(0, 0), false);
-        y += 34 + space::xs;
-        const std::string& pickName = set.loadingCanvas;
-        const splash::UICanvas* picked = nullptr;
-        std::vector<const char*> items{"None"};
-        int current = pickName.empty() ? 0 : -1;
-        for (const splash::UICanvas& cv : doc.scene().canvases) {
-            if (!pickName.empty() && !picked && cv.name == pickName) {
-                picked = &cv;
-                current = int(items.size());
-            }
-            items.push_back(cv.name.c_str());
-        }
-        const ImRect canvasRow = row("lloading", "Canvas",
-                                     "A UI canvas of this scene that psxsplash draws while the scene loads. Its progress bar "
-                                     "named \"loading\" fills as the scene comes in.");
-        nameRect("scene.loading", canvasRow);
-        const int pick = dropdownMenu("scene.loading", canvasRow, icon::layoutTemplate, pickName.empty() ? "None" : pickName.c_str(),
-                                      items, current);
-        std::string chosen = pick > 0 ? std::string(items[size_t(pick)]) : std::string();
-        const bool isPick = pick >= 0;
-        caption(pickName.empty() ? "Shown while the scene loads. Pick a UI canvas."
-                                 : "Drawn while the scene loads; the canvas is left out of the scene.",
-                color::textFaint);
-        // What the engine will do with the pick: worked out from the scene, not an export.
-        bool noBar = false, lines = false;
-        const bool missing = !pickName.empty() && !picked;
-        if (picked) {
-            noBar = std::none_of(picked->elements.begin(), picked->elements.end(), [](const splash::UIElement& e) {
-                return e.type == splash::UIElementType::Progress && e.name == "loading";
-            });
-            lines = std::any_of(picked->elements.begin(), picked->elements.end(),
-                                [](const splash::UIElement& e) { return e.type == splash::UIElementType::Line; });
-        }
-        if (missing) {
-            const float top = y;
-            caption("Canvas \"" + pickName + "\" no longer exists: export stops until another canvas or None is picked.",
-                    color::warn);
-            nameRect("scene.loadingmissing", ImRect(ImVec2(x0 + space::sm + lw, top), ImVec2(x1 - space::sm, y)));
-        }
-        if (noBar) caption("No progress bar named \"loading\": the screen shows without one.", color::warn);
-        if (lines) caption("Lines are not drawn on the loading screen.", color::warn);
-        if (namedRectsOn()) {
-            // Scripted tests: the pick and its warnings when they change (not the scene's first frame).
-            std::string warns;
-            if (missing) warns += "missing";
-            if (noBar) warns += std::string(warns.empty() ? "" : ",") + "bar";
-            if (lines) warns += std::string(warns.empty() ? "" : ",") + "line";
-            const std::string now = "scene: loading " + (pickName.empty() ? std::string("none") : pickName);
-            const std::string nowWarn = "scene: loading warnings " + (warns.empty() ? std::string("none") : warns);
-            static unsigned seenLoad = ~0u;
-            static std::string reported, reportedWarn;
-            if (seenLoad != doc.loadId()) {
-                seenLoad = doc.loadId();
-                reported = now;
-                reportedWarn = nowWarn;
-            }
-            if (reported != now) {
-                reported = now;
-                std::printf("%s\n", now.c_str());
-            }
-            if (reportedWarn != nowWarn) {
-                reportedWarn = nowWarn;
-                std::printf("%s\n", nowWarn.c_str());
-            }
-            std::fflush(stdout);
-        }
-        if (isPick && chosen != pickName) doc.editSettings([chosen](splash::SceneSettings& s) { s.loadingCanvas = chosen; });
-        if (!open) {
-            ImGui::PopClipRect();
-            y = stop + 34 + space::md;
-        } else {
-            dl->AddRect(ImVec2(x0, stop), ImVec2(x1, y + space::sm), rgb(0xffffff, 10), radius::card);
-            y += space::sm + space::md;
-        }
-    }
+    (void)stats;
+    (void)caption;
 
     // The build list (scenes.list): the scenes Play and Export write, in order.
     // A project setting, saved as soon as it changes and not part of undo.
@@ -9837,6 +9769,319 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
             report(reportedError, licenceError.empty() ? std::string() : "disc: licence error " + licenceError);
         }
         if (!sOpen) {
+            ImGui::PopClipRect();
+            y = stop + 34 + space::md;
+        } else {
+            dl->AddRect(ImVec2(x0, stop), ImVec2(x1, y + space::sm), rgb(0xffffff, 10), radius::card);
+            y += space::sm + space::md;
+        }
+    }
+
+    // The string table: a project file too, edited in its own window.
+    {
+        const float bw = buttonWidth(icon::globe, "Edit strings...");
+        if (button("project.strings", ImVec2(x0 + space::sm, y), icon::globe, "Edit strings...", ButtonKind::Secondary))
+            st.strings.open = true;
+        text(dl, ImVec2(x0 + space::sm + bw + space::md, centerY(f.regular, type::caption, y, y + size::field + 6)), f.regular,
+             type::caption, color::textFaint, "strings.json: the project's text in every language");
+        y += size::field + 6 + space::md;
+    }
+    ImGui::PopClipRect();
+
+    const float content = y + space::xl - (top0 - scroll), view = r.Max.y - top0;
+    const float maxScroll = std::max(0.0f, content - view);
+    if (maxScroll > 0 && ImGui::IsMouseHoveringRect(r.Min, r.Max) && !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId))
+        scroll -= ImGui::GetIO().MouseWheel * 48.0f;
+    scroll = std::clamp(scroll, 0.0f, maxScroll);
+    if (maxScroll > 0) {
+        const float h = view * view / content, t = top0 + (view - h) * (scroll / maxScroll);
+        dl->AddRectFilled(ImVec2(r.Max.x - 5, t + 2), ImVec2(r.Max.x - 2, t + h - 2), rgb(0xffffff, 40), 2);
+    }
+}
+
+static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor::Document& doc) {
+    Fonts& f = fonts();
+    ImGui::PushClipRect(ImVec2(r.Min.x, y), ImVec2(r.Max.x, r.Max.y - 1), true);
+    // The scene inspector's visible body: --scroll-to wheels it until a control is inside.
+    nameRect("scene.panel", ImRect(ImVec2(r.Min.x, y), ImVec2(r.Max.x, r.Max.y - 1)));
+    const float x0 = r.Min.x + space::md, x1 = r.Max.x - space::md;
+    const splash::SceneSettings& set = doc.scene().settings;
+    // Taller than the panel, it scrolls with the wheel.
+    static float scroll = 0;
+    const float top0 = y;
+    y -= scroll;
+
+    ImRect ic(ImVec2(x0, y), ImVec2(x0 + 40, y + 40));
+    dl->AddRectFilled(ic.Min, ic.Max, (color::accentHover & 0x00ffffffu) | (34u << IM_COL32_A_SHIFT), radius::card);
+    textCentered(dl, ic, f.medium, type::icon + 3, color::accentHover, icon::layers);
+    text(dl, ImVec2(ic.Max.x + space::md, y + 2), f.semibold, type::title, color::text, doc.sceneStem().c_str());
+    text(dl, ImVec2(ic.Max.x + space::md, y + 22), f.regular, type::caption, color::textFaint, "Scene settings");
+    y += 40 + space::lg;
+
+    const std::optional<splash::ExportResult>& res = st.live.result();
+    const splash::ExportStats* stats = res && res->ok() ? &res->stats : nullptr;
+    const float lw = 112, rowH = 32;
+    auto row = [&](const char* id, const char* label, const char* tip) {
+        ImRect rr(ImVec2(x0 + space::sm, y), ImVec2(x1 - space::sm, y + rowH));
+        y += rowH;
+        return property(id, rr, lw, label, tip);
+    };
+    auto caption = [&](const std::string& s, ImU32 col) {
+        float tx = x0 + space::sm + lw;
+        dl->AddText(f.regular, type::caption, ImVec2(tx, y - 2), col, s.c_str(), nullptr, x1 - space::sm - tx);
+        y += f.regular->CalcTextSizeA(type::caption, FLT_MAX, x1 - space::sm - tx, s.c_str()).y + space::xs;
+    };
+
+    // The scene's own script: onSceneCreationStart/End and anything scene-wide.
+    {
+        const float stop = y;
+        const bool open = section("s_scenescript", ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), icon::script, kind::script, "Script",
+                                  true, true, false);
+        if (!open) ImGui::PushClipRect(ImVec2(0, 0), ImVec2(0, 0), false);
+        y += 34 + space::xs;
+        const std::string& lua = set.script;
+        const bool found = !lua.empty() && doc.fileExists(lua);
+        if (slotField(st, doc, static_cast<int>(AssetSlot::SceneLua), {}, "scenelua", "scene.lua", row("lscenelua", "File", "The script, blocks or Lua, that runs for the whole scene. Click to pick one."),
+                       icon::fileCode, lua.empty() || found ? kind::script : color::warn, lua.empty() ? "None" : fileName(lua).c_str(),
+                       nullptr))
+            pickAsset(AssetSlot::SceneLua, {});
+        const ImVec2 at(x0 + space::sm + lw, y + space::xxs);
+        if (lua.empty()) {
+            if (auto lang = newScriptButtons("newsceneblocks", "newscenelua", at, x1 - space::sm,
+                                             "Writes scripts/<scene name>.blocks with a when-the-scene-starts stack, and opens it.",
+                                             "Writes scripts/<scene name>.lua with onSceneCreationStart and onSceneCreationEnd, and opens it."))
+                newScript(st, doc, nullptr, *lang);
+        } else {
+            float ew = 0;
+            if (button("editscenelua", at, icon::fileCode, found ? "Edit script" : "Create script", ButtonKind::Secondary, &ew,
+                       "Opens the file in the script editor, beside the Scene."))
+                openScript(st, doc, lua);
+            if (button("removescenelua", ImVec2(at.x + ew + space::sm, at.y), icon::trash, "Remove", ButtonKind::Ghost, nullptr,
+                       "The scene runs no script; the file stays on disk (Ctrl+Z brings it back)"))
+                doc.editSettings([](splash::SceneSettings& s) { s.script.clear(); });
+        }
+        y += size::field + space::sm;
+        if (!open) {
+            ImGui::PopClipRect();
+            y = stop + 34 + space::md;
+        } else {
+            dl->AddRect(ImVec2(x0, stop), ImVec2(x1, y + space::sm), rgb(0xffffff, 10), radius::card);
+            y += space::sm + space::md;
+        }
+    }
+
+    // Cutscenes and animations, each with Edit in timeline.
+    {
+        const float stop = y;
+        const bool open = section("s_sequences", ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), icon::camera, rgb(0x5ccfe0),
+                                  "Cutscenes and animations", true, true, false);
+        if (!open) ImGui::PushClipRect(ImVec2(0, 0), ImVec2(0, 0), false);
+        y = st.timeline.sequenceList(dl, x0 + space::sm, x1 - space::sm, y + 34 + space::xs, doc);
+        if (!open) {
+            ImGui::PopClipRect();
+            y = stop + 34 + space::md;
+        } else {
+            dl->AddRect(ImVec2(x0, stop), ImVec2(x1, y + space::sm), rgb(0xffffff, 10), radius::card);
+            y += space::sm + space::md;
+        }
+    }
+
+    // Fog, GTE scaling and scene type: what the old exporter inspector had.
+    {
+        const float stop = y;
+        const bool open = section("s_rendering", ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), icon::eye, color::textDim, "Rendering",
+                                  true, true, false);
+        if (!open) ImGui::PushClipRect(ImVec2(0, 0), ImVec2(0, 0), false);
+        y += 34 + space::xs;
+        const float gteNow = set.gteScaling > 0 ? set.gteScaling : 100.f;
+        // psxsplash clears the screen to this colour every frame (renderer.cpp
+        // SetFog), fog or not; the pack keeps it in the fog block.
+        const ImRect colRow = row("lfogcol", "Background",
+                                  "The screen clears to this colour every frame, fog on or off. With fog or the edge fade "
+                                  "on, distant triangles also fade to it. Click to pick one.");
+        nameRect("scene.fogcol", colRow);
+        const ColorFieldHit fogHit = colorField("fogcol", colRow, set.fog.color, "scene.fogcol");
+        if (fogHit.clicked) ImGui::OpenPopup("##fogcolpick");
+        // Paste from the field's right-click menu: one undo step.
+        if (fogHit.pasted) doc.editSettings([&](splash::SceneSettings& s) { s.fog.color = *fogHit.pasted; });
+        placePopupBelow("##fogcolpick", colRow, ImVec2(1, 0));
+        pushPopupStyle();
+        if (ImGui::BeginPopup("##fogcolpick")) {
+            float c[3] = {set.fog.color[0], set.fog.color[1], set.fog.color[2]};
+            ImGui::SetNextItemWidth(220);
+            if (ImGui::ColorPicker3("##fogcolwheel", c, ImGuiColorEditFlags_NoSidePreview | ImGuiColorEditFlags_DisplayHex |
+                                                            ImGuiColorEditFlags_NoAlpha))
+                doc.editSettings([&](splash::SceneSettings& s) { s.fog.color = {c[0], c[1], c[2]}; }, "fogcol");
+            if (ImGui::IsItemDeactivated()) doc.endMerge();
+            nameRect("scene.fogcolpick", ImGui::GetCurrentWindow()->Rect());
+            ImGui::EndPopup();
+        }
+        ImGui::PopStyleVar(4);
+        ImGui::PopStyleColor(2);
+        ImRect v = row("lfog", "Fog", "Fades distant triangles to the background colour, and culls anything wholly past the fog wall.");
+        const ImRect fogSw(ImVec2(v.Min.x, v.GetCenter().y - 8), ImVec2(v.Min.x + 30, v.GetCenter().y + 8));
+        nameRect("scene.fog", fogSw);
+        if (toggle("fogon", fogSw, set.fog.enabled))
+            doc.editSettings([](splash::SceneSettings& s) { s.fog.enabled = !s.fog.enabled; });
+        const int density = std::clamp(set.fog.density, 1, 10), wall = 20000 / density;
+        char tip[256];
+        std::snprintf(tip, sizeof tip,
+                      "1 to 10: higher is thicker. The fog wall sits at 20000 / density depth units, %d now (%.1f m at this "
+                      "GTE scaling); nothing wholly past it is drawn.",
+                      wall, double(wall) * gteNow / 4096.0);
+        const ImRect denRow = row("lfogden", "Density", tip);
+        nameRect("scene.fogdensity", denRow);
+        float dv = float(density);
+        FieldEdit fe = numberField("fogden", denRow, std::to_string(density).c_str(), nullptr, 0, nullptr, &dv);
+        if (fe.changed) {
+            const int n = std::clamp(int(std::lround(dv)), 1, 10);
+            doc.editSettings([n](splash::SceneSettings& s) { s.fog.density = n; }, "fogdensity");
+        }
+        if (fe.done) doc.endMerge();
+        if (!set.fog.enabled) caption("Off: density is kept for when fog is on.", color::textFaint);
+        // psxsplash renderer.cpp (fade.hh): the last eighth of the way to the
+        // nearer of the ordering table end and the fog wall fades to the
+        // background, so nothing appears all at once at the edge.
+        v = row("ledgefade", "Edge fade",
+                "Distant objects fade in from the background colour as they come within drawing distance, instead "
+                "of appearing all at once. Works with fog on or off.");
+        const ImRect edgeSw(ImVec2(v.Min.x, v.GetCenter().y - 8), ImVec2(v.Min.x + 30, v.GetCenter().y + 8));
+        nameRect("scene.edgefade", edgeSw);
+        if (toggle("edgefadeon", edgeSw, set.edgeFade))
+            doc.editSettings([](splash::SceneSettings& s) { s.edgeFade = !s.edgeFade; });
+        const ImRect gteRow = row("lgte", "GTE scaling",
+                                  "Editor units per PS1 unit. Positions export as value / scaling in 16-bit 4.12 fixed point, so "
+                                  "everything must sit within 8 x scaling of the origin. Smaller is finer, larger reaches farther.");
+        nameRect("scene.gte", gteRow);
+        float gv = gteNow;
+        fe = numberField("gte", gteRow, fmtShort(gteNow).c_str(), nullptr, 0, nullptr, &gv);
+        if (fe.changed) {
+            const float g = std::clamp(gv, 0.1f, 10000.f);
+            doc.editSettings([g](splash::SceneSettings& s) { s.gteScaling = g; }, "gte");
+        }
+        if (fe.done) doc.endMerge();
+        const ImRect typeRow = row("lscenetype", "Scene type",
+                                   "Written to the pack, but psxsplash does not read it: culling follows the Room objects. With "
+                                   "any Room the scene draws room by room through portals; with none it frustum-culls the "
+                                   "BVH. Both types draw the same way.");
+        nameRect("scene.scenetype", typeRow);
+        const bool interior = set.sceneType == splash::SceneType::Interior;
+        int pick = dropdownMenu("scenetype", typeRow, nullptr, interior ? "Interior" : "Exterior", {"Exterior", "Interior"}, interior);
+        if (pick >= 0) {
+            const splash::SceneType t = pick ? splash::SceneType::Interior : splash::SceneType::Exterior;
+            if (t != set.sceneType) doc.editSettings([t](splash::SceneSettings& s) { s.sceneType = t; });
+        }
+        // The culling psxsplash will use, from the Room objects the exporter
+        // writes (rooms.cpp collectRoomObjects: on in the hierarchy).
+        size_t roomCount = 0;
+        {
+            const std::vector<splash::FlatObject> flat = splash::flatten(doc.scene());
+            std::vector<std::string> roomErrors;
+            roomCount = splash::collectRoomObjects(flat, roomErrors).rooms.size();
+        }
+        const float cullTop = y;
+        caption(roomCount ? "Culling: rooms and portals, " + std::to_string(roomCount) + (roomCount == 1 ? " room." : " rooms.")
+                          : std::string("Culling: frustum (BVH). Add a Room to cull by rooms and portals."),
+                color::textFaint);
+        nameRect("scene.culling", ImRect(ImVec2(x0, cullTop - 2), ImVec2(x1, y)));
+        if (namedRectsOn()) {
+            // Scripted tests: the section's values when they change.
+            char now[160];
+            std::snprintf(now, sizeof now, "scene: fog %d density %d colour %s gte %g type %s culling %s edgefade %d",
+                          set.fog.enabled ? 1 : 0, set.fog.density, colourHex(set.fog.color).c_str(), double(set.gteScaling),
+                          interior ? "interior" : "exterior", roomCount ? ("rooms " + std::to_string(roomCount)).c_str() : "frustum",
+                          set.edgeFade ? 1 : 0);
+            static std::string reported;
+            if (reported != now) {
+                reported = now;
+                std::printf("%s\n", now);
+                std::fflush(stdout);
+            }
+        }
+        if (!open) {
+            ImGui::PopClipRect();
+            y = stop + 34 + space::md;
+        } else {
+            dl->AddRect(ImVec2(x0, stop), ImVec2(x1, y + space::sm), rgb(0xffffff, 10), radius::card);
+            y += space::sm + space::md;
+        }
+    }
+
+    // The loading screen: one of the scene's UI canvases, shown by psxsplash
+    // while the scene loads and left out of the scene itself.
+    {
+        const float stop = y;
+        const bool open = section("s_loading", ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), icon::layoutTemplate, color::textDim,
+                                  "Loading screen", true, true, false);
+        if (!open) ImGui::PushClipRect(ImVec2(0, 0), ImVec2(0, 0), false);
+        y += 34 + space::xs;
+        const std::string& pickName = set.loadingCanvas;
+        const splash::UICanvas* picked = nullptr;
+        std::vector<const char*> items{"None"};
+        int current = pickName.empty() ? 0 : -1;
+        for (const splash::UICanvas& cv : doc.scene().canvases) {
+            if (!pickName.empty() && !picked && cv.name == pickName) {
+                picked = &cv;
+                current = int(items.size());
+            }
+            items.push_back(cv.name.c_str());
+        }
+        const ImRect canvasRow = row("lloading", "Canvas",
+                                     "A UI canvas of this scene that psxsplash draws while the scene loads. Its progress bar "
+                                     "named \"loading\" fills as the scene comes in.");
+        nameRect("scene.loading", canvasRow);
+        const int pick = dropdownMenu("scene.loading", canvasRow, icon::layoutTemplate, pickName.empty() ? "None" : pickName.c_str(),
+                                      items, current);
+        std::string chosen = pick > 0 ? std::string(items[size_t(pick)]) : std::string();
+        const bool isPick = pick >= 0;
+        caption(pickName.empty() ? "Shown while the scene loads. Pick a UI canvas."
+                                 : "Drawn while the scene loads; the canvas is left out of the scene.",
+                color::textFaint);
+        // What the engine will do with the pick: worked out from the scene, not an export.
+        bool noBar = false, lines = false;
+        const bool missing = !pickName.empty() && !picked;
+        if (picked) {
+            noBar = std::none_of(picked->elements.begin(), picked->elements.end(), [](const splash::UIElement& e) {
+                return e.type == splash::UIElementType::Progress && e.name == "loading";
+            });
+            lines = std::any_of(picked->elements.begin(), picked->elements.end(),
+                                [](const splash::UIElement& e) { return e.type == splash::UIElementType::Line; });
+        }
+        if (missing) {
+            const float top = y;
+            caption("Canvas \"" + pickName + "\" no longer exists: export stops until another canvas or None is picked.",
+                    color::warn);
+            nameRect("scene.loadingmissing", ImRect(ImVec2(x0 + space::sm + lw, top), ImVec2(x1 - space::sm, y)));
+        }
+        if (noBar) caption("No progress bar named \"loading\": the screen shows without one.", color::warn);
+        if (lines) caption("Lines are not drawn on the loading screen.", color::warn);
+        if (namedRectsOn()) {
+            // Scripted tests: the pick and its warnings when they change (not the scene's first frame).
+            std::string warns;
+            if (missing) warns += "missing";
+            if (noBar) warns += std::string(warns.empty() ? "" : ",") + "bar";
+            if (lines) warns += std::string(warns.empty() ? "" : ",") + "line";
+            const std::string now = "scene: loading " + (pickName.empty() ? std::string("none") : pickName);
+            const std::string nowWarn = "scene: loading warnings " + (warns.empty() ? std::string("none") : warns);
+            static unsigned seenLoad = ~0u;
+            static std::string reported, reportedWarn;
+            if (seenLoad != doc.loadId()) {
+                seenLoad = doc.loadId();
+                reported = now;
+                reportedWarn = nowWarn;
+            }
+            if (reported != now) {
+                reported = now;
+                std::printf("%s\n", now.c_str());
+            }
+            if (reportedWarn != nowWarn) {
+                reportedWarn = nowWarn;
+                std::printf("%s\n", nowWarn.c_str());
+            }
+            std::fflush(stdout);
+        }
+        if (isPick && chosen != pickName) doc.editSettings([chosen](splash::SceneSettings& s) { s.loadingCanvas = chosen; });
+        if (!open) {
             ImGui::PopClipRect();
             y = stop + 34 + space::md;
         } else {
@@ -11209,7 +11454,25 @@ static void multiInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
 static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc, const viewport::Ps1View& view) {
     Fonts& f = fonts();
     panel(dl, r);
-    float y = panelHeader(dl, r, "Inspector", nullptr);
+    float y = panelHeader(dl, r, "", nullptr);
+    // Two tabs (#343): the selection or the open scene's own settings, and
+    // the settings the whole project shares, reachable whatever is selected.
+    {
+        // Picking another object brings the Inspector tab back to show it.
+        static std::optional<editor::ObjectPath> seen;
+        if (doc.selection() != seen) {
+            if (doc.selection()) st.inspectorTab = 0;
+            seen = doc.selection();
+        }
+        const float h = size::field + 2;
+        st.inspectorTab = segmented("inspector.tab", ImVec2(r.Min.x + space::sm, r.Min.y + (size::panelHeader - h) * 0.5f),
+                                    {"Inspector", "Project settings"}, st.inspectorTab);
+        scriptLine("inspector.tab", std::string("inspector: tab ") + (st.inspectorTab == 1 ? "project" : "inspector"));
+    }
+    if (st.inspectorTab == 1) {
+        projectSettings(st, dl, r, y, doc);
+        return;
+    }
     // The UI tab inspects its canvas and elements.
     if (st.scripts.uiShown()) {
         st.canvasView.inspector(dl, r, y, doc);
@@ -15156,12 +15419,12 @@ static void shortcuts(State& st, editor::Document& doc) {
     // The script editor keeps the keyboard, but Play and Run on hardware still answer.
     // Not gated on WantTextInput: the editor asks for text input itself, so it is set.
     if (st.scripts.hasKeyboard()) {
-        if (st.unsavedShown || st.newProject.shown || st.unityImport.shown || st.strings.shown || st.menuOpen >= 0) return;
+        if (st.unsavedShown || st.newProject.shown || st.newScene.shown || st.unityImport.shown || st.strings.shown || st.menuOpen >= 0) return;
         if (!shift && pressed(ImGuiKey_F5)) ctrl ? toggleRun(st, doc) : togglePlay(st, doc);
         if (ctrl && shift && pressed(ImGuiKey_F5)) restartPlay(st, doc);
         return;
     }
-    if (io.WantTextInput || st.unsavedShown || st.newProject.shown || st.unityImport.shown || st.strings.shown || st.menuOpen >= 0) return;
+    if (io.WantTextInput || st.unsavedShown || st.newProject.shown || st.newScene.shown || st.unityImport.shown || st.strings.shown || st.menuOpen >= 0) return;
     // While the game has the viewport its keys are the controller; only Play/Stop stays.
     if (st.play.gameFocus && st.play.cons[0].game.attached()) {
         if (!ctrl && pressed(ImGuiKey_F5)) togglePlay(st, doc);
@@ -15205,6 +15468,7 @@ static void shortcuts(State& st, editor::Document& doc) {
     if (ctrl && shift && pressed(ImGuiKey_S) && !doc.projectRoot().empty()) saveDocAs(doc);
     if (ctrl && !shift && pressed(ImGuiKey_N)) request(st, doc, State::Pending::New);
     if (ctrl && !shift && pressed(ImGuiKey_O)) request(st, doc, State::Pending::Open);
+    if (ctrl && shift && pressed(ImGuiKey_O)) request(st, doc, State::Pending::OpenProject);
     if (ctrl && !shift && pressed(ImGuiKey_Q)) request(st, doc, State::Pending::Quit);
 }
 
@@ -15497,6 +15761,7 @@ ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view,
     }
     unsavedPrompt(st, doc, size);
     newProjectModal(st, doc, size);
+    newSceneModal(st, doc, size);
     unityImportModal(st, doc, size);
     stringsWindow(st, doc, size);
     ImGui::End();

@@ -1,4 +1,4 @@
-# The scene inspector's Disc section "Movies" sub-list, driven through the GUI
+# The Disc section (the inspector's Project settings tab) "Movies" sub-list, driven through the GUI
 # on copies of the courtyard. Each step adds or removes a movie and checks the
 # scripted lines the editor prints ("disc movies: <n> movies", "disc movies:
 # <path> <what it is>") and disc.json on disk after the step. A movie that is not
@@ -13,8 +13,9 @@ here = os.path.dirname(os.path.abspath(__file__))
 example = os.path.join(here, '..', 'examples', 'courtyard')
 fails = 0
 ENV = dict(os.environ, SPLASHEDIT_REDUX='/nonexistent/pcsx-redux', SPLASHEDIT_PSXSPLASH='/nonexistent/psxsplash')
-FOLDS = ['--click', '@s_sequences', '--wait', '3', '--click', '@s_rendering', '--wait', '3', '--click', '@s_loading', '--wait', '3',
-         '--click', '@s_vram', '--wait', '5']
+# The Disc section is in the inspector's Project settings tab (#343); folding
+# VRAM layout above it brings it into view.
+FOLDS = ['--click', '@inspector.tab/Project settings', '--wait', '3', '--click', '@s_vram', '--wait', '5']
 SUB = bytes([1, 1, 0x48, 0]) * 2
 AUDIO = bytes([1, 1, 0x64, 0x04]) * 2
 

@@ -313,9 +313,12 @@ struct State {
     // Recently opened scenes (File menu), and an action held behind the
     // unsaved-changes prompt until the user saves, discards or cancels.
     editor::RecentScenes recent;
-    enum class Pending { None, New, Open, Recent, Quit, ImportUnity };
+    // Recently opened projects (File > Recent projects): their folders, kept
+    // in the user's preferences beside the recent scenes, never in a project.
+    editor::RecentScenes recentProjects;
+    enum class Pending { None, New, Open, Recent, Quit, ImportUnity, NewScene, OpenProject, RecentProject };
     Pending pending = Pending::None;
-    std::filesystem::path pendingPath;  // the scene for Pending::Recent
+    std::filesystem::path pendingPath;  // the scene for Pending::Recent, the folder for Pending::RecentProject
     bool openUnsaved = false;
     bool unsavedShown = false;   // the prompt is up; document shortcuts wait
     bool quitRequested = false;  // window close: asks first when there are changes
@@ -331,6 +334,19 @@ struct State {
         bool open = false;   // open the modal next frame
         bool shown = false;  // the modal is up; document shortcuts wait
     } newProject;
+
+    // File > New Scene: the name of an empty scene added to the open project.
+    struct NewSceneDialog {
+        std::string name;
+        std::string error;   // why the last Create failed
+        bool open = false;   // open the modal next frame
+        bool shown = false;  // the modal is up; document shortcuts wait
+    } newScene;
+
+    // The inspector's tabs: 0 the selection or the scene (per-scene settings),
+    // 1 Project settings (the build list, vram.json and disc.json), shown
+    // whatever is selected.
+    int inspectorTab = 0;
 
     // File > Import Unity Project...: the scenes of a Unity SplashEdit
     // project made into a new project (splash::unity::importProject), run on

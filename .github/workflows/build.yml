@@ -288,6 +288,9 @@ jobs:
       - name: New project templates
         if: runner.os == 'Linux'
         run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/newprojectcheck.py build/splashedit
+      - name: Project menu and Project settings tab
+        if: runner.os == 'Linux'
+        run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/projectmenucheck.py build/splashedit
       - name: Unity project import
         if: runner.os == 'Linux'
         run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/unityimportguicheck.py build/splashedit
