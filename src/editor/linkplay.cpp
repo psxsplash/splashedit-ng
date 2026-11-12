@@ -31,16 +31,19 @@ static std::string utf8(const fs::path& p) {
 
 fs::path consoleDir(const fs::path& playDir, int index) { return playDir / ("console" + std::to_string(index + 1)); }
 
-std::string linkSettings(bool server, uint16_t port) {
+// emulator.Dither: 1 is redux's default (the game's own dithering), 0 none.
+static std::string emulatorHead(bool dither) { return std::string("{\"emulator\":{\"Dither\":") + (dither ? "1" : "0") + ","; }
+
+std::string linkSettings(bool server, uint16_t port, bool dither) {
     const std::string p = std::to_string(port);
-    if (server)
-        return "{\"emulator\":{\"Debug\":{\"SIO1Server\":true,\"SIO1ServerPort\":" + p + ",\"SIO1Client\":false}}}\n";
-    return "{\"emulator\":{\"Debug\":{\"SIO1Server\":false,\"SIO1Client\":true,\"SIO1Clienthost\":\"127.0.0.1\","
+    if (server) return emulatorHead(dither) + "\"Debug\":{\"SIO1Server\":true,\"SIO1ServerPort\":" + p + ",\"SIO1Client\":false}}}\n";
+    return emulatorHead(dither) +
+           "\"Debug\":{\"SIO1Server\":false,\"SIO1Client\":true,\"SIO1Clienthost\":\"127.0.0.1\","
            "\"SIO1ClientPort\":" +
            p + "}}}\n";
 }
 
-std::string noLinkSettings() { return "{\"emulator\":{\"Debug\":{\"SIO1Server\":false,\"SIO1Client\":false}}}\n"; }
+std::string noLinkSettings(bool dither) { return emulatorHead(dither) + "\"Debug\":{\"SIO1Server\":false,\"SIO1Client\":false}}}\n"; }
 
 std::string captureDirLua(const fs::path& dir) {
     // A long bracket at a level no path holds, so nothing in it needs escaping.
@@ -57,7 +60,7 @@ static bool writeText(const fs::path& file, const std::string& text, std::string
     return false;
 }
 
-bool prepareConsole(const fs::path& dir, bool server, uint16_t port, std::string* error, bool sio1) {
+bool prepareConsole(const fs::path& dir, bool server, uint16_t port, std::string* error, bool sio1, bool dither) {
     std::error_code ec;
     fs::create_directories(dir, ec);
     if (ec) {
@@ -65,7 +68,7 @@ bool prepareConsole(const fs::path& dir, bool server, uint16_t port, std::string
         return false;
     }
     for (const char* stale : {"capture.flag", "capture.gpd", "capture.err", "capture.gpd.part"}) fs::remove(dir / stale, ec);
-    return writeText(dir / "pcsx.json", sio1 ? linkSettings(server, port) : noLinkSettings(), error) &&
+    return writeText(dir / "pcsx.json", sio1 ? linkSettings(server, port, dither) : noLinkSettings(dither), error) &&
            writeText(dir / "capturedir.lua", captureDirLua(dir), error);
 }
 

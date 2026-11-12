@@ -63,6 +63,7 @@ inline constexpr const char* trash = "\xee\x86\x8e";           // e18e
 inline constexpr const char* gauge = "\xee\x86\xbf";           // e1bf
 inline constexpr const char* pencil = "\xee\x87\xb9";          // e1f9
 inline constexpr const char* squareDashed = "\xee\x87\x8b";    // e1cb
+inline constexpr const char* grip = "\xee\x8e\xb1";            // e3b1
 inline constexpr const char* paintBucket = "\xee\x8b\xa6";     // e2e6
 inline constexpr const char* pipette = "\xee\x84\xbb";         // e13b
 inline constexpr const char* brush = "\xee\x8b\xa7";           // e2e7 paintbrush

@@ -1,5 +1,5 @@
 // How a PS1 frame looks on a TV: where it sits in a panel (4:3 like a TV,
-// or square pixels), the broadcast safe areas inside it, and an optional
+// or integer scaled), the broadcast safe areas inside it, and an optional
 // S-video or composite look. No SDL or GL, so it tests headless.
 #pragma once
 
@@ -18,10 +18,12 @@ struct Rect {
 // 90%, title-safe the central 80%. A TV's overscan may hide anything outside.
 inline constexpr float kActionSafe = 0.9f, kTitleSafe = 0.8f;
 
-// Where a frameW x frameH frame shows in `panel`, centred and as large as
-// fits, edges on whole pixels. `tvAspect`: 4:3 whatever the width, as a TV
+// Where a frameW x frameH frame shows in `panel`, centred, edges on whole
+// pixels. `tvAspect`: 4:3 as large as fits, whatever the width, as a TV
 // stretches every PS1 mode (256 to 640 wide) across the screen; otherwise
-// square pixels (a 512x240 frame shows twice as wide as it is tall, and more).
+// integer: the largest whole multiple of the frame's own size that fits
+// (square pixels, each frame pixel the same number of screen pixels), or
+// 4:3 when not even 1x fits.
 Rect displayRect(Rect panel, int frameW, int frameH, bool tvAspect);
 
 // The central `fraction` of `frame`, each side inset by the same share of

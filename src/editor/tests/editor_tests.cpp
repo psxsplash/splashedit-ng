@@ -1922,9 +1922,13 @@ void testLinkPlay() {
     const fs::path dir = g_outDir / "link-play";
     fs::remove_all(dir, ec);
     const std::string server = editor::linkSettings(true, 41234), client = editor::linkSettings(false, 41234);
-    CHECK(server == "{\"emulator\":{\"Debug\":{\"SIO1Server\":true,\"SIO1ServerPort\":41234,\"SIO1Client\":false}}}\n");
-    CHECK(client == "{\"emulator\":{\"Debug\":{\"SIO1Server\":false,\"SIO1Client\":true,\"SIO1Clienthost\":\"127.0.0.1\","
+    CHECK(server == "{\"emulator\":{\"Dither\":1,\"Debug\":{\"SIO1Server\":true,\"SIO1ServerPort\":41234,\"SIO1Client\":false}}}\n");
+    CHECK(client == "{\"emulator\":{\"Dither\":1,\"Debug\":{\"SIO1Server\":false,\"SIO1Client\":true,\"SIO1Clienthost\":\"127.0.0.1\","
                     "\"SIO1ClientPort\":41234}}}\n");
+    CHECK(editor::linkSettings(true, 41234, false) ==
+          "{\"emulator\":{\"Dither\":0,\"Debug\":{\"SIO1Server\":true,\"SIO1ServerPort\":41234,\"SIO1Client\":false}}}\n");
+    CHECK(editor::noLinkSettings() == "{\"emulator\":{\"Dither\":1,\"Debug\":{\"SIO1Server\":false,\"SIO1Client\":false}}}\n");
+    CHECK(editor::noLinkSettings(false) == "{\"emulator\":{\"Dither\":0,\"Debug\":{\"SIO1Server\":false,\"SIO1Client\":false}}}\n");
     CHECK(editor::consoleDir("/p", 0) == fs::path("/p") / "console1" && editor::consoleDir("/p", 1) == fs::path("/p") / "console2");
 
     // Each console's directory: its settings, the capture redirect, no stale capture.
@@ -1941,6 +1945,13 @@ void testLinkPlay() {
     CHECK(slurp(c1 / "capturedir.lua").find("SplashEditCaptureDir = [==[" + c1.generic_string() + "]==]") != std::string::npos);
     CHECK(!fs::exists(c1 / "capture.flag"));
     CHECK(!editor::prepareConsole(c1 / "pcsx.json" / "under-a-file", false, 1, &err) && !err.empty());
+    // Play with 1 console (#345): console1 with no link, Dither from the
+    // Game view's toggle, never the user's own pcsx.json.
+    err.clear();
+    CHECK(editor::prepareConsole(c1, false, 0, &err, false, false) && slurp(c1 / "pcsx.json") == editor::noLinkSettings(false));
+    CHECK(slurp(c1 / "pcsx.json").find("\"Dither\":0") != std::string::npos);
+    CHECK(editor::prepareConsole(c1, false, 0, &err, false, true) && slurp(c1 / "pcsx.json").find("\"Dither\":1") != std::string::npos);
+    CHECK(fs::exists(c1 / "capturedir.lua") && err.empty());
 
     // Commands: 1 console exactly as before; a console adds -portable, and its
     // capture redirect runs before framecapture.lua.
@@ -20680,15 +20691,24 @@ static void testTvPreview() {
     CHECK(eq(tv::safeRect({0, 0, 640, 480}, tv::kActionSafe), 32, 24, 608, 456));
     CHECK(eq(tv::safeRect({0, 0, 640, 480}, tv::kTitleSafe), 64, 48, 576, 432));
     CHECK(eq(tv::safeRect({100, 50, 420, 290}, tv::kActionSafe), 116, 62, 404, 278));
-    // In an 800x600 panel: 4:3 fills it whatever the width, square pixels keep the frame's shape.
+    // In an 800x600 panel: 4:3 fills it whatever the width; integer shows the
+    // largest whole multiple of the frame that fits, centred.
     const tv::Rect panel{0, 0, 800, 600};
     CHECK(eq(tv::displayRect(panel, 256, 240, true), 0, 0, 800, 600));
     CHECK(eq(tv::displayRect(panel, 512, 240, true), 0, 0, 800, 600));
-    CHECK(eq(tv::displayRect(panel, 256, 240, false), 80, 0, 720, 600));
-    CHECK(eq(tv::displayRect(panel, 512, 240, false), 0, 112, 800, 487));
+    CHECK(eq(tv::displayRect(panel, 320, 240, true), 0, 0, 800, 600));
+    CHECK(eq(tv::displayRect(panel, 320, 240, false), 80, 60, 720, 540));  // 2x, not the 4:3 rect
+    CHECK(eq(tv::displayRect(panel, 640, 480, false), 80, 60, 720, 540));  // 1x
+    CHECK(eq(tv::displayRect(panel, 256, 240, false), 144, 60, 656, 540)); // 2x: 3x is 720 rows
+    CHECK(eq(tv::displayRect(panel, 512, 240, false), 144, 180, 656, 420));
+    CHECK(eq(tv::displayRect({0, 0, 1000, 760}, 320, 240, false), 20, 20, 980, 740));  // 3x
+    CHECK(eq(tv::displayRect({10, 20, 1010, 620}, 320, 240, false), 190, 80, 830, 560));
     CHECK(eq(tv::displayRect({10, 20, 1010, 620}, 512, 240, true), 110, 20, 910, 620));
+    // 1x does not fit: 4:3 as large as fits.
+    CHECK(eq(tv::displayRect({0, 0, 300, 200}, 320, 240, false), 17, 0, 283, 199));
+    CHECK(eq(tv::displayRect({0, 0, 600, 500}, 640, 480, false), 0, 25, 600, 475));
     CHECK(eq(tv::safeRect(tv::displayRect(panel, 512, 240, true), tv::kActionSafe), 40, 30, 760, 570));
-    CHECK(eq(tv::safeRect(tv::displayRect(panel, 512, 240, false), tv::kActionSafe), 40, 131, 760, 468));
+    CHECK(eq(tv::safeRect(tv::displayRect(panel, 512, 240, false), tv::kActionSafe), 170, 192, 630, 408));
     // The Game view's and UI tab's toggles, saved with Play's tools.
     {
         const fs::path cfg = g_outDir / "tv" / "play.cfg";
@@ -20699,6 +20719,22 @@ static void testTvPreview() {
         CHECK(back.safeArea && !back.tvAspect && back.look == int(tv::Look::Composite) && back.uiSafeArea && back.scaleLock);
         const editor::PlayTools none = editor::loadPlayTools(g_outDir / "tv" / "absent.cfg");
         CHECK(!none.safeArea && none.tvAspect && none.look == 0 && !none.uiSafeArea && !none.scaleLock);
+        // Saved as integer; a play.cfg from before integer scaling says square, read as integer.
+        {
+            std::ifstream in(cfg, std::ios::binary);
+            const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+            CHECK(text.find("game_aspect=integer\n") != std::string::npos);
+        }
+        {
+            std::ofstream old(g_outDir / "tv" / "old.cfg", std::ios::binary);
+            old << "game_aspect=square\n";
+        }
+        CHECK(!editor::loadPlayTools(g_outDir / "tv" / "old.cfg").tvAspect);
+        // Dithering: on by default and when the key is missing, saved off.
+        CHECK(editor::PlayTools{}.dither && none.dither && back.dither && editor::loadPlayTools(g_outDir / "tv" / "old.cfg").dither);
+        editor::PlayTools off;
+        off.dither = false;
+        CHECK(editor::savePlayTools(cfg, off) && !editor::loadPlayTools(cfg).dither);
     }
 
     // Pure grey keeps its luma under every look; with scanlines a 240-line
