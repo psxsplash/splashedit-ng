@@ -723,11 +723,24 @@ static void updatePlay(State& st, const editor::Document& doc) {
         return;
     }
     std::string err;
-    // Console 1's directory: its pcsx.json (redux -portable), memory cards
-    // and capture files, with 1 console as with linked ones, so redux never
+    // Console 1's directory: its pcsx.json (redux -portable) and capture
+    // files, with 1 console as with linked ones, so redux never
     // reads the user's own pcsx.json (#345).
     std::filesystem::path console;
     std::vector<std::string> relayNotes;  // put in console 1's output once it starts
+    // The memory cards outlive the Play directory, per project, under the
+    // user's preferences (editor::cardsDir); without them, or when that is
+    // not writable, they stay in the console's directory as before.
+    std::filesystem::path cards;
+    {
+        const std::filesystem::path project = doc.projectRoot().empty() ? doc.scenePath() : doc.projectRoot();
+        const std::filesystem::path dir = editor::cardsDir(p.prefDir, project);
+        std::string cardErr = p.prefDir.empty() ? "no preferences directory" : project.empty() ? "no project" : "";
+        if (!dir.empty() && editor::prepareCards(dir, project, p.players, &cardErr)) cards = dir;
+        else std::fprintf(stderr, "splashedit: Play keeps memory cards in the temporary Play directory: %s\n", cardErr.c_str());
+        scriptLine(nullptr, "play: memory cards " + (cards.empty() ? std::string("temporary") : utf8(cards)));
+    }
+    const auto consoleCards = [&](int i) { return cards.empty() ? cards : editor::consoleDir(cards, i); };
     if (p.players >= 2) {
         // Relayed, every console is a client of the relay, which listens
         // first; linked directly, console 1 is the server of console 2.
@@ -754,7 +767,7 @@ static void updatePlay(State& st, const editor::Document& doc) {
         }
         for (int i = 0; i < p.players && err.empty(); ++i)
             editor::prepareConsole(editor::consoleDir(playDir(), i), !p.relayed && i == 0, p.linkPort, &err, !p.pcdrvNet,
-                                   p.tools.dither);
+                                   p.tools.dither, consoleCards(i));
         if (!err.empty()) {
             if (p.relay) p.relay->stop();
             p.message = "Could not start " + std::to_string(p.players) + " linked consoles: " + err;
@@ -768,7 +781,7 @@ static void updatePlay(State& st, const editor::Document& doc) {
         for (const std::string& n : relayNotes) scriptLine(nullptr, "play: relay note: " + n);
     } else {
         console = editor::consoleDir(playDir(), 0);
-        if (!editor::prepareConsole(console, false, 0, &err, false, p.tools.dither)) {
+        if (!editor::prepareConsole(console, false, 0, &err, false, p.tools.dither, consoleCards(0))) {
             p.message = "Could not start pcsx-redux: " + err;
             return;
         }

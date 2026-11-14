@@ -1953,6 +1953,39 @@ void testLinkPlay() {
     CHECK(editor::prepareConsole(c1, false, 0, &err, false, true) && slurp(c1 / "pcsx.json").find("\"Dither\":1") != std::string::npos);
     CHECK(fs::exists(c1 / "capturedir.lua") && err.empty());
 
+    // Memory cards (#345): per project under the preferences directory,
+    // so they outlive the Play directory; redux reads them from the
+    // pcsx.json as absolute emulator.Mcd1 / Mcd2.
+    CHECK(slurp(c1 / "pcsx.json").find("Mcd") == std::string::npos);  // no cards dir: redux's own, in -portable
+    const fs::path prefs = dir / "prefs", project = dir / "proj";
+    fs::create_directories(project, ec);
+    const fs::path cards = editor::cardsDir(prefs, project);
+    CHECK(cards.parent_path() == prefs / "play" && cards.filename().string().size() == 16 &&
+          cards.filename().string().find_first_not_of("0123456789abcdef") == std::string::npos);
+    CHECK(editor::cardsDir(prefs, project) == cards);                                   // stable
+    CHECK(editor::cardsDir(prefs, project / "sub" / "..") == cards);                    // canonical
+    CHECK(editor::cardsDir(prefs, fs::relative(project, fs::current_path(), ec)) == cards || ec);  // absolute
+    CHECK(editor::cardsDir(prefs, dir / "other") != cards);
+    CHECK(editor::cardsDir({}, project).empty() && editor::cardsDir(prefs, {}).empty());
+    err.clear();
+    CHECK(editor::prepareCards(cards, project, 2, &err) && err.empty());
+    CHECK(fs::is_directory(editor::consoleDir(cards, 0)) && fs::is_directory(editor::consoleDir(cards, 1)));
+    CHECK(slurp(cards / "project.txt") == fs::weakly_canonical(project).generic_string() + "\n");
+    CHECK(!editor::prepareCards(c1 / "pcsx.json" / "under-a-file", project, 1, &err) && !err.empty());
+    const fs::path cc1 = editor::consoleDir(cards, 0);
+    const std::string mcd = "\"Mcd1\":\"" + (cc1 / "memcard1.mcd").generic_string() + "\",\"Mcd2\":\"" +
+                            (cc1 / "memcard2.mcd").generic_string() + "\",";
+    CHECK(editor::noLinkSettings(true, cc1) == "{\"emulator\":{\"Dither\":1," + mcd +
+                                                   "\"Debug\":{\"SIO1Server\":false,\"SIO1Client\":false}}}\n");
+    CHECK(editor::linkSettings(true, 41234, false, cc1) ==
+          "{\"emulator\":{\"Dither\":0," + mcd + "\"Debug\":{\"SIO1Server\":true,\"SIO1ServerPort\":41234,\"SIO1Client\":false}}}\n");
+    err.clear();
+    CHECK(editor::prepareConsole(c1, false, 0, &err, false, true, cc1) && slurp(c1 / "pcsx.json") == editor::noLinkSettings(true, cc1));
+    // A quote or backslash in the path stays valid JSON (on Windows a backslash separates, and goes generic).
+#ifndef _WIN32
+    CHECK(editor::noLinkSettings(true, "/a\"b\\c").find("\"Mcd1\":\"/a\\\"b\\\\c/memcard1.mcd\"") != std::string::npos);
+#endif
+
     // Commands: 1 console exactly as before; a console adds -portable, and its
     // capture redirect runs before framecapture.lua.
     editor::PlayTools t;

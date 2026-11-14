@@ -151,6 +151,7 @@ struct Args {
     // --play-settings <file>: a screenshot run reads and saves Play's tools there.
     std::string playSettings;
     std::string recentProjects;  // --recent-projects: File > Recent projects' file in a screenshot run
+    std::string prefsDir;        // --prefs-dir: Play's memory cards' preferences directory in a screenshot run
     float dropX = -1, dropY = -1;
     float dragX = -1, dragY = -1;
 };
@@ -395,6 +396,7 @@ Args parse(int argc, char** argv) {
         else if (!std::strcmp(argv[i], "--export-web-to")) a.webTo = next();
         else if (!std::strcmp(argv[i], "--play-settings")) a.playSettings = next();
         else if (!std::strcmp(argv[i], "--recent-projects")) a.recentProjects = next();
+        else if (!std::strcmp(argv[i], "--prefs-dir")) a.prefsDir = next();
         else if (!std::strcmp(argv[i], "--click") || !std::strcmp(argv[i], "--dblclick")) {
             Action act(!std::strcmp(argv[i], "--click") ? Action::Click : Action::DoubleClick);
             const char* v = next();
@@ -781,6 +783,7 @@ int main(int argc, char** argv) {
         if (char* pref = SDL_GetPrefPath("psxsplash", "splashedit")) {
             const std::filesystem::path prefDir(reinterpret_cast<const char8_t*>(pref));
             SDL_free(pref);
+            state.play.prefDir = prefDir;
             state.play.settingsFile = prefDir / "play.cfg";
             state.play.tools = editor::loadPlayTools(state.play.settingsFile);
             state.recent = editor::RecentScenes(prefDir / "recent.cfg");
@@ -793,6 +796,8 @@ int main(int argc, char** argv) {
         state.recentProjects = editor::RecentScenes(std::filesystem::path(std::u8string(args.recentProjects.begin(), args.recentProjects.end())));
         state.recentProjects.load();
     }
+    if (args.screenshot && !args.prefsDir.empty())
+        state.play.prefDir = std::filesystem::path(std::u8string(args.prefsDir.begin(), args.prefsDir.end()));
     if (args.screenshot && !args.playSettings.empty()) {
         state.play.settingsFile = std::filesystem::path(std::u8string(args.playSettings.begin(), args.playSettings.end()));
         state.play.tools = editor::loadPlayTools(state.play.settingsFile);
