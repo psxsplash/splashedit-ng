@@ -574,6 +574,19 @@ void TimelinePanel::trackMenu(editor::Document& doc) {
                     }
                     ImGui::EndMenu();
                 }
+                // The same keys on another object: a new track, this one kept.
+                // A target that already has this kind of track is greyed, as above.
+                if (ImGui::BeginMenu("Duplicate to", !targets.empty())) {
+                    for (const std::string& name : targets) {
+                        const bool taken = std::any_of(tracks.begin(), tracks.end(),
+                                                       [&](const auto& o) { return o.type == t.type && o.target == name; });
+                        if (ImGui::MenuItem(name.c_str(), nullptr, false, !taken)) {
+                            const int added = editor::duplicateTrack(doc, m_ref, ti, name);
+                            if (added >= 0) m_scrollY = std::max(0.0f, (added + 1) * kLaneH - 4 * kLaneH);
+                        }
+                    }
+                    ImGui::EndMenu();
+                }
             } else if (t.type == TrackType::FollowPath) {
                 const std::vector<std::string> paths = editor::pathNames(doc);
                 if (ImGui::BeginMenu("Follow instead", !paths.empty())) {

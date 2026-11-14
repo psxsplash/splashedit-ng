@@ -2687,6 +2687,17 @@ static void unsavedPrompt(State& st, editor::Document& doc, ImVec2 size) {
     if (st.openUnsaved) {
         st.openUnsaved = false;
         ImGui::OpenPopup(id);
+        // Asked from a minimized or background window (closed from the
+        // taskbar): bring it up, and flash it in case the system refuses
+        // to let it take focus.
+        if (SDL_Window* win = SDL_GL_GetCurrentWindow()) {
+            const SDL_WindowFlags flags = SDL_GetWindowFlags(win);
+            if (flags & SDL_WINDOW_MINIMIZED) SDL_RestoreWindow(win);
+            if (!(flags & SDL_WINDOW_INPUT_FOCUS)) {
+                SDL_RaiseWindow(win);
+                SDL_FlashWindow(win, SDL_FLASH_UNTIL_FOCUSED);
+            }
+        }
     }
     const float w = 440;
     ImGui::SetNextWindowPos(ImVec2(size.x * 0.5f, size.y * 0.42f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
@@ -8682,7 +8693,7 @@ static void projectSettings(State& st, ImDrawList* dl, ImRect r, float y, editor
                                    true, true, false);
         if (!sOpen) ImGui::PushClipRect(ImVec2(0, 0), ImVec2(0, 0), false);
         y += 34 + space::xs;
-        int move = -1, moveBy = 0, remove = -1, shown = 0;
+        int move = -1, moveBy = 0, remove = -1, shown = 0, openPick = -1;
         std::error_code ec;
         RowDrag drag("build.drag", int(list.size()));
         for (size_t i = 0; i < list.size(); ++i) {
@@ -8693,7 +8704,10 @@ static void projectSettings(State& st, ImDrawList* dl, ImRect r, float y, editor
             const std::string num = there ? std::to_string(shown++) : "-";
             const float ty = centerY(f.regular, type::body, rr.Min.y, rr.Max.y);
             text(dl, ImVec2(rr.Min.x + space::xs, ty), f.medium, type::body, color::textFaint, num.c_str());
-            const std::string label = utf8(list[i].generic_u8string()) + (there ? (isOpen ? "  (open)" : "") : "  (missing)");
+            // The scene's name; its project-relative path is the tooltip.
+            const std::string rel = utf8(list[i].generic_u8string());
+            const std::string shownName = list[i].extension() == ".scene" ? utf8(list[i].stem()) : utf8(list[i].filename());
+            const std::string label = shownName + (there ? (isOpen ? "  (open)" : "") : "  (missing)");
             dl->AddText(f.regular, type::body, ImVec2(rr.Min.x + 28, ty), there ? (isOpen ? color::text : color::textDim) : color::warn,
                         label.c_str(), nullptr);
             ImGui::PushID(int(i));
@@ -8701,7 +8715,15 @@ static void projectSettings(State& st, ImDrawList* dl, ImRect r, float y, editor
             const ImRect up(ImVec2(rr.Max.x - 3 * bw - 4, rr.Min.y + 3), ImVec2(rr.Max.x - 2 * bw - 4, rr.Max.y - 3));
             const ImRect down(ImVec2(rr.Max.x - 2 * bw - 2, rr.Min.y + 3), ImVec2(rr.Max.x - bw - 2, rr.Max.y - 3));
             const ImRect del(ImVec2(rr.Max.x - bw, rr.Min.y + 3), ImVec2(rr.Max.x, rr.Max.y - 3));
-            drag.row(int(i), rr, ImRect(rr.Min, ImVec2(up.Min.x - 2, rr.Max.y)), utf8(list[i].generic_u8string()));
+            const ImRect grip(rr.Min, ImVec2(up.Min.x - 2, rr.Max.y));
+            nameRect("build.row." + std::to_string(i), grip);
+            // Double-click opens the scene (asking first when there are
+            // unsaved changes); the open one and a missing file stay put.
+            const Hit rh = interact("brow", grip);
+            tooltip(rel.c_str());
+            if (rh.hovered && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) && there && !isOpen && !rowDragging())
+                openPick = int(i);
+            drag.row(int(i), rr, grip, rel);
             nameRect("build.up." + std::to_string(i), up);
             nameRect("build.down." + std::to_string(i), down);
             nameRect("build.remove." + std::to_string(i), del);
@@ -8718,7 +8740,9 @@ static void projectSettings(State& st, ImDrawList* dl, ImRect r, float y, editor
             y += 28;
         }
         const auto dropped = drag.end(dl);
-        if (move >= 0) {
+        if (openPick >= 0) {
+            request(st, doc, State::Pending::Recent, root / list[size_t(openPick)]);
+        } else if (move >= 0) {
             std::vector<fs::path> next = list;
             std::swap(next[size_t(move)], next[size_t(move + moveBy)]);
             save(std::move(next));
