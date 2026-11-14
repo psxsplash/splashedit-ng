@@ -168,11 +168,9 @@ static void stopPlay(State::Play& p) {
 static Emulator& consoleEmu(State::Play& p, int i) { return p.cons[size_t(i)].emu; }
 static const GameView& consoleGame(const State::Play& p, int i) { return p.cons[size_t(i)].game; }
 
-// Where console `i`'s capture files are: the Play directory with 1 console,
-// the console's own directory with more (they share the Play directory).
-static std::filesystem::path captureDir(const State::Play& p, int i) {
-    return p.players >= 2 ? editor::consoleDir(playDir(), i) : playDir();
-}
+// Where console `i`'s capture files are: its own directory (capturedir.lua
+// points framecapture.lua there), with 1 console as with more.
+static std::filesystem::path captureDir(const State::Play&, int i) { return editor::consoleDir(playDir(), i); }
 
 // Capture frame (the Game view, Build menu): asks framecapture.lua in the
 // running redux for one GPU frame; pollFrameCapture opens it in the Frame tab.
@@ -725,8 +723,24 @@ static void updatePlay(State& st, const editor::Document& doc) {
         return;
     }
     std::string err;
-    std::filesystem::path console;  // console 1's directory with linked consoles
+    // Console 1's directory: its pcsx.json (redux -portable) and capture
+    // files, with 1 console as with linked ones, so redux never
+    // reads the user's own pcsx.json (#345).
+    std::filesystem::path console;
     std::vector<std::string> relayNotes;  // put in console 1's output once it starts
+    // The memory cards outlive the Play directory, per project, under the
+    // user's preferences (editor::cardsDir); without them, or when that is
+    // not writable, they stay in the console's directory as before.
+    std::filesystem::path cards;
+    {
+        const std::filesystem::path project = doc.projectRoot().empty() ? doc.scenePath() : doc.projectRoot();
+        const std::filesystem::path dir = editor::cardsDir(p.prefDir, project);
+        std::string cardErr = p.prefDir.empty() ? "no preferences directory" : project.empty() ? "no project" : "";
+        if (!dir.empty() && editor::prepareCards(dir, project, p.players, &cardErr)) cards = dir;
+        else std::fprintf(stderr, "splashedit: Play keeps memory cards in the temporary Play directory: %s\n", cardErr.c_str());
+        scriptLine(nullptr, "play: memory cards " + (cards.empty() ? std::string("temporary") : utf8(cards)));
+    }
+    const auto consoleCards = [&](int i) { return cards.empty() ? cards : editor::consoleDir(cards, i); };
     if (p.players >= 2) {
         // Relayed, every console is a client of the relay, which listens
         // first; linked directly, console 1 is the server of console 2.
@@ -752,7 +766,8 @@ static void updatePlay(State& st, const editor::Document& doc) {
             if (!p.linkPort) err = "no free TCP port for the link between the consoles";
         }
         for (int i = 0; i < p.players && err.empty(); ++i)
-            editor::prepareConsole(editor::consoleDir(playDir(), i), !p.relayed && i == 0, p.linkPort, &err, !p.pcdrvNet);
+            editor::prepareConsole(editor::consoleDir(playDir(), i), !p.relayed && i == 0, p.linkPort, &err, !p.pcdrvNet,
+                                   p.tools.dither, consoleCards(i));
         if (!err.empty()) {
             if (p.relay) p.relay->stop();
             p.message = "Could not start " + std::to_string(p.players) + " linked consoles: " + err;
@@ -764,6 +779,12 @@ static void updatePlay(State& st, const editor::Document& doc) {
             scriptLine(nullptr, p.pcdrvNet ? "play: relay wire tcp, raw port " + std::to_string(p.relay->rawPort())
                                            : std::string("play: relay wire sio1"));
         for (const std::string& n : relayNotes) scriptLine(nullptr, "play: relay note: " + n);
+    } else {
+        console = editor::consoleDir(playDir(), 0);
+        if (!editor::prepareConsole(console, false, 0, &err, false, p.tools.dither, consoleCards(0))) {
+            p.message = "Could not start pcsx-redux: " + err;
+            return;
+        }
     }
     if (!p.cons[0].emu.start(editor::reduxCommand(eff, playDir(), p.captureScript, console, p.pcdrvNet), &err))
     {
@@ -5818,7 +5839,7 @@ static std::optional<editor::relay::Connection> relayConnection(const State::Pla
     return std::nullopt;
 }
 
-// Where a console's frame shows in `pic`: 4:3 like a TV, or square pixels
+// Where a console's frame shows in `pic`: 4:3 like a TV, or integer scaled
 // (Game view display bar). Also tells the console's view whether the
 // frame's lines are tall enough on screen for the look's scanlines.
 static ImRect gameFrameRect(State::Play& p, GameView& game, ImRect pic) {
@@ -5829,10 +5850,10 @@ static ImRect gameFrameRect(State::Play& p, GameView& game, ImRect pic) {
 }
 
 // The Game view's display bar, from `x` on the row of the view's tag (`tag`),
-// up to `maxX`: the safe-area guides, 4:3 or square pixels, and the RGB,
-// S-video or composite look. Without room the look goes to a second row
-// from the tag's left (up to `rowMaxX`), then gives way, then the aspect.
-// Saved with Play's tools.
+// up to `maxX`: the safe-area guides, 4:3 or integer scaling, dithering on
+// or off, and the RGB, S-video or composite look. Without room the look goes
+// to a second row from the tag's left (up to `rowMaxX`), then gives way,
+// then the aspect and dithering. Saved with Play's tools.
 static void gameDisplayBar(State& st, ImRect tag, float x, float maxX, float rowMaxX) {
     State::Play& p = st.play;
     Fonts& f = fonts();
@@ -5843,7 +5864,7 @@ static void gameDisplayBar(State& st, ImRect tag, float x, float maxX, float row
         for (const char* it : items) w += measure(f.medium, type::label, it).x + space::md * 2;
         return w;
     };
-    const float safeW = 28, aspectW = segW({"4:3", "1:1"}), lookW = segW({"RGB", "S-video", "Composite"});
+    const float safeW = 28, aspectW = segW({"4:3", "Integer"}) + space::sm + safeW, lookW = segW({"RGB", "S-video", "Composite"});
     const bool showSafe = x + safeW <= maxX, showAspect = x + safeW + space::sm + aspectW <= maxX,
                lookInRow = showAspect && x + safeW + space::sm + aspectW + space::sm + lookW <= maxX,
                showLook = lookInRow || tag.Min.x + lookW <= rowMaxX;
@@ -5859,11 +5880,24 @@ static void gameDisplayBar(State& st, ImRect tag, float x, float maxX, float row
         x = sr.Max.x + space::sm;
     }
     if (showAspect) {
-        const int a = segmented("game.aspect", ImVec2(x, y), {"4:3", "1:1"}, p.tools.tvAspect ? 0 : 1);
+        const float segmentW = aspectW - space::sm - safeW;
+        const int a = segmented("game.aspect", ImVec2(x, y), {"4:3", "Integer"}, p.tools.tvAspect ? 0 : 1);
         if ((a == 0) != p.tools.tvAspect) p.tools.tvAspect = a == 0, changed = true;
-        if (ImGui::IsMouseHoveringRect(ImVec2(x, y), ImVec2(x + aspectW, y + h)))
-            tooltip("4:3: as a TV shows every PS1 mode, whatever its width. 1:1: square pixels");
-        x += aspectW + space::sm;
+        if (ImGui::IsMouseHoveringRect(ImVec2(x, y), ImVec2(x + segmentW, y + h)))
+            tooltip("4:3: as a TV shows every PS1 mode, whatever its width. Integer: the largest whole multiple of the "
+                    "console's frame that fits, square pixels, sharp (4:3 when even 1x does not fit)");
+        x += segmentW + space::sm;
+        // pcsx-redux reads its dithering setting once, at startup: the next Play.
+        const ImRect dr(ImVec2(x, y), ImVec2(x + safeW, y + h));
+        dl->AddRectFilled(dr.Min, dr.Max, rgb(0x0e1014, 210), radius::button + 2);
+        const std::string ditherTip =
+            std::string(p.tools.dither ? "Dithering: on, as the PS1 dithers shaded and blended polygons"
+                                       : "Dithering: off, smooth shading the PS1 does not have") +
+            (p.cons[0].emu.running() ? ". A change takes effect the next time Play starts" : ". Takes effect when Play starts");
+        if (iconButton("game.dither", dr, icon::grip, p.tools.dither, ditherTip.c_str()))
+            p.tools.dither = !p.tools.dither, changed = true;
+        nameRect("game.dither", dr);
+        x = dr.Max.x + space::sm;
     }
     if (showLook) {
         const ImVec2 at = lookInRow ? ImVec2(x, y) : ImVec2(tag.Min.x, y + h + space::xs);
@@ -5873,8 +5907,9 @@ static void gameDisplayBar(State& st, ImRect tag, float x, float maxX, float row
             tooltip("The picture through an RGB, S-video or composite cable: chroma blurred across, scanlines in 240-line modes");
     }
     if (changed && !p.settingsFile.empty()) editor::savePlayTools(p.settingsFile, p.tools);
+    scriptLine("game.dither", std::string("game: dither ") + (p.tools.dither ? "on" : "off"));
     scriptLine("game.display", std::string("game: display safe ") + (p.tools.safeArea ? "on" : "off") + " aspect " +
-                                   (p.tools.tvAspect ? "4:3" : "square") + " look " +
+                                   (p.tools.tvAspect ? "4:3" : "integer") + " look " +
                                    editor::tv::lookName(editor::tv::Look(std::clamp(p.tools.look, 0, 2))));
 }
 

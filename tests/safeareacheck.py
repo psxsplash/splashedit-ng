@@ -2,11 +2,12 @@
 # pcsx-redux (SPLASHEDIT_REDUX, a shell script) that execs emulator_tests
 # (beside the editor) with SPLASHEDIT_FAKE_REDUX=<w>x<h>, which publishes one
 # frame of colour bars that size. The Game view's display bar is clicked by
-# name (@game.safearea, @game.aspect/1:1, @game.look/Composite); the frame's
+# name (@game.safearea, @game.aspect/Integer, @game.look/Composite); the frame's
 # rect comes back as "control game.frame at x0,y0 x1,y1". With the guides on,
 # every edge of the action-safe (central 90%) and title-safe (80%) rectangles
 # must be drawn in its colour on the screenshot, and with them off none;
-# 4:3 shows a 512x240 frame 4:3, 1:1 at 512:240; Composite blurs a colour
+# 4:3 shows a 512x240 frame 4:3, Integer a 320x240 one at a whole multiple
+# of its size (and a 512x240 one, too wide for 1x, 4:3); Composite blurs a colour
 # bar edge wider than S-video, RGB not at all, and adds scanlines. The UI
 # tab's header toggle (@ui.safearea) draws the same guides over the screen
 # (@ui.screen). Every toggle is saved in the play settings (--play-settings).
@@ -190,8 +191,10 @@ lines, c, img = run(['--click', '@game.safearea'], cfg, '320x240', shot=shot('gu
 check('the Game view shows the frame', 'game.frame' in c and img is not None, sorted(c)[:20])
 check('the display bar reports guides on, 4:3, RGB', last(lines, 'game: display ') == 'game: display safe on aspect 4:3 look rgb',
       last(lines, 'game: display '))
+four3 = None
 if 'game.frame' in c and img:
     r = c['game.frame']
+    four3 = r
     check('the frame shows 4:3', abs((r[2] - r[0]) * 3 - (r[3] - r[1]) * 4) <= 4, r)
     g = guides(img, r)
     check('action-safe guide on every edge at 90%', g['action'][0] == g['action'][1], g)
@@ -214,18 +217,56 @@ else:
     check('the Game view shows the 512x240 frame', False, sorted(c)[:20])
 check('the guides are saved off', setting(cfg, 'game_safe_area') == '0')
 
-# Square pixels: 512x240 shows 512:240, the guides follow the frame.
-lines, c, img = run(['--click', '@game.aspect/1:1', '--wait', '5', '--click', '@game.safearea'], cfg, '512x240')
-check('the display bar reports square pixels', last(lines, 'game: display ') == 'game: display safe on aspect square look rgb',
+# Integer: the largest whole multiple of the frame that fits, centred, at
+# square pixels. Play opens the Game view under 480 rows, so a 320x240 frame
+# shows 1x (where 4:3 stretches it to the view), and with the split dragged
+# left at 2x or more. Its bars stay sharp (nearest). A 512x240 frame is wider
+# than the view: 1x does not fit, so it falls back to 4:3.
+lines, c, img = run(['--click', '@game.aspect/Integer', '--wait', '5', '--click', '@game.safearea'], cfg, '320x240',
+                    shot=shot('integer'))
+check('the display bar reports integer scaling', last(lines, 'game: display ') == 'game: display safe on aspect integer look rgb',
       last(lines, 'game: display '))
-if 'game.frame' in c and img:
+if 'game.frame' in c and img and four3:
     r = c['game.frame']
-    check('a 512x240 frame shows 512:240 with square pixels', abs((r[2] - r[0]) * 240 - (r[3] - r[1]) * 512) <= 512 * 2, r)
+    w, h = r[2] - r[0], r[3] - r[1]
+    print('     320x240 at 4:3: %s (%dx%d); integer: %s (%dx%d)' % (four3, four3[2] - four3[0], four3[3] - four3[1], r, w, h))
+    check('a 320x240 frame shows at exactly 1x', (w, h) == (320, 240), r)
+    check('which differs from its 4:3 rect', r != four3, (r, four3))
+    check('centred where the 4:3 rect is', abs((r[0] + r[2]) - (four3[0] + four3[2])) <= 1 and
+          abs((r[1] + r[3]) - (four3[1] + four3[3])) <= 1, (r, four3))
     g = guides(img, r)
-    check('the guides follow the square-pixel frame', g['action'][0] == g['action'][1] and g['title'][0] == g['title'][1], g)
+    check('the guides follow the integer frame', g['action'][0] == g['action'][1] and g['title'][0] == g['title'][1], g)
+    check('integer keeps a bar edge sharp', bar_edge(img, r)[0] == 0, bar_edge(img, r))
 else:
-    check('the Game view shows the square-pixel frame', False, sorted(c)[:20])
-check('square pixels are saved', setting(cfg, 'game_aspect') == 'square')
+    check('the Game view shows the integer frame', False, sorted(c)[:20])
+check('integer scaling is saved', setting(cfg, 'game_aspect') == 'integer', setting(cfg, 'game_aspect'))
+
+lines, c, img = run(['--mousedown', '@viewport.split', '--move', '300,400', '--mouseup', '0', '--wait', '5'], cfg, '320x240')
+if 'game.frame' in c:
+    r = c['game.frame']
+    w, h = r[2] - r[0], r[3] - r[1]
+    print('     integer with the split dragged: %s (%dx%d)' % (r, w, h))
+    check('with room, a whole multiple of 2x or more', w % 320 == 0 and h == w * 240 // 320 and w >= 640, r)
+else:
+    check('the Game view shows the dragged integer frame', False, sorted(c)[:20])
+
+lines, c, img = run([], cfg, '512x240')
+if 'game.frame' in c:
+    r = c['game.frame']
+    check('a 512x240 frame too wide for 1x falls back to 4:3', r[2] - r[0] < 512 and
+          abs((r[2] - r[0]) * 3 - (r[3] - r[1]) * 4) <= 4, r)
+else:
+    check('the Game view shows the 512x240 frame', False, sorted(c)[:20])
+
+# A play.cfg saved before integer scaling says square: it reads as integer.
+old = os.path.join(work, 'old.cfg')
+with open(old, 'w') as fh:
+    fh.write('game_aspect=square\n')
+lines, c, img = run([], old, '320x240')
+check('an old saved square reads as integer', last(lines, 'game: display ') == 'game: display safe off aspect integer look rgb',
+      last(lines, 'game: display '))
+fr = c.get('game.frame')
+check('and shows 1x', fr is not None and (fr[2] - fr[0], fr[3] - fr[1]) == (320, 240), fr)
 
 # The looks, on fresh settings. S-video in the Game view as Play opens it,
 # under 480 screen rows: no room for a 240-line frame's scanlines, so none

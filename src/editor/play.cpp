@@ -52,7 +52,8 @@ PlayTools loadPlayTools(const fs::path& file) {
             t.players = value.empty() || *end ? 1 : int(std::clamp<long>(n, 1, kMaxPlayers));
         } else if (key == "relay") t.relay = value == "1";
         else if (key == "game_safe_area") t.safeArea = value == "1";
-        else if (key == "game_aspect") t.tvAspect = value != "square";
+        else if (key == "game_aspect") t.tvAspect = value != "integer" && value != "square";  // square: before integer
+        else if (key == "game_dither") t.dither = value != "0";
         else if (key == "game_look") t.look = int(tv::lookFromName(value.c_str()));
         else if (key == "ui_safe_area") t.uiSafeArea = value == "1";
         else if (key == "scale_lock") t.scaleLock = value == "1";
@@ -76,7 +77,8 @@ bool savePlayTools(const fs::path& file, const PlayTools& t) {
         << "players=" << std::clamp(t.players, 1, kMaxPlayers) << "\n"
         << "relay=" << (t.relay ? 1 : 0) << "\n"
         << "game_safe_area=" << (t.safeArea ? 1 : 0) << "\n"
-        << "game_aspect=" << (t.tvAspect ? "4:3" : "square") << "\n"
+        << "game_aspect=" << (t.tvAspect ? "4:3" : "integer") << "\n"
+        << "game_dither=" << (t.dither ? 1 : 0) << "\n"
         << "game_look=" << tv::lookName(tv::Look(std::clamp(t.look, 0, 2))) << "\n"
         << "ui_safe_area=" << (t.uiSafeArea ? 1 : 0) << "\n"
         << "scale_lock=" << (t.scaleLock ? 1 : 0) << "\n";
