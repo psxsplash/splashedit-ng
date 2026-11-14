@@ -20913,9 +20913,13 @@ void testStandalonePlayer() {
     const fs::path bin = dir / "disc" / "My Game.bin";
     write(bin, "raw sectors");
     write(dir / "disc" / "My Game.cue", "FILE \"My Game.bin\" BINARY\n");
+    // The seeded pcsx.json: no update prompt or checks, sharp pixels as the
+    // editor draws them, no BIOS shell, a 2x (640 x 480) window.
     auto seeded = [&](const fs::path& out) {
         const nlohmann::json j = nlohmann::json::parse(read(out / "config" / "pcsx.json"), nullptr, false);
-        return j.is_object() && j["emulator"]["ShownAutoUpdateConfig"] == true && j["emulator"]["AutoUpdate"] == false;
+        return j.is_object() && j["emulator"]["ShownAutoUpdateConfig"] == true && j["emulator"]["AutoUpdate"] == false &&
+               j["emulator"]["LinearFiltering"] == false && j["emulator"]["FastBoot"] == true && j["gui"]["WindowSizeX"] == 640 &&
+               j["gui"]["WindowSizeY"] == 480;
     };
     auto gameCopied = [&](const fs::path& out) {
         return read(out / "game" / "My Game.bin") == "raw sectors" &&
@@ -21088,6 +21092,201 @@ void testStandalonePlayer() {
     CHECK(nodisc.error.find("disc image not found") != std::string::npos && !fs::exists(dir / "out-nodisc"));
 }
 
+// A standalone player's options (splash::PlayerOptions, player.json): the
+// pcsx.json it starts with and the project's own over it, the launcher's
+// name, the settings file, the icon image and the Windows details resource.
+void testPlayerOptions() {
+    namespace fs = std::filesystem;
+    const fs::path dir = g_outDir / "player-options";
+    fs::remove_all(dir);
+    auto write = [](const fs::path& p, const std::string& text) {
+        fs::create_directories(p.parent_path());
+        std::ofstream(p, std::ios::binary) << text;
+    };
+    auto read = [](const fs::path& p) {
+        std::ifstream in(p, std::ios::binary);
+        return std::string((std::istreambuf_iterator<char>(in)), {});
+    };
+    // Not const: a missing key reads as null, so a CHECK fails rather than the json asserting.
+    auto parse = [](const std::string& t) { return nlohmann::json::parse(t, nullptr, false); };
+
+    // pcsx.json: the defaults, then what the options and the project change.
+    std::string error;
+    {
+        splash::PlayerOptions o;
+        nlohmann::json d = parse(splash::reduxConfig(o, error));
+        CHECK(error.empty() && d["emulator"]["LinearFiltering"] == false && d["emulator"]["FastBoot"] == true);
+        CHECK(d["gui"]["WindowSizeX"] == 640 && d["gui"]["WindowSizeY"] == 480 && d["emulator"]["AutoUpdate"] == false);
+        CHECK(parse(splash::seededReduxConfig()) == d);
+        o.linearFiltering = true;
+        o.fastBoot = false;
+        o.windowScale = 3;
+        nlohmann::json c = parse(splash::reduxConfig(o, error));
+        CHECK(c["emulator"]["LinearFiltering"] == true && c["emulator"]["FastBoot"] == false);
+        CHECK(c["gui"]["WindowSizeX"] == 960 && c["gui"]["WindowSizeY"] == 720);
+        o.windowScale = 9;  // out of 1-4: 2x
+        CHECK(parse(splash::reduxConfig(o, error))["gui"]["WindowSizeX"] == 640);
+        // The project's own: its keys win, the rest stays, null removes one.
+        o = splash::PlayerOptions();
+        o.reduxConfig = R"({"emulator":{"FastBoot":false,"Dither":0,"AutoUpdate":null},"gui":{"WindowSizeX":1000},"extra":[1]})";
+        nlohmann::json m = parse(splash::reduxConfig(o, error));
+        CHECK(error.empty() && m["emulator"]["FastBoot"] == false && m["emulator"]["Dither"] == 0);
+        CHECK(!m["emulator"].contains("AutoUpdate") && m["emulator"]["ShownAutoUpdateConfig"] == true &&
+              m["emulator"]["LinearFiltering"] == false);
+        CHECK(m["gui"]["WindowSizeX"] == 1000 && m["gui"]["WindowSizeY"] == 480 && m["extra"] == nlohmann::json::array({1}));
+        o.reduxConfig = "{not json";
+        CHECK(splash::reduxConfig(o, error).empty() && error == "it is not valid JSON");
+        o.reduxConfig = "[1, 2]";
+        CHECK(splash::reduxConfig(o, error).empty() && error == "it is not a JSON object");
+    }
+
+    // writePlayer with options: the launcher's own name, the project's pcsx.json.
+    const fs::path bin = dir / "disc" / "My Game.bin";
+    write(bin, "raw sectors");
+    write(dir / "disc" / "My Game.cue", "FILE \"My Game.bin\" BINARY\n");
+    write(dir / "img" / "pcsx-redux-x86_64.AppImage", "image");
+    const fs::path redux = dir / "img" / "pcsx-redux-x86_64.AppImage";
+    {
+        splash::PlayerOptions o;
+        o.exeName = "my: game";
+        o.fastBoot = false;
+        o.reduxConfig = R"({"emulator":{"Dither":0}})";
+        const fs::path out = dir / "out";
+        splash::PlayerResult p = splash::writePlayer(bin, redux, out, "My Game", {}, o);
+        const std::string ext = p.os == splash::PlayerOs::Windows ? ".bat" : p.os == splash::PlayerOs::Mac ? ".command" : ".sh";
+        CHECK(p.error.empty() && p.launcher == out / ("my game" + ext) && fs::is_regular_file(p.launcher));
+        CHECK(!fs::exists(out / ("My Game" + ext)) && read(out / splash::kPlayerMarker) == "game\nredux\nconfig\nmy game" + ext + "\n");
+        nlohmann::json c = parse(read(out / "config" / "pcsx.json"));
+        CHECK(c["emulator"]["FastBoot"] == false && c["emulator"]["Dither"] == 0 && c["emulator"]["LinearFiltering"] == false);
+        // Bad project JSON: refused before anything is written.
+        o.reduxConfig = "nope";
+        splash::PlayerResult bad = splash::writePlayer(bin, redux, dir / "out-bad", "My Game", {}, o);
+        CHECK(bad.error == "the project's pcsx.json is not used: it is not valid JSON" && !fs::exists(dir / "out-bad"));
+        // The Windows launcher stub gets the name too.
+        write(dir / "win" / "pcsx-redux.exe", "exe");
+        const fs::path stub = dir / "stub" / splash::kLauncherStub;
+        write(stub, "MZ stub");
+        o = splash::PlayerOptions();
+        o.exeName = "Launch Me";
+        splash::PlayerResult w = splash::writePlayer(bin, dir / "win" / "pcsx-redux.exe", dir / "out-win", "My Game", stub, o);
+        CHECK(w.error.empty() && w.warnings.empty() && w.launcher == dir / "out-win" / "Launch Me.exe" && read(w.launcher) == "MZ stub");
+#ifndef _WIN32
+        // Details off Windows: the stub as it is, saying so.
+        o.details.product = "My Game";
+        splash::PlayerResult wd = splash::writePlayer(bin, dir / "win" / "pcsx-redux.exe", dir / "out-win", "My Game", stub, o);
+        CHECK(wd.error.empty() && read(wd.launcher) == "MZ stub" && wd.warnings.size() == 1 &&
+              wd.warnings[0].find("keeps the default details") != std::string::npos);
+#endif
+    }
+
+    // player.json: the defaults read from nothing and write nothing.
+    {
+        const fs::path f = dir / "project" / "player.json";
+        fs::create_directories(f.parent_path());
+        splash::PlayerSettings d = splash::readPlayerSettings(f);
+        CHECK(d.name.empty() && !d.linearFiltering && d.fastBoot && d.windowScale == 2);
+        CHECK(splash::writePlayerSettings(f, d) && parse(read(f)) == nlohmann::json::object());
+        splash::PlayerSettings s;
+        s.name = "Caf\xc3\xa9";
+        s.exe = "cafe";
+        s.icon = "textures/icon.png";
+        s.company = "Co";
+        s.version = "1.2";
+        s.copyright = "(c)";
+        s.pcsxJson = "player/pcsx.json";
+        s.linearFiltering = true;
+        s.fastBoot = false;
+        s.windowScale = 3;
+        CHECK(splash::writePlayerSettings(f, s));
+        nlohmann::json j = parse(read(f));
+        CHECK(j["name"] == "Caf\xc3\xa9" && j["exe"] == "cafe" && j["linearFiltering"] == true && j["fastBoot"] == false &&
+              j["windowScale"] == 3 && j["pcsxJson"] == "player/pcsx.json");
+        const splash::PlayerSettings back = splash::readPlayerSettings(f);
+        CHECK(back.name == s.name && back.exe == s.exe && back.icon == s.icon && back.company == s.company &&
+              back.version == s.version && back.copyright == s.copyright && back.pcsxJson == s.pcsxJson && back.linearFiltering &&
+              !back.fastBoot && back.windowScale == 3);
+        CHECK(editor::loadPlayerSettings(f.parent_path()).exe == "cafe");
+        write(f, R"({"name": 3, "fastBoot": "no", "windowScale": 7, "exe": "ok"})");
+        const splash::PlayerSettings wrong = splash::readPlayerSettings(f);
+        CHECK(wrong.name.empty() && wrong.fastBoot && wrong.windowScale == 2 && wrong.exe == "ok");
+    }
+
+    // playerOptions: the icon image squared, the pcsx.json read, the details named.
+    {
+        const fs::path root = dir / "project";
+        splash::Image img;  // 4 wide, 2 tall, rows bottom up: red on top, blue below
+        img.width = 4;
+        img.height = 2;
+        img.pixels.assign(8, {0, 0, 1, 1});
+        for (int x = 0; x < 4; ++x) img.pixels[size_t(4 + x)] = {1, 0, 0, 1};
+        fs::create_directories(root / "textures");
+        splash::savePng(img, root / "textures" / "icon.png");
+        write(root / "player" / "pcsx.json", R"({"emulator":{"Dither":0}})");
+        splash::PlayerSettings s;
+        s.icon = "textures/icon.png";
+        s.pcsxJson = "player/pcsx.json";
+        s.exe = "go";
+        s.company = "Co";
+        s.version = "1.2";
+        s.fastBoot = false;
+        splash::PlayerOptions o;
+        CHECK(splash::playerOptions(s, root, "The Game", o).empty());
+        CHECK(o.exeName == "go" && !o.fastBoot && o.details.product == "The Game" && o.details.description == "The Game" &&
+              o.details.company == "Co" && o.details.version == "1.2");
+        CHECK(o.icon.size == 4 && o.icon.rgba.size() == 16);
+        // Centred: row 0 and 3 clear, row 1 red, row 2 blue.
+        CHECK(o.icon.rgba[0] == 0 && o.icon.rgba[12] == 0 && o.icon.rgba[4] == 0xff0000ffu && o.icon.rgba[8] == 0xffff0000u);
+        CHECK(parse(o.reduxConfig) == parse(R"({"emulator":{"Dither":0}})"));
+        s.icon = "textures/gone.png";
+        s.pcsxJson = "player/gone.json";
+        const std::string e = splash::playerOptions(s, root, "The Game", o);
+        CHECK(e.find("the player's icon textures/gone.png cannot be read") == 0 &&
+              e.find("the player's pcsx.json player/gone.json is not used: it cannot be read or is empty") != std::string::npos);
+        CHECK(o.icon.size == 0 && o.reduxConfig.empty() && o.exeName == "go");
+        CHECK(splash::squareIcon({1, 2}, 1, 2).size == 2 && splash::squareIcon({1, 2}, 1, 2).rgba == std::vector<uint32_t>({1, 0, 2, 0}));
+        CHECK(splash::squareIcon({1, 2}, 3, 3).size == 0);
+    }
+
+    // The VERSIONINFO: blocks whose lengths add up, the fixed version, the strings in UTF-16.
+    {
+        splash::ExeDetails d{"My Caf\xc3\xa9", "My Game", "Co", "1.2.3", ""};
+        const std::vector<uint8_t> v = splash::versionResource(d, "go.exe");
+        auto u16 = [&](size_t at) { return uint32_t(v[at]) | uint32_t(v[at + 1]) << 8; };
+        auto u32 = [&](size_t at) { return u16(at) | u16(at + 2) << 16; };
+        auto wide = [](const std::string& ascii) {
+            std::string w;
+            for (char c : ascii) w += c, w += '\0';
+            return w;
+        };
+        const std::string bytes(v.begin(), v.end());
+        CHECK(v.size() > 92 && u16(0) == v.size() && u16(2) == 52 && bytes.find(wide("VS_VERSION_INFO")) == 6);
+        // VS_FIXEDFILEINFO at 40: the signature, then 1.2 and 3.0.
+        CHECK(u32(40) == 0xfeef04bdu && u32(48) == 0x00010002u && u32(52) == 0x00030000u && u32(56) == 0x00010002u);
+        // A string: its key, padding to 32 bits, the value with its NUL.
+        auto value = [&](const std::string& key) -> std::string {
+            const size_t k = bytes.find(wide(key) + std::string(2, '\0'));
+            if (k == std::string::npos || k < 6) return "<none>";
+            size_t at = k + wide(key).size() + 2;
+            at = (at + 3) / 4 * 4;
+            const size_t len = u16(k - 6), valueLen = u16(k - 4);
+            if (k - 6 + len > v.size() || at + 2 * valueLen > k - 6 + len) return "<bad>";
+            std::string out;
+            for (size_t i = 0; i + 1 < valueLen; ++i) {
+                const uint32_t c = u16(at + 2 * i);
+                out += c < 0x80 ? char(c) : '?';
+            }
+            return out;
+        };
+        CHECK(value("ProductName") == "My Game" && value("FileDescription") == "My Caf?" && value("CompanyName") == "Co");
+        CHECK(value("FileVersion") == "1.2.3" && value("OriginalFilename") == "go.exe" && value("LegalCopyright") == "<none>");
+        CHECK(bytes.find(wide("Translation")) != std::string::npos && bytes.find(wide("040904b0")) != std::string::npos);
+        // A version that is not up to four numbers: 0.0.0.0, the text as it is.
+        d.version = "1.2.x";
+        const std::vector<uint8_t> z = splash::versionResource(d, "go.exe");
+        CHECK(z[48] == 0 && z[49] == 0 && z[50] == 0 && z[51] == 0 && z[52] == 0 && z[53] == 0);
+    }
+}
+
 // splash::writeWeb with a stand-in pcsx-redux web build: what is copied, the
 // page, a missing file, the folders it refuses and a previous export written over.
 void testWebExport() {
@@ -21202,6 +21401,45 @@ void testPlayerExeIcon() {
     CHECK(got.topLeft == 0xffff0000u && got.topRightClear);
     CHECK(got.manifest == before.manifest);
     CHECK(!splash::setExeIcon(exe, std::vector<uint32_t>(10), error) && error.find("16x16") != std::string::npos);
+
+    // A project's own icon, bigger: 16, 32, 48 and 256, averaged down; and the
+    // details, read back as Explorer reads them; the manifest kept.
+    splash::ExeIcon big;
+    big.size = 64;
+    big.rgba.assign(64 * 64, 0xff00ff00u);
+    for (int y = 0; y < 4; ++y)
+        for (int x = 0; x < 4; ++x) big.rgba[size_t(y * 64 + x)] = 0xff0000ffu, big.rgba[size_t(y * 64 + 60 + x)] = 0;
+    const splash::ExeDetails details{"My Caf\xc3\xa9", "My Game", "Co", "1.2.3", "(c) 2026"};
+    CHECK(splash::setExeResources(exe, &big, &details, error) && error.empty());
+    const ExeIcons got2 = exeIcons(exe.c_str());
+    CHECK(got2.sizes == std::vector<int>({16, 32, 48, 256}) && got2.icons == 4);
+    CHECK(got2.topLeft == 0xffff0000u && got2.topRightClear && got2.manifest == before.manifest);
+    auto versionString = [&](const wchar_t* key) -> std::wstring {
+        DWORD h = 0;
+        const DWORD n = GetFileVersionInfoSizeW(exe.c_str(), &h);
+        std::vector<char> buf(n);
+        if (!n || !GetFileVersionInfoW(exe.c_str(), 0, n, buf.data())) return L"<none>";
+        if (!key) {
+            VS_FIXEDFILEINFO* f = nullptr;
+            UINT len = 0;
+            if (!VerQueryValueW(buf.data(), L"\\", reinterpret_cast<void**>(&f), &len) || !f) return L"<none>";
+            return std::to_wstring(f->dwFileVersionMS >> 16) + L"." + std::to_wstring(f->dwFileVersionMS & 0xffff) + L"." +
+                   std::to_wstring(f->dwFileVersionLS >> 16) + L"." + std::to_wstring(f->dwFileVersionLS & 0xffff);
+        }
+        void* v = nullptr;
+        UINT len = 0;
+        const std::wstring path = std::wstring(L"\\StringFileInfo\\040904b0\\") + key;
+        if (!VerQueryValueW(buf.data(), path.c_str(), &v, &len) || !v) return L"<none>";
+        return std::wstring(static_cast<const wchar_t*>(v));
+    };
+    CHECK(versionString(L"FileDescription") == L"My Caf\u00e9" && versionString(L"ProductName") == L"My Game");
+    CHECK(versionString(L"CompanyName") == L"Co" && versionString(L"LegalCopyright") == L"(c) 2026");
+    CHECK(versionString(L"FileVersion") == L"1.2.3" && versionString(L"OriginalFilename") == L"My Game.exe");
+    CHECK(versionString(nullptr) == L"1.2.3.0");
+    // Details alone: the icons stay, the old details go.
+    const splash::ExeDetails other{"Second", "", "", "", ""};
+    CHECK(splash::setExeResources(exe, nullptr, &other, error));
+    CHECK(exeIcons(exe.c_str()).icons == 4 && versionString(L"FileDescription") == L"Second" && versionString(L"CompanyName") == L"<none>");
 }
 #endif
 
@@ -21410,6 +21648,7 @@ int main(int argc, char** argv) {
     testAudioFormats();
     testDiscMusic();
     testStandalonePlayer();
+    testPlayerOptions();
     testWebExport();
 #ifdef _WIN32
     testPlayerExeIcon();

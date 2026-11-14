@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "disc.hh"
+#include "player.hh"
 #include "editor/document.hh"
 #include "import.hh"
 
@@ -49,6 +50,13 @@ bool saveVramSettings(const std::filesystem::path& project, const splash::VramSe
 // cannot be written. Export passes it to the disc writer.
 splash::DiscSettings loadDiscSettings(const std::filesystem::path& project);
 bool saveDiscSettings(const std::filesystem::path& project, const splash::DiscSettings& s);
+
+// The project's standalone player settings: `project`/player.json (see
+// splash::PlayerSettings: the game name, the launcher's name, icon and
+// details, pcsx-redux's filtering, fast boot, window and own pcsx.json),
+// read and written as the disc settings are. Export Standalone Player reads it.
+splash::PlayerSettings loadPlayerSettings(const std::filesystem::path& project);
+bool savePlayerSettings(const std::filesystem::path& project, const splash::PlayerSettings& s);
 
 // The project-relative scenes a build writes, in order: the build list with
 // the entries whose file is gone left out. When that leaves nothing (the list

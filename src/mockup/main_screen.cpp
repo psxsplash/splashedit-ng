@@ -2276,6 +2276,20 @@ static void SDLCALL onLicencePicked(void*, const char* const* files, int) {
 
 static const SDL_DialogFileFilter kLicenceFilter[] = {{"Disc licence", "dat"}, {"All files", "*"}};
 
+// A file the Standalone player section's pickers chose (userdata 0: the icon,
+// 1: the pcsx.json), until the frame saves it.
+static std::mutex g_playerPickMutex;
+static std::optional<std::pair<int, std::string>> g_playerPicked;
+
+static void SDLCALL onPlayerFilePicked(void* which, const char* const* files, int) {
+    if (!files || !files[0]) return;
+    std::lock_guard<std::mutex> lock(g_playerPickMutex);
+    g_playerPicked = std::make_pair(int(reinterpret_cast<intptr_t>(which)), std::string(files[0]));
+}
+
+static const SDL_DialogFileFilter kPlayerIconFilter[] = {{"Image", "png;jpg;jpeg;bmp;tga"}};
+static const SDL_DialogFileFilter kPlayerConfigFilter[] = {{"pcsx-redux settings", "json"}, {"All files", "*"}};
+
 // The logo the licence builder's Choose file... picked, until the frame reads it.
 static std::mutex g_licenceTmdMutex;
 static std::optional<std::string> g_licenceTmdPicked;
@@ -2387,8 +2401,10 @@ static void updateExport(State& st) {
     p.discWritten = p.discOut;
 }
 
-// What a project's standalone player is called: its folder's name, else the open scene's.
+// What a project's standalone player is called: the game name in player.json,
+// else its folder's name, else the open scene's.
 static std::string playerTitle(const editor::Document& doc) {
+    if (std::string n = editor::loadPlayerSettings(doc.projectRoot()).name; !n.empty()) return n;
     const std::string name = utf8(doc.projectRoot().filename());
     return name.empty() ? doc.sceneStem() : name;
 }
@@ -2450,10 +2466,18 @@ static void buildPlayer(State& st, const editor::Document& doc, const std::files
             if (std::string e = splash::writeWeb(bin, redux, out, title); !e.empty()) x.disc.exported.errors.push_back(std::move(e));
             x.launcher = out / "index.html";
         } else if (x.disc.exported.ok()) {
-            // The Windows launcher wears the memory card icon's first frame, as the console draws it.
-            const editor::MemCardIcon icon = editor::memCardIcon(scene.settings.memCard.icons, root);
-            const bool iconed = !icon.frames.empty() && icon.frames[0].error.empty();
-            splash::PlayerResult r = splash::writePlayer(bin, redux, out, title, stub, iconed ? &icon.frames[0].rgba : nullptr);
+            // player.json: the name, the launcher's icon and details, pcsx-redux's settings.
+            splash::PlayerOptions opt;
+            const std::string optError = splash::playerOptions(editor::loadPlayerSettings(root), root, title, opt);
+            // Without an icon of its own the Windows launcher wears the memory
+            // card icon's first frame, as the console draws it.
+            if (!opt.icon.size) {
+                const editor::MemCardIcon icon = editor::memCardIcon(scene.settings.memCard.icons, root);
+                if (!icon.frames.empty() && icon.frames[0].error.empty()) opt.icon = {16, icon.frames[0].rgba};
+            }
+            splash::PlayerResult r;
+            if (optError.empty()) r = splash::writePlayer(bin, redux, out, title, stub, opt);
+            else r.error = optError;
             for (std::string& w : r.warnings) x.disc.exported.warnings.push_back(std::move(w));
             if (!r.error.empty()) x.disc.exported.errors.push_back(std::move(r.error));
             x.launcher = r.launcher;
@@ -9826,6 +9850,175 @@ static void projectSettings(State& st, ImDrawList* dl, ImRect r, float y, editor
             report(reportedVolume, "disc: volume " + (ds.volume.empty() ? std::string("default") : ds.volume));
             report(reportedLicence, "disc: licence " + (cur == 0 ? std::string("none") : cur == 1 ? std::string("psxsplash") : licenceFile));
             report(reportedError, licenceError.empty() ? std::string() : "disc: licence error " + licenceError);
+        }
+        if (!sOpen) {
+            ImGui::PopClipRect();
+            y = stop + 34 + space::md;
+        } else {
+            dl->AddRect(ImVec2(x0, stop), ImVec2(x1, y + space::sm), rgb(0xffffff, 10), radius::card);
+            y += space::sm + space::md;
+        }
+    }
+
+    // The project's standalone player (player.json): what Export Standalone
+    // Player names the game and its launcher, the launcher's icon and Windows
+    // details, and how pcsx-redux starts it. Saved as soon as it changes, not
+    // part of undo, as disc.json.
+    {
+        namespace fs = std::filesystem;
+        const fs::path root = doc.projectRoot();
+        static fs::path cachedRoot;
+        static splash::PlayerSettings ps;
+        static double readAt = -1;
+        const double now = ImGui::GetTime();
+        if (root != cachedRoot || now - readAt > 1.0) {
+            cachedRoot = root;
+            readAt = now;
+            ps = editor::loadPlayerSettings(root);
+        }
+        auto save = [&](splash::PlayerSettings next) {
+            if (editor::savePlayerSettings(root, next)) ps = std::move(next);
+            else notify(st, "Cannot write " + utf8(root / "player.json"), true);
+            readAt = now;
+        };
+        // Inside the project a picked file is kept relative, so the project can move.
+        auto projectPath = [&](const std::string& picked) {
+            std::error_code ec;
+            const fs::path abs = fs::weakly_canonical(fs::path(std::u8string(picked.begin(), picked.end())), ec);
+            const fs::path base = fs::weakly_canonical(root, ec);
+            const fs::path rel = abs.lexically_relative(base);
+            const std::u8string u = (!rel.empty() && *rel.begin() != "..") ? rel.generic_u8string() : abs.generic_u8string();
+            return std::string(u.begin(), u.end());
+        };
+        {
+            std::optional<std::pair<int, std::string>> picked;
+            {
+                std::lock_guard<std::mutex> lock(g_playerPickMutex);
+                picked.swap(g_playerPicked);
+            }
+            if (picked && !root.empty()) {
+                splash::PlayerSettings next = ps;
+                (picked->first == 0 ? next.icon : next.pcsxJson) = projectPath(picked->second);
+                save(std::move(next));
+            }
+        }
+        auto pnote = [&](const char* t) {
+            const float tx = x0 + space::sm, w = x1 - space::sm - tx;
+            dl->AddText(f.regular, type::caption, ImVec2(tx, y), color::textFaint, t, nullptr, w);
+            y += f.regular->CalcTextSizeA(type::caption, FLT_MAX, w, t).y + space::xs;
+        };
+        // A text row of player.json: `field` is the setting it edits.
+        auto textRow = [&](const char* id, const char* label, const char* tip, std::string splash::PlayerSettings::*field,
+                           const std::string& placeholder, size_t maxLen = 64) {
+            const ImRect rr = row((std::string("l") + id).c_str(), label, tip);
+            nameRect((std::string("player.") + id).c_str(), rr);
+            std::string typed;
+            if (textField(id, rr, ps.*field, &typed, placeholder.c_str(), maxLen) && !root.empty()) {
+                splash::PlayerSettings next = ps;
+                next.*field = typed;
+                save(std::move(next));
+            }
+        };
+        // A file row: the path typed or picked (`which` for onPlayerFilePicked).
+        auto fileRow = [&](const char* id, const char* label, const char* tip, std::string splash::PlayerSettings::*field,
+                           const char* placeholder, int which) {
+            const ImRect rr = row((std::string("l") + id).c_str(), label, tip);
+            const float bs = rr.GetHeight() - 4;
+            const ImRect fr(rr.Min, ImVec2(rr.Max.x - bs - space::xs, rr.Max.y));
+            const ImRect br(ImVec2(rr.Max.x - bs, rr.Min.y + 2), ImVec2(rr.Max.x, rr.Max.y - 2));
+            nameRect((std::string("player.") + id).c_str(), fr);
+            nameRect((std::string("player.") + id + ".pick").c_str(), br);
+            std::string typed;
+            if (textField(id, fr, ps.*field, &typed, placeholder) && !root.empty()) {
+                splash::PlayerSettings next = ps;
+                next.*field = typed;
+                save(std::move(next));
+            }
+            if (iconButton((std::string(id) + ".pick").c_str(), br, icon::folderOpen, false, "Choose a file") && !root.empty()) {
+                const std::string loc = utf8(root);
+                if (which == 0)
+                    ui::showOpenFileDialog("playericon", onPlayerFilePicked, reinterpret_cast<void*>(intptr_t(0)), kPlayerIconFilter, 1,
+                                           loc.c_str(), false);
+                else
+                    ui::showOpenFileDialog("playerconfig", onPlayerFilePicked, reinterpret_cast<void*>(intptr_t(1)),
+                                           kPlayerConfigFilter, 2, loc.c_str(), false);
+            }
+        };
+        auto toggleRow = [&](const char* id, const char* label, const char* tip, bool splash::PlayerSettings::*field, const char* on,
+                             const char* off) {
+            const ImRect br = row((std::string("l") + id).c_str(), label, tip);
+            const ImRect sw(ImVec2(br.Min.x, br.GetCenter().y - 8), ImVec2(br.Min.x + 30, br.GetCenter().y + 8));
+            nameRect((std::string("player.") + id).c_str(), sw);
+            text(dl, ImVec2(sw.Max.x + space::sm, centerY(f.regular, type::caption, br.Min.y, br.Max.y)), f.regular, type::caption,
+                 color::textFaint, ps.*field ? on : off);
+            if (toggle(id, sw, ps.*field) && !root.empty()) {
+                splash::PlayerSettings next = ps;
+                next.*field = !(ps.*field);
+                save(std::move(next));
+            }
+        };
+
+        const float stop = y;
+        const bool sOpen = section("s_player", ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), icon::cpu, color::textDim, "Standalone player",
+                                   true, true, false);
+        if (!sOpen) ImGui::PushClipRect(ImVec2(0, 0), ImVec2(0, 0), false);
+        y += 34 + space::xs;
+
+        const std::string folderName = root.empty() ? std::string("Game") : utf8(root.filename());
+        const std::string gameName = ps.name.empty() ? folderName : ps.name;
+        textRow("playername", "Game name",
+                "What Export Standalone Player calls the game: the launcher, the disc image, and the Windows launcher's "
+                "description and product name. Empty, the project folder's name.",
+                &splash::PlayerSettings::name, folderName);
+        textRow("playerexe", "Executable",
+                "The launcher's file name, without .exe, .bat or .sh. Empty, the game name.", &splash::PlayerSettings::exe,
+                splash::playerFileName(gameName));
+        fileRow("playericon", "Icon",
+                "An image (PNG, JPG, BMP or TGA) for the Windows launcher's icon, ideally 256 x 256: Explorer shows it at 16 to "
+                "256 pixels. Empty, the memory card icon (16 x 16).",
+                &splash::PlayerSettings::icon, "Memory card icon", 0);
+        textRow("playercompany", "Company", "The Windows launcher's CompanyName (Properties > Details).",
+                &splash::PlayerSettings::company, "");
+        textRow("playerversion", "Version", "The Windows launcher's file and product version: up to four numbers, 1.0 or 1.2.3.4.",
+                &splash::PlayerSettings::version, "", 23);
+        textRow("playercopyright", "Copyright", "The Windows launcher's LegalCopyright (Properties > Details).",
+                &splash::PlayerSettings::copyright, "");
+        toggleRow("playerlinear", "Linear filter",
+                  "pcsx-redux's Linear filtering: on smooths the picture, off keeps the PS1's pixels sharp, as the editor draws "
+                  "them.",
+                  &splash::PlayerSettings::linearFiltering, "Smoothed", "Off: sharp pixels");
+        toggleRow("playerfastboot", "Fast boot",
+                  "On: the game starts straight away. Off: the BIOS's boot screens play first.", &splash::PlayerSettings::fastBoot,
+                  "Straight into the game", "Off: the BIOS boot screens first");
+        {
+            const ImRect wr = row("lplayerscale", "Window", "The player's window when it first opens: 320 x 240 times this. 2x fits "
+                                                            "every desktop; the size is fixed at export, as the screen it runs on is "
+                                                            "not known then.");
+            nameRect("player.scale", wr);
+            static const char* const scales[] = {"1x  320 x 240", "2x  640 x 480", "3x  960 x 720", "4x  1280 x 960"};
+            const int cur = std::clamp(ps.windowScale, 1, 4) - 1;
+            const int pick = dropdownMenu("player.scale", wr, nullptr, scales[cur], {scales[0], scales[1], scales[2], scales[3]}, cur);
+            if (pick >= 0 && pick != cur && !root.empty()) {
+                splash::PlayerSettings next = ps;
+                next.windowScale = pick + 1;
+                save(std::move(next));
+            }
+        }
+        fileRow("playerconfig", "pcsx.json",
+                "The project's own pcsx-redux settings for the player: its keys go over the ones above (a JSON merge "
+                "patch). Copy one from a pcsx-redux set up as you want it.",
+                &splash::PlayerSettings::pcsxJson, "None", 1);
+        pnote("Saved in player.json. The window title and the icon pcsx-redux shows while it runs are pcsx-redux's own for now.");
+        if (namedRectsOn() && ImGui::GetFrameCount() > 1 && !root.empty()) {
+            const std::string now2 = "player settings: name " + (ps.name.empty() ? std::string("default") : ps.name) + " exe " +
+                                     (ps.exe.empty() ? std::string("default") : ps.exe) + " linear " + (ps.linearFiltering ? "on" : "off") +
+                                     " fastboot " + (ps.fastBoot ? "on" : "off") + " scale " + std::to_string(ps.windowScale);
+            static std::string reported;
+            if (reported != now2) {
+                reported = now2;
+                std::printf("%s\n", now2.c_str());
+                std::fflush(stdout);
+            }
         }
         if (!sOpen) {
             ImGui::PopClipRect();
