@@ -21148,14 +21148,14 @@ void testPlayerOptions() {
     const fs::path redux = dir / "img" / "pcsx-redux-x86_64.AppImage";
     {
         splash::PlayerOptions o;
-        o.exeName = "my: game";
+        o.exeName = "start: here";  // differs from the title beyond case: macOS and Windows fold case
         o.fastBoot = false;
         o.reduxConfig = R"({"emulator":{"Dither":0}})";
         const fs::path out = dir / "out";
         splash::PlayerResult p = splash::writePlayer(bin, redux, out, "My Game", {}, o);
         const std::string ext = p.os == splash::PlayerOs::Windows ? ".bat" : p.os == splash::PlayerOs::Mac ? ".command" : ".sh";
-        CHECK(p.error.empty() && p.launcher == out / ("my game" + ext) && fs::is_regular_file(p.launcher));
-        CHECK(!fs::exists(out / ("My Game" + ext)) && read(out / splash::kPlayerMarker) == "game\nredux\nconfig\nmy game" + ext + "\n");
+        CHECK(p.error.empty() && p.launcher == out / ("start here" + ext) && fs::is_regular_file(p.launcher));
+        CHECK(!fs::exists(out / ("My Game" + ext)) && read(out / splash::kPlayerMarker) == "game\nredux\nconfig\nstart here" + ext + "\n");
         nlohmann::json c = parse(read(out / "config" / "pcsx.json"));
         CHECK(c["emulator"]["FastBoot"] == false && c["emulator"]["Dither"] == 0 && c["emulator"]["LinearFiltering"] == false);
         // Bad project JSON: refused before anything is written.
