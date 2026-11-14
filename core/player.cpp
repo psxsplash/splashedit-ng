@@ -8,6 +8,10 @@
 #include <string_view>
 #include <system_error>
 
+#include <nlohmann/json.hpp>
+
+#include "texture.hh"
+
 #ifdef _WIN32
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -210,8 +214,31 @@ void put32(std::vector<uint8_t>& b, uint32_t v) {
 
 // One RT_ICON image, `n` pixels square: a BITMAPINFOHEADER (the height
 // doubled for the mask), 32-bit BGRA rows bottom up, then the 1-bit AND mask.
-std::vector<uint8_t> iconImage(const std::vector<uint32_t>& rgba16, int n) {
-    auto at = [&](int x, int y) { return rgba16[size_t(y * 16 / n) * 16 + size_t(x * 16 / n)]; };
+// A 16x16 icon (the memory card's) is scaled nearest-neighbour, alpha below
+// 128 transparent and the rest opaque; a bigger one averaged down (nearest
+// up), its alpha kept.
+std::vector<uint8_t> iconImage(const ExeIcon& ic, int n) {
+    const int s = ic.size;
+    const bool hard = s == 16;
+    auto at = [&](int x, int y) -> uint32_t {
+        if (hard || s <= n) return ic.rgba[size_t(y * s / n) * size_t(s) + size_t(x * s / n)];
+        // The source texels under this one, colour weighted by alpha.
+        const int x0 = x * s / n, x1 = std::max(x0 + 1, (x + 1) * s / n);
+        const int y0 = y * s / n, y1 = std::max(y0 + 1, (y + 1) * s / n);
+        uint64_t r = 0, g = 0, b = 0, a = 0;
+        for (int sy = y0; sy < y1; ++sy)
+            for (int sx = x0; sx < x1; ++sx) {
+                const uint32_t c = ic.rgba[size_t(sy) * size_t(s) + size_t(sx)];
+                const uint32_t ca = c >> 24;
+                r += (c & 0xff) * ca;
+                g += ((c >> 8) & 0xff) * ca;
+                b += ((c >> 16) & 0xff) * ca;
+                a += ca;
+            }
+        const uint64_t count = uint64_t(x1 - x0) * uint64_t(y1 - y0);
+        if (!a) return 0;
+        return uint32_t(r / a) | uint32_t(g / a) << 8 | uint32_t(b / a) << 16 | uint32_t(a / count) << 24;
+    };
     std::vector<uint8_t> b;
     put32(b, 40);
     put32(b, uint32_t(n));
@@ -222,11 +249,11 @@ std::vector<uint8_t> iconImage(const std::vector<uint32_t>& rgba16, int n) {
     for (int y = n - 1; y >= 0; --y)
         for (int x = 0; x < n; ++x) {
             const uint32_t c = at(x, y);
-            const bool opaque = (c >> 24) >= 128;
-            b.push_back(opaque ? uint8_t(c >> 16) : 0);
-            b.push_back(opaque ? uint8_t(c >> 8) : 0);
-            b.push_back(opaque ? uint8_t(c) : 0);
-            b.push_back(uint8_t(opaque ? 255 : 0));
+            const uint32_t a = hard ? ((c >> 24) >= 128 ? 255 : 0) : c >> 24;
+            b.push_back(a ? uint8_t(c >> 16) : 0);
+            b.push_back(a ? uint8_t(c >> 8) : 0);
+            b.push_back(a ? uint8_t(c) : 0);
+            b.push_back(uint8_t(a));
         }
     const size_t stride = size_t(n + 31) / 32 * 4;
     for (int y = n - 1; y >= 0; --y) {
@@ -238,8 +265,8 @@ std::vector<uint8_t> iconImage(const std::vector<uint32_t>& rgba16, int n) {
     return b;
 }
 
-// RT_ICON and RT_GROUP_ICON for the W functions (windows.h gives them as char*).
-const LPCWSTR kRtIcon = MAKEINTRESOURCEW(3), kRtGroupIcon = MAKEINTRESOURCEW(14);
+// RT_ICON, RT_GROUP_ICON and RT_VERSION for the W functions (windows.h gives them as char*).
+const LPCWSTR kRtIcon = MAKEINTRESOURCEW(3), kRtGroupIcon = MAKEINTRESOURCEW(14), kRtVersion = MAKEINTRESOURCEW(16);
 
 // A resource id: a number, or a name.
 struct ResId {
@@ -251,16 +278,21 @@ struct ResId {
     }
     LPCWSTR get() const { return name.empty() ? MAKEINTRESOURCEW(id) : name.c_str(); }
 };
-// The resources a program keeps when its icons are replaced: all but the icons.
+// The resources a program keeps when its icons or details are replaced: all
+// but those (`icons`, `version` say which go).
 struct Kept {
     ResId type, name;
     WORD lang;
     std::vector<uint8_t> data;
 };
+struct KeptList {
+    bool icons = false, version = false;
+    std::vector<Kept> kept;
+};
 BOOL CALLBACK keptLanguage(HMODULE m, LPCWSTR type, LPCWSTR name, WORD lang, LONG_PTR p) {
     HRSRC r = FindResourceExW(m, type, name, lang);
     const auto* d = r ? static_cast<const uint8_t*>(LockResource(LoadResource(m, r))) : nullptr;
-    if (d) reinterpret_cast<std::vector<Kept>*>(p)->push_back({ResId(type), ResId(name), lang, {d, d + SizeofResource(m, r)}});
+    if (d) reinterpret_cast<KeptList*>(p)->kept.push_back({ResId(type), ResId(name), lang, {d, d + SizeofResource(m, r)}});
     return TRUE;
 }
 BOOL CALLBACK keptName(HMODULE m, LPCWSTR type, LPWSTR name, LONG_PTR p) {
@@ -268,7 +300,9 @@ BOOL CALLBACK keptName(HMODULE m, LPCWSTR type, LPWSTR name, LONG_PTR p) {
     return TRUE;
 }
 BOOL CALLBACK keptType(HMODULE m, LPWSTR type, LONG_PTR p) {
-    if (type != kRtIcon && type != kRtGroupIcon) EnumResourceNamesW(m, type, keptName, p);
+    const KeptList& k = *reinterpret_cast<KeptList*>(p);
+    const bool goes = (k.icons && (type == kRtIcon || type == kRtGroupIcon)) || (k.version && type == kRtVersion);
+    if (!goes) EnumResourceNamesW(m, type, keptName, p);
     return TRUE;
 }
 
@@ -280,11 +314,23 @@ bool setExeIcon(const fs::path& exe, const std::vector<uint32_t>& rgba16, std::s
         error = "the icon is not 16x16";
         return false;
     }
+    const ExeIcon icon{16, rgba16};
+    return setExeResources(exe, &icon, nullptr, error);
+}
+
+bool setExeResources(const fs::path& exe, const ExeIcon* icon, const ExeDetails* details, std::string& error) {
+    error.clear();
+    if (icon && (icon->size < 1 || icon->size > 4096 || icon->rgba.size() != size_t(icon->size) * size_t(icon->size))) {
+        error = "the icon is not a square image";
+        return false;
+    }
 #ifdef _WIN32
-    // Every resource goes and all but the icons come back, so none of the
-    // stub's icons is left behind ours (deleting them one by one through
+    // Every resource goes and all but the ones replaced come back, so none of
+    // the stub's icons is left behind ours (deleting them one by one through
     // UpdateResourceW does nothing under Wine).
-    std::vector<Kept> kept;
+    KeptList kept;
+    kept.icons = icon != nullptr;
+    kept.version = details != nullptr;
     if (HMODULE m = LoadLibraryExW(exe.c_str(), nullptr, LOAD_LIBRARY_AS_DATAFILE)) {
         EnumResourceTypesW(m, keptType, reinterpret_cast<LONG_PTR>(&kept));
         FreeLibrary(m);
@@ -298,42 +344,315 @@ bool setExeIcon(const fs::path& exe, const std::vector<uint32_t>& rgba16, std::s
         return false;
     }
     bool ok = true;
-    for (Kept& k : kept)
+    for (Kept& k : kept.kept)
         ok = ok && UpdateResourceW(h, k.type.get(), k.name.get(), k.lang, k.data.data(), DWORD(k.data.size()));
-    const WORD lang = MAKELANGID(LANG_NEUTRAL, SUBLANG_NEUTRAL);
-    // GRPICONDIR then a GRPICONDIRENTRY per image, naming its RT_ICON id.
-    std::vector<uint8_t> group;
-    put16(group, 0);
-    put16(group, 1);
-    put16(group, 3);
-    WORD id = 1;
-    for (int n : {16, 32, 48}) {
-        std::vector<uint8_t> image = iconImage(rgba16, n);
-        ok = ok && UpdateResourceW(h, kRtIcon, MAKEINTRESOURCEW(id), lang, image.data(), DWORD(image.size()));
-        group.push_back(uint8_t(n));
-        group.push_back(uint8_t(n));
-        group.push_back(0);
-        group.push_back(0);
+    if (icon) {
+        const WORD lang = MAKELANGID(LANG_NEUTRAL, SUBLANG_NEUTRAL);
+        const std::vector<int> sizes = icon->size == 16 ? std::vector<int>{16, 32, 48} : std::vector<int>{16, 32, 48, 256};
+        // GRPICONDIR then a GRPICONDIRENTRY per image, naming its RT_ICON id.
+        std::vector<uint8_t> group;
+        put16(group, 0);
         put16(group, 1);
-        put16(group, 32);
-        put32(group, uint32_t(image.size()));
-        put16(group, id++);
+        put16(group, uint32_t(sizes.size()));
+        WORD id = 1;
+        for (int n : sizes) {
+            std::vector<uint8_t> image = iconImage(*icon, n);
+            ok = ok && UpdateResourceW(h, kRtIcon, MAKEINTRESOURCEW(id), lang, image.data(), DWORD(image.size()));
+            group.push_back(uint8_t(n & 0xff));  // 256 is 0
+            group.push_back(uint8_t(n & 0xff));
+            group.push_back(0);
+            group.push_back(0);
+            put16(group, 1);
+            put16(group, 32);
+            put32(group, uint32_t(image.size()));
+            put16(group, id++);
+        }
+        ok = ok && UpdateResourceW(h, kRtGroupIcon, MAKEINTRESOURCEW(1), lang, group.data(), DWORD(group.size()));
     }
-    ok = ok && UpdateResourceW(h, kRtGroupIcon, MAKEINTRESOURCEW(1), lang, group.data(), DWORD(group.size()));
+    if (details) {
+        std::vector<uint8_t> v = versionResource(*details, utf8(exe.filename()));
+        ok = ok && UpdateResourceW(h, kRtVersion, MAKEINTRESOURCEW(1), MAKELANGID(LANG_ENGLISH, SUBLANG_ENGLISH_US), v.data(),
+                                   DWORD(v.size()));
+    }
     const DWORD failed = ok ? 0 : GetLastError();
     if (!EndUpdateResourceW(h, ok ? FALSE : TRUE) || !ok) {
-        error = "cannot set the icon of " + utf8(exe) + " (error " + std::to_string(ok ? GetLastError() : failed) + ")";
+        error = "cannot set the icon and details of " + utf8(exe) + " (error " + std::to_string(ok ? GetLastError() : failed) +
+                ")";
         return false;
     }
     return true;
 #else
     (void)exe;
-    error = "a program's icon is set on Windows only";
+    (void)details;
+    error = "a program's icon and details are set on Windows only";
     return false;
 #endif
 }
 
-std::string seededReduxConfig() { return "{\"emulator\":{\"ShownAutoUpdateConfig\":true,\"AutoUpdate\":false}}\n"; }
+namespace {
+
+// UTF-8 as UTF-16; a bad byte reads as U+FFFD.
+std::u16string utf16(const std::string& s) {
+    std::u16string out;
+    for (size_t i = 0; i < s.size();) {
+        const unsigned char c = static_cast<unsigned char>(s[i]);
+        uint32_t cp = 0xfffd;
+        size_t len = 1;
+        if (c < 0x80) cp = c;
+        else if ((c >> 5) == 6) cp = c & 0x1f, len = 2;
+        else if ((c >> 4) == 14) cp = c & 0x0f, len = 3;
+        else if ((c >> 3) == 30) cp = c & 0x07, len = 4;
+        if (len > 1) {
+            if (i + len > s.size()) len = 1, cp = 0xfffd;
+            for (size_t k = 1; k < len; ++k) {
+                const unsigned char d = static_cast<unsigned char>(s[i + k]);
+                if ((d >> 6) != 2) {
+                    len = k;
+                    cp = 0xfffd;
+                    break;
+                }
+                cp = cp << 6 | (d & 0x3f);
+            }
+        }
+        i += len;
+        if (cp >= 0x10000 && cp <= 0x10ffff) {
+            cp -= 0x10000;
+            out += char16_t(0xd800 + (cp >> 10));
+            out += char16_t(0xdc00 + (cp & 0x3ff));
+        } else {
+            out += char16_t(cp > 0x10ffff ? 0xfffd : cp);
+        }
+    }
+    return out;
+}
+
+// VS_VERSIONINFO's blocks: wLength, wValueLength, wType, the key (UTF-16,
+// NUL-ended), padding to 32 bits, the value, the children; each block starts
+// 32-bit aligned.
+struct VersionWriter {
+    std::vector<uint8_t> b;
+    void align() {
+        while (b.size() % 4) b.push_back(0);
+    }
+    void w16(uint32_t v) {
+        b.push_back(uint8_t(v));
+        b.push_back(uint8_t(v >> 8));
+    }
+    void w32(uint32_t v) {
+        w16(v & 0xffff);
+        w16(v >> 16);
+    }
+    void wstr(const std::u16string& s) {
+        for (char16_t c : s) w16(c);
+        w16(0);
+    }
+    size_t begin(const std::u16string& key, uint32_t valueLength, uint32_t type) {
+        align();
+        const size_t at = b.size();
+        w16(0);
+        w16(valueLength);
+        w16(type);
+        wstr(key);
+        align();
+        return at;
+    }
+    void end(size_t at) {
+        const size_t len = b.size() - at;
+        b[at] = uint8_t(len);
+        b[at + 1] = uint8_t(len >> 8);
+    }
+};
+
+// "1.2.3" as two DWORDs, 1.2 and 3.0; zeros when it is not up to four numbers below 65536.
+void versionNumbers(const std::string& v, uint32_t& ms, uint32_t& ls) {
+    ms = ls = 0;
+    uint32_t n[4] = {0, 0, 0, 0};
+    size_t i = 0, part = 0;
+    if (v.empty()) return;
+    while (true) {
+        if (i >= v.size() || !std::isdigit(static_cast<unsigned char>(v[i]))) return;
+        uint32_t x = 0;
+        while (i < v.size() && std::isdigit(static_cast<unsigned char>(v[i]))) {
+            x = x * 10 + uint32_t(v[i] - '0');
+            if (x > 0xffff) return;
+            ++i;
+        }
+        n[part++] = x;
+        if (i == v.size()) break;
+        if (v[i] != '.' || part == 4) return;
+        ++i;
+    }
+    ms = n[0] << 16 | n[1];
+    ls = n[2] << 16 | n[3];
+}
+
+}  // namespace
+
+std::vector<uint8_t> versionResource(const ExeDetails& d, const std::string& exe) {
+    VersionWriter w;
+    uint32_t ms, ls;
+    versionNumbers(d.version, ms, ls);
+    const size_t root = w.begin(u"VS_VERSION_INFO", 52, 0);
+    // VS_FIXEDFILEINFO: the signature, version 1.0, the file and product
+    // versions, all flags valid and none set, VOS_NT_WINDOWS32, VFT_APP, no date.
+    for (uint32_t v : {0xfeef04bdu, 0x00010000u, ms, ls, ms, ls, 0x3fu, 0u, 0x00040004u, 1u, 0u, 0u, 0u}) w.w32(v);
+    const size_t sfi = w.begin(u"StringFileInfo", 0, 1);
+    const size_t table = w.begin(u"040904b0", 0, 1);  // US English, Unicode
+    const std::pair<const char16_t*, std::string> strings[] = {
+        {u"CompanyName", d.company},  {u"FileDescription", d.description}, {u"FileVersion", d.version},
+        {u"InternalName", exe},       {u"LegalCopyright", d.copyright},    {u"OriginalFilename", exe},
+        {u"ProductName", d.product},  {u"ProductVersion", d.version},
+    };
+    for (const auto& [key, value] : strings) {
+        if (value.empty()) continue;
+        const std::u16string v = utf16(value);
+        const size_t at = w.begin(key, uint32_t(v.size() + 1), 1);  // in WCHARs, the NUL counted
+        w.wstr(v);
+        w.end(at);
+    }
+    w.end(table);
+    w.end(sfi);
+    const size_t vfi = w.begin(u"VarFileInfo", 0, 1);
+    const size_t var = w.begin(u"Translation", 4, 0);
+    w.w16(0x0409);
+    w.w16(1200);
+    w.end(var);
+    w.end(vfi);
+    w.end(root);
+    return w.b;
+}
+
+ExeIcon squareIcon(const std::vector<uint32_t>& rgba, int w, int h) {
+    ExeIcon ic;
+    if (w <= 0 || h <= 0 || rgba.size() != size_t(w) * size_t(h)) return ic;
+    ic.size = std::max(w, h);
+    ic.rgba.assign(size_t(ic.size) * size_t(ic.size), 0);
+    const int ox = (ic.size - w) / 2, oy = (ic.size - h) / 2;
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x) ic.rgba[size_t(y + oy) * size_t(ic.size) + size_t(x + ox)] = rgba[size_t(y) * size_t(w) + size_t(x)];
+    return ic;
+}
+
+static int clampScale(int s) { return s >= 1 && s <= 4 ? s : 2; }
+
+std::string reduxConfig(const PlayerOptions& opt, std::string& error) {
+    error.clear();
+    const int scale = clampScale(opt.windowScale);
+    nlohmann::json j = {
+        {"emulator",
+         {{"ShownAutoUpdateConfig", true}, {"AutoUpdate", false}, {"LinearFiltering", opt.linearFiltering}, {"FastBoot", opt.fastBoot}}},
+        {"gui", {{"WindowSizeX", 320 * scale}, {"WindowSizeY", 240 * scale}}},
+    };
+    if (!opt.reduxConfig.empty()) {
+        const nlohmann::json own = nlohmann::json::parse(opt.reduxConfig, nullptr, false);
+        if (!own.is_object()) {
+            error = own.is_discarded() ? "it is not valid JSON" : "it is not a JSON object";
+            return {};
+        }
+        j.merge_patch(own);
+    }
+    return j.dump(1) + "\n";
+}
+
+std::string seededReduxConfig() {
+    std::string error;
+    return reduxConfig(PlayerOptions(), error);
+}
+
+PlayerSettings readPlayerSettings(const fs::path& file) {
+    PlayerSettings s;
+    std::ifstream in(file, std::ios::binary);
+    if (!in) return s;
+    const nlohmann::json j = nlohmann::json::parse(in, nullptr, false);
+    if (!j.is_object()) return s;
+    auto str = [&](const char* key, std::string& to) {
+        if (auto it = j.find(key); it != j.end() && it->is_string()) to = it->get<std::string>();
+    };
+    str("name", s.name);
+    str("exe", s.exe);
+    str("icon", s.icon);
+    str("company", s.company);
+    str("version", s.version);
+    str("copyright", s.copyright);
+    str("pcsxJson", s.pcsxJson);
+    if (auto it = j.find("linearFiltering"); it != j.end() && it->is_boolean()) s.linearFiltering = it->get<bool>();
+    if (auto it = j.find("fastBoot"); it != j.end() && it->is_boolean()) s.fastBoot = it->get<bool>();
+    if (auto it = j.find("windowScale"); it != j.end() && it->is_number_integer()) s.windowScale = clampScale(it->get<int>());
+    return s;
+}
+
+bool writePlayerSettings(const fs::path& file, const PlayerSettings& s) {
+    nlohmann::json j = nlohmann::json::object();
+    auto str = [&](const char* key, const std::string& v) {
+        if (!v.empty()) j[key] = v;
+    };
+    str("name", s.name);
+    str("exe", s.exe);
+    str("icon", s.icon);
+    str("company", s.company);
+    str("version", s.version);
+    str("copyright", s.copyright);
+    str("pcsxJson", s.pcsxJson);
+    if (s.linearFiltering) j["linearFiltering"] = true;
+    if (!s.fastBoot) j["fastBoot"] = false;
+    if (clampScale(s.windowScale) != 2) j["windowScale"] = clampScale(s.windowScale);
+    std::ofstream out(file, std::ios::binary | std::ios::trunc);
+    out << j.dump(2) << "\n";
+    out.close();
+    return !out.fail();
+}
+
+std::string playerOptions(const PlayerSettings& s, const fs::path& projectRoot, const std::string& title, PlayerOptions& out) {
+    out = PlayerOptions();
+    out.exeName = s.exe;
+    out.details.product = title;
+    out.details.description = title;
+    out.details.company = s.company;
+    out.details.version = s.version;
+    out.details.copyright = s.copyright;
+    out.linearFiltering = s.linearFiltering;
+    out.fastBoot = s.fastBoot;
+    out.windowScale = clampScale(s.windowScale);
+    auto resolve = [&](const std::string& p) {
+        const fs::path f = fromUtf8(p);
+        return f.is_absolute() ? f : projectRoot / f;
+    };
+    std::string error;
+    if (!s.icon.empty()) {
+        try {
+            const Image img = loadImage(resolve(s.icon));
+            std::vector<uint32_t> rgba(size_t(img.width) * size_t(img.height));
+            auto byte = [](float v) { return uint32_t(std::clamp(v, 0.0f, 1.0f) * 255.0f + 0.5f); };
+            for (int y = 0; y < img.height; ++y)
+                for (int x = 0; x < img.width; ++x) {
+                    // Image rows are bottom up; the icon's top down.
+                    const Image::Px& p = img.pixels[size_t(img.height - 1 - y) * size_t(img.width) + size_t(x)];
+                    rgba[size_t(y) * size_t(img.width) + size_t(x)] = byte(p.r) | byte(p.g) << 8 | byte(p.b) << 16 | byte(p.a) << 24;
+                }
+            out.icon = squareIcon(rgba, img.width, img.height);
+        } catch (const std::exception& e) {
+            error = "the player's icon " + s.icon + " cannot be read: " + e.what();
+        }
+    }
+    if (!s.pcsxJson.empty()) {
+        std::ifstream in(resolve(s.pcsxJson), std::ios::binary);
+        std::string text((std::istreambuf_iterator<char>(in)), {});
+        std::string e;
+        if (text.empty()) e = "it cannot be read or is empty";
+        else {
+            PlayerOptions probe;
+            probe.reduxConfig = text;
+            reduxConfig(probe, e);
+        }
+        if (!e.empty()) {
+            if (error.empty()) error = "the player's pcsx.json " + s.pcsxJson + " is not used: " + e;
+            else error += "; the player's pcsx.json " + s.pcsxJson + " is not used: " + e;
+        } else {
+            out.reduxConfig = std::move(text);
+        }
+    }
+    return error;
+}
 
 std::string exportDirError(const fs::path& out, const char* marker, const std::string& what) {
     std::error_code ec;
@@ -361,6 +680,13 @@ void removeExported(const fs::path& out, const char* marker) {
 
 PlayerResult writePlayer(const fs::path& bin, const fs::path& redux, const fs::path& out, const std::string& title,
                          const fs::path& launcherStub, const std::vector<uint32_t>* icon) {
+    PlayerOptions opt;
+    if (icon) opt.icon = {16, *icon};
+    return writePlayer(bin, redux, out, title, launcherStub, opt);
+}
+
+PlayerResult writePlayer(const fs::path& bin, const fs::path& redux, const fs::path& out, const std::string& title,
+                         const fs::path& launcherStub, const PlayerOptions& opt) {
     PlayerResult r;
     ReduxInstall ri;
     if (!findReduxInstall(redux, ri, r.error)) return r;
@@ -383,6 +709,12 @@ PlayerResult writePlayer(const fs::path& bin, const fs::path& redux, const fs::p
     }
     if (within(bin, out)) {
         r.error = "the disc image " + utf8(bin) + " is inside the player folder " + utf8(out);
+        return r;
+    }
+    std::string configError;
+    const std::string config = reduxConfig(opt, configError);
+    if (!configError.empty()) {
+        r.error = "the project's pcsx.json is not used: " + configError;
         return r;
     }
     try {
@@ -408,20 +740,26 @@ PlayerResult writePlayer(const fs::path& bin, const fs::path& redux, const fs::p
                                  "): the libraries it uses must be installed where the player runs");
 
         fs::create_directories(out / "config");
-        writeText(out / "config" / "pcsx.json", seededReduxConfig());
+        writeText(out / "config" / "pcsx.json", config);
 
         const std::string cueRel = "game/" + utf8(cue.filename());
         const bool stub = ri.os == PlayerOs::Windows && !launcherStub.empty() && fs::is_regular_file(launcherStub, ec);
         if (ri.os == PlayerOs::Windows && !launcherStub.empty() && !stub)
             r.warnings.push_back("the player launcher " + utf8(launcherStub) +
                                  " is missing: the player starts from a .bat instead, without the game's icon");
-        const std::string launcher = stub ? playerFileName(title) + ".exe" : launcherName(title, ri.os);
+        const std::string name = opt.exeName.empty() ? title : opt.exeName;
+        const std::string launcher = stub ? playerFileName(name) + ".exe" : launcherName(name, ri.os);
         r.launcher = out / fromUtf8(launcher);
         if (stub) {
             fs::copy_file(launcherStub, r.launcher, fs::copy_options::overwrite_existing);
             writeText(out / "config" / "launch.txt", launchConfig(ri.exe, cueRel, "config"));
-            if (std::string e; icon && !setExeIcon(r.launcher, *icon, e))
-                r.warnings.push_back("the player keeps the default icon: " + e);
+            const ExeDetails& d = opt.details;
+            const bool details = !(d.description.empty() && d.product.empty() && d.company.empty() && d.version.empty() &&
+                                   d.copyright.empty());
+            if (std::string e; (opt.icon.size || details) &&
+                               !setExeResources(r.launcher, opt.icon.size ? &opt.icon : nullptr, details ? &d : nullptr, e))
+                r.warnings.push_back(std::string("the player keeps the default ") + (opt.icon.size ? "icon" : "details") +
+                                     ": " + e);
         } else {
             writeText(r.launcher, launcherText(ri.os, ri.exe, cueRel, "config"));
         }

@@ -185,6 +185,8 @@ if(WIN32)
     # The icon test (testPlayerExeIcon) works on a copy of the launcher.
     add_dependencies(editor_tests splashedit-player-launcher)
     target_compile_definitions(editor_tests PRIVATE SPLASHEDIT_PLAYER_LAUNCHER="$<TARGET_FILE:splashedit-player-launcher>")
+    # ... and reads its details back (GetFileVersionInfoW).
+    target_link_libraries(editor_tests PRIVATE version)
 endif()
 
 if(NOT SPLASHEDIT_BUILD_EDITOR)

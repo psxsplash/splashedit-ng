@@ -96,8 +96,10 @@ try:
     cfg = json.load(open(os.path.join(out, 'config', 'pcsx.json')))
 except (OSError, ValueError) as e:
     cfg = str(e)
-check('config/pcsx.json is seeded', isinstance(cfg, dict) and cfg.get('emulator') == {'ShownAutoUpdateConfig': True,
-                                                                                    'AutoUpdate': False}, cfg)
+# No update prompt or checks, sharp pixels, no BIOS shell, a 2x window (#347).
+check('config/pcsx.json is seeded', isinstance(cfg, dict) and cfg.get('emulator') == {
+    'ShownAutoUpdateConfig': True, 'AutoUpdate': False, 'LinearFiltering': False, 'FastBoot': True} and
+    cfg.get('gui') == {'WindowSizeX': 640, 'WindowSizeY': 480}, cfg)
 check('the marker lists what it wrote', open(os.path.join(out, '.splashedit-player')).read().split('\n')[:4] ==
       ['game', 'redux', 'config', 'Courtyard Demo' + launcher_ext])
 text = open(launcher, newline='').read() if os.path.isfile(launcher) else ''
@@ -169,7 +171,10 @@ if boot:
         # those draw (the menu bar, the dialog, the idle logo and text).
         ppm = subprocess.run(['convert', shot, '-depth', '8', 'ppm:-'], capture_output=True).stdout.split(maxsplit=4)
         w, data = int(ppm[1]), ppm[4]
-        probes = [(300, 8), (200, 60), (380, 250), (640, 100), (1000, 150)]
+        # The window is 640 x 480 (the seeded gui.WindowSizeX/Y), at the top
+        # left of the 1280 x 800 screen where pcsx-redux's centred 1280 x 800
+        # window began before it took that size.
+        probes = [(150, 8), (100, 30), (190, 125), (320, 50), (500, 75)]
         px = [tuple(data[(y * w + x) * 3:(y * w + x) * 3 + 3]) for x, y in probes]
         sky = [min(p) > 90 and p[2] >= max(p) and max(p) - min(p) < 80 for p in px]
         check('boot: the game fills the window, no pcsx-redux menus or dialog over it', all(sky), list(zip(probes, px)))
@@ -180,9 +185,9 @@ if boot:
         emu = json.load(open(first_run)).get('emulator', {})
     except (OSError, ValueError):
         emu = {}
-    # pcsx-redux writes its whole settings file back: more than the two seeded keys.
+    # pcsx-redux writes its whole settings file back: more than the four seeded keys.
     check('boot: pcsx-redux kept its settings in the player\'s config/', emu.get('ShownAutoUpdateConfig') is True and
-          emu.get('AutoUpdate') is False and len(emu) > 2, sorted(emu)[:5])
+          emu.get('AutoUpdate') is False and len(emu) > 4, sorted(emu)[:5])
 
 print(f'{checks - fails} of {checks} checks passed')
 shutil.rmtree(tmp, ignore_errors=True)
