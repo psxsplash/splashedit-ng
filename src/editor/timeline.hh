@@ -183,6 +183,12 @@ std::vector<std::string> pathNames(const Document& doc);
 // with no target (camera, rumble), an empty or unchanged target, or one the
 // sequence already drives with this type.
 bool setTrackTarget(Document& doc, SeqRef ref, int track, const std::string& target);
+// A copy of the track, keys and all, on another target, added at the end;
+// the original is left as it was. One undo step. Returns the new track's
+// index, or -1 where setTrackTarget would refuse the target (no target to
+// take, an empty one, the track's own, or one the sequence already drives
+// with this type) or the sequence has kMaxTimelineTracks.
+int duplicateTrack(Document& doc, SeqRef ref, int track, const std::string& target);
 // What a track of this type can drive, as the export addresses it: objects
 // with a mesh, runtime point lights, canvases, "canvas/element". Empty for
 // camera and rumble tracks.

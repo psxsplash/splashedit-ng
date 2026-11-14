@@ -920,6 +920,23 @@ bool setTrackTarget(Document& doc, SeqRef ref, int track, const std::string& tar
     });
 }
 
+int duplicateTrack(Document& doc, SeqRef ref, int track, const std::string& target) {
+    int added = -1;
+    editSeq(doc, ref, [&](SeqMut& m) {
+        if (!trackOk(m, track) || target.empty()) return false;
+        if (int(m.tracks->size()) >= kMaxTimelineTracks) return false;
+        CutsceneTrack copy = (*m.tracks)[size_t(track)];
+        if (!needsTarget(copy.type) || copy.target == target) return false;
+        for (const CutsceneTrack& o : *m.tracks)
+            if (o.type == copy.type && o.target == target) return false;
+        copy.target = target;
+        m.tracks->push_back(std::move(copy));
+        added = int(m.tracks->size()) - 1;
+        return true;
+    });
+    return added;
+}
+
 std::vector<std::string> targetsFor(const Document& doc, TrackType type) {
     std::vector<std::string> out;
     if (!needsTarget(type)) return out;

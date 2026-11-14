@@ -30,6 +30,8 @@ PICKER_RENAME = '540,581'        # its Rename... (the popup opens upwards)
 LANE0_MENU = '478,691'           # the first lane's ... button
 DRIVE_INSTEAD = '345,761'        # the lane menu's Drive instead
 DRIVE_CRATE2 = '435,894'         # Crate (2) in its submenu
+DUPLICATE_TO = '345,780'         # the lane menu's Duplicate to, under Drive instead
+DUPLICATE_CRATE2 = '435,913'     # Crate (2) in its submenu
 
 
 def check(name, ok, detail=''):
@@ -224,6 +226,18 @@ check('the lane menu points a track at another object, keys kept',
       t['target'] == 'Crate (2)' and [k['frame'] for k in t['keyframes']] == [0, 75], str(t)[:200] + ' | ' + out[-200:])
 saved, _, out = run(retarget + ['--key', 'ctrl+z', '--wait', '3'])
 check('undo points it back', json.loads(saved)['cutscenes'][0]['tracks'][0]['target'] == 'Crate', out[-200:])
+
+# Duplicate the first lane onto Crate (2): a new track at the end with the same keys, the original kept.
+duplicate = ['--timeline', 'intro', '--click', LANE0_MENU, '--wait', '3', '--move', DUPLICATE_TO, '--wait', '3', '--move',
+             f'{int(DUPLICATE_TO.split(",")[0]) + 5},{DUPLICATE_TO.split(",")[1]}', '--wait', '3', '--click', DUPLICATE_CRATE2,
+             '--wait', '3']
+saved, _, out = run(duplicate)
+ts = json.loads(saved)['cutscenes'][0]['tracks']
+check('the lane menu duplicates a track onto another object, keys and all',
+      [(t['type'], t['target']) for t in ts] == [('objectPosition', 'Crate'), ('cameraPosition', ''), ('objectPosition', 'Crate (2)')] and
+      [k['frame'] for k in ts[0]['keyframes']] == [0, 75] and ts[2]['keyframes'] == ts[0]['keyframes'], str(ts)[:300] + ' | ' + out[-200:])
+saved, _, out = run(duplicate + ['--key', 'ctrl+z', '--wait', '3'])
+check('one undo takes the copy away', [t['target'] for t in json.loads(saved)['cutscenes'][0]['tracks']] == ['Crate', ''], out[-200:])
 
 
 # Previews: frame 0 against frame 75, the scene file untouched.

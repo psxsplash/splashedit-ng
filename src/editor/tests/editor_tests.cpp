@@ -10292,6 +10292,57 @@ void testTimelineRetarget() {
     CHECK(d.historySize() == h);
 }
 
+// Duplicate to: the track and its keys copied onto another target as a new
+// track at the end, the original untouched, one undo step; refused where
+// Drive instead would refuse the target.
+void testTimelineDuplicateTrack() {
+    using splash::TrackType;
+    splash::Scene sc;
+    for (const char* n : {"Crate", "Barrel", "Box"}) {
+        splash::Object o = named(n);
+        o.mesh = splash::MeshComponent{};
+        sc.objects.push_back(o);
+    }
+    splash::Cutscene cs;
+    cs.name = "intro";
+    sc.cutscenes.push_back(cs);
+    editor::Document d;
+    d.reset(sc);
+    const editor::SeqRef ref{editor::SeqKind::Cutscene, 0};
+    CHECK(editor::addTrack(d, ref, TrackType::ObjectRotation, "Crate") == 0);
+    CHECK(editor::addTrack(d, ref, TrackType::ObjectPosition, "Barrel") == 1);
+    CHECK(editor::addTrack(d, ref, TrackType::CameraPosition, "") == 2);
+    CHECK(editor::addKey(d, ref, 0, 10, editor::KeyValue{0, 90, 0}));
+    CHECK(editor::addKey(d, ref, 0, 30, editor::KeyValue{0, 180, 0}));
+
+    size_t h = d.historySize();
+    CHECK(editor::duplicateTrack(d, ref, 0, "Barrel") == 3);
+    CHECK(d.historySize() == h + 1);
+    const std::vector<splash::CutsceneTrack>& tr = d.scene().cutscenes[0].tracks;
+    CHECK(tr.size() == 4);
+    CHECK(tr[0].target == "Crate" && tr[0].keyframes.size() == 2);
+    CHECK(tr.size() == 4 && tr[3].type == TrackType::ObjectRotation && tr[3].target == "Barrel");
+    CHECK(tr.size() == 4 && tr[3].keyframes.size() == 2 && tr[3].keyframes[0].frame == 10 && tr[3].keyframes[0].value[1] == 90 &&
+          tr[3].keyframes[1].frame == 30 && tr[3].keyframes[1].value[1] == 180);
+    // The copy is its own: a key added to it leaves the original as it was.
+    CHECK(editor::addKey(d, ref, 3, 50, editor::KeyValue{0, 10, 0}));
+    const std::vector<splash::CutsceneTrack>& after = d.scene().cutscenes[0].tracks;
+    CHECK(after[0].keyframes.size() == 2 && after.size() == 4 && after[3].keyframes.size() == 3);
+    CHECK(d.undo() && d.undo() && d.scene().cutscenes[0].tracks.size() == 3);
+    CHECK(d.scene().cutscenes[0].tracks[0].target == "Crate");
+
+    h = d.historySize();
+    CHECK(editor::duplicateTrack(d, ref, 1, "Barrel") == -1);  // its own target
+    CHECK(editor::duplicateTrack(d, ref, 0, "Crate") == -1);
+    CHECK(editor::duplicateTrack(d, ref, 0, "") == -1);
+    CHECK(editor::duplicateTrack(d, ref, 2, "Crate") == -1);   // the camera has no target
+    CHECK(editor::duplicateTrack(d, ref, 9, "Crate") == -1);
+    CHECK(editor::addTrack(d, ref, TrackType::ObjectRotation, "Box") == 3);
+    h = d.historySize();
+    CHECK(editor::duplicateTrack(d, ref, 0, "Box") == -1);     // Box already has a rotation track
+    CHECK(d.historySize() == h && d.scene().cutscenes[0].tracks.size() == 4);
+}
+
 // Sampling as the console does it: keys packed to fixed point, then
 // interpolation.cpp's integer blend. The float curve misses by a step.
 void testTimelineFixedSample() {
@@ -21218,6 +21269,7 @@ int main(int argc, char** argv) {
     testTimelinePreview();
     testTimelineRenameDelete();
     testTimelineRetarget();
+    testTimelineDuplicateTrack();
     testTimelineFixedSample();
     testTimelinePreviewMore();
     testTimelineSelection();
