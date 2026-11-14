@@ -31,16 +31,65 @@ static std::string utf8(const fs::path& p) {
 
 fs::path consoleDir(const fs::path& playDir, int index) { return playDir / ("console" + std::to_string(index + 1)); }
 
-std::string linkSettings(bool server, uint16_t port) {
+// A JSON string holding `s`.
+static std::string jsonString(const std::string& s) {
+    std::string out = "\"";
+    for (unsigned char c : s) {
+        if (c == '"' || c == '\\') out += '\\', out += char(c);
+        else if (c < 0x20) {
+            char hex[8];
+            std::snprintf(hex, sizeof hex, "\\u%04x", c);
+            out += hex;
+        } else out += char(c);
+    }
+    return out + "\"";
+}
+
+// emulator.Dither: 1 is redux's default (the game's own dithering), 0 none.
+// emulator.Mcd1 and Mcd2: the memory card files, absolute, under `cards`;
+// left out without `cards`, so redux keeps them in its -portable directory.
+static std::string emulatorHead(bool dither, const fs::path& cards) {
+    std::string head = std::string("{\"emulator\":{\"Dither\":") + (dither ? "1" : "0") + ",";
+    if (!cards.empty())
+        head += "\"Mcd1\":" + jsonString(utf8(cards / "memcard1.mcd")) + ",\"Mcd2\":" + jsonString(utf8(cards / "memcard2.mcd")) + ",";
+    return head;
+}
+
+std::string linkSettings(bool server, uint16_t port, bool dither, const fs::path& cards) {
     const std::string p = std::to_string(port);
     if (server)
-        return "{\"emulator\":{\"Debug\":{\"SIO1Server\":true,\"SIO1ServerPort\":" + p + ",\"SIO1Client\":false}}}\n";
-    return "{\"emulator\":{\"Debug\":{\"SIO1Server\":false,\"SIO1Client\":true,\"SIO1Clienthost\":\"127.0.0.1\","
+        return emulatorHead(dither, cards) + "\"Debug\":{\"SIO1Server\":true,\"SIO1ServerPort\":" + p + ",\"SIO1Client\":false}}}\n";
+    return emulatorHead(dither, cards) +
+           "\"Debug\":{\"SIO1Server\":false,\"SIO1Client\":true,\"SIO1Clienthost\":\"127.0.0.1\","
            "\"SIO1ClientPort\":" +
            p + "}}}\n";
 }
 
-std::string noLinkSettings() { return "{\"emulator\":{\"Debug\":{\"SIO1Server\":false,\"SIO1Client\":false}}}\n"; }
+std::string noLinkSettings(bool dither, const fs::path& cards) {
+    return emulatorHead(dither, cards) + "\"Debug\":{\"SIO1Server\":false,\"SIO1Client\":false}}}\n";
+}
+
+// `project` absolute and canonical (links resolved where it exists), with no
+// trailing separator: one spelling per directory.
+static fs::path canonicalProject(const fs::path& project) {
+    std::error_code ec;
+    fs::path abs = fs::absolute(project, ec);
+    if (ec) abs = project;
+    fs::path canon = fs::weakly_canonical(abs, ec);
+    if (ec) canon = abs.lexically_normal();
+    if (canon.filename().empty() && canon.has_relative_path()) canon = canon.parent_path();
+    return canon;
+}
+
+fs::path cardsDir(const fs::path& prefDir, const fs::path& project) {
+    if (prefDir.empty() || project.empty()) return {};
+    const std::string key = utf8(canonicalProject(project));
+    uint64_t h = 0xcbf29ce484222325ull;  // FNV-1a 64
+    for (unsigned char c : key) h = (h ^ c) * 0x100000001b3ull;
+    char hex[17];
+    std::snprintf(hex, sizeof hex, "%016llx", static_cast<unsigned long long>(h));
+    return prefDir / "play" / hex;
+}
 
 std::string captureDirLua(const fs::path& dir) {
     // A long bracket at a level no path holds, so nothing in it needs escaping.
@@ -57,7 +106,20 @@ static bool writeText(const fs::path& file, const std::string& text, std::string
     return false;
 }
 
-bool prepareConsole(const fs::path& dir, bool server, uint16_t port, std::string* error, bool sio1) {
+bool prepareCards(const fs::path& dir, const fs::path& project, int consoles, std::string* error) {
+    std::error_code ec;
+    for (int i = 0; i < consoles; ++i) {
+        fs::create_directories(consoleDir(dir, i), ec);
+        if (ec) {
+            if (error) *error = "Cannot create " + utf8(consoleDir(dir, i)) + ": " + ec.message();
+            return false;
+        }
+    }
+    return writeText(dir / "project.txt", utf8(canonicalProject(project)) + "\n", error);
+}
+
+bool prepareConsole(const fs::path& dir, bool server, uint16_t port, std::string* error, bool sio1, bool dither,
+                    const fs::path& cards) {
     std::error_code ec;
     fs::create_directories(dir, ec);
     if (ec) {
@@ -65,7 +127,7 @@ bool prepareConsole(const fs::path& dir, bool server, uint16_t port, std::string
         return false;
     }
     for (const char* stale : {"capture.flag", "capture.gpd", "capture.err", "capture.gpd.part"}) fs::remove(dir / stale, ec);
-    return writeText(dir / "pcsx.json", sio1 ? linkSettings(server, port) : noLinkSettings(), error) &&
+    return writeText(dir / "pcsx.json", sio1 ? linkSettings(server, port, dither, cards) : noLinkSettings(dither, cards), error) &&
            writeText(dir / "capturedir.lua", captureDirLua(dir), error);
 }
 

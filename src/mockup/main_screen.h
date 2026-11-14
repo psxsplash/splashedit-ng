@@ -122,6 +122,10 @@ struct State {
     // Play (F5): export, then pcsx-redux.
     struct Play {
         std::filesystem::path settingsFile;  // where tools are saved; empty = not saved (screenshot mode)
+        // The user's preferences directory (SDL_GetPrefPath), where Play keeps
+        // each project's memory cards (editor::cardsDir); a screenshot run's
+        // --prefs-dir. Empty: the cards stay in the Play directory.
+        std::filesystem::path prefDir;
         editor::PlayTools tools;             // as set by the user; withDefaults() fills the rest
         std::filesystem::path bundleDir;     // where the editor lives; redux/ and engine/ ship there
         std::filesystem::path captureScript;  // assets/framecapture.lua, passed to redux for Capture frame

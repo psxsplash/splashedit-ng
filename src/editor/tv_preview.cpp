@@ -8,9 +8,15 @@ namespace editor::tv {
 
 Rect displayRect(Rect p, int fw, int fh, bool tvAspect) {
     if (fw <= 0 || fh <= 0 || p.w() <= 0 || p.h() <= 0) return {p.x0, p.y0, p.x0, p.y0};
-    const float aspect = tvAspect ? 4.0f / 3.0f : float(fw) / float(fh);
-    const float w = std::floor(std::min(p.w(), p.h() * aspect) + 1e-3f);
-    const float h = std::floor(w / aspect + 1e-3f);
+    const int scale = int(std::floor(std::min(p.w() / float(fw), p.h() / float(fh)) + 1e-4f));
+    float w, h;
+    if (!tvAspect && scale >= 1) {
+        w = float(fw * scale), h = float(fh * scale);
+    } else {
+        const float aspect = 4.0f / 3.0f;
+        w = std::floor(std::min(p.w(), p.h() * aspect) + 1e-3f);
+        h = std::floor(w / aspect + 1e-3f);
+    }
     const float x0 = std::floor(p.x0 + (p.w() - w) * 0.5f), y0 = std::floor(p.y0 + (p.h() - h) * 0.5f);
     return {x0, y0, x0 + w, y0 + h};
 }

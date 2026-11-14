@@ -34,9 +34,12 @@ struct PlayTools {
     int players = 1;
     bool relay = false;
     // How the Game view shows the frame (editor/tv_preview.hh): the safe-area
-    // guides, 4:3 like a TV or square pixels, and the RGB, S-video or
+    // guides, 4:3 like a TV or integer scaled, and the RGB, S-video or
     // composite look (a tv::Look). uiSafeArea: the guides on the UI canvas.
     bool safeArea = false, tvAspect = true;
+    // Whether Play's consoles dither (pcsx-redux's emulator.Dither, which it
+    // reads once, at startup; editor::prepareConsole writes it).
+    bool dither = true;
     int look = 0;
     bool uiSafeArea = false;
     // The inspector's Scale lock (#264): one axis edited scales all three.
@@ -48,11 +51,12 @@ inline bool usesRelay(const PlayTools& t) { return t.players >= 3 || (t.players 
 
 // key=value lines: redux=, reduxweb=, psxsplash=, bios=, disc=, port=, overlay_perf=,
 // overlay_rooms=, boot_logo= (1 or 0), players= (1 to kMaxPlayers, clamped),
-// relay= (1 or 0), game_safe_area= (1 or 0), game_aspect= (4:3 or square),
+// relay= (1 or 0), game_safe_area= (1 or 0), game_aspect= (4:3 or integer;
+// square, saved before integer scaling, reads as integer), game_dither= (1 or 0),
 // game_look= (rgb, svideo or composite), ui_safe_area= (1 or 0),
 // scale_lock= (1 or 0). A missing
-// file or key reads as empty or off, but boot_logo as on, players as 1 (also
-// for a value that is not a number) and game_aspect as 4:3.
+// file or key reads as empty or off, but boot_logo and game_dither as on,
+// players as 1 (also for a value that is not a number) and game_aspect as 4:3.
 PlayTools loadPlayTools(const std::filesystem::path& file);
 bool savePlayTools(const std::filesystem::path& file, const PlayTools& tools);
 
@@ -227,9 +231,10 @@ RenderLost maxRenderLost(const RenderLost& a, const RenderLost& b);
 // Program and arguments that boot psxsplash on the files in `dir`. With a
 // `captureScript` (the editor's assets/framecapture.lua) redux also runs it
 // (-dofile), which answers capture requests (requestCapture). With a
-// `console` directory (one of 2 linked consoles, editor::consoleDir) redux
-// reads its settings there (-portable) and, with a captureScript, runs
-// console/capturedir.lua first, so the capture files live in `console`.
+// `console` directory (editor::consoleDir; Play passes one for every
+// console, 1 or more) redux reads its settings there (-portable) and, with a
+// captureScript, runs console/capturedir.lua first, so the capture files
+// live in `console`.
 // `pcdrvNet` adds -pcdrvnet after the PCdrv flags: a relayed console whose
 // game reaches the relay over PCDRV tcp:// (relayWire).
 std::vector<std::string> reduxCommand(const PlayTools& tools, const std::filesystem::path& dir,
