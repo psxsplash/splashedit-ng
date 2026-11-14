@@ -5,7 +5,10 @@
 # scene first. Every change is saved to scenes.list at once and is not a scene
 # edit (Ctrl+Z leaves it, nothing is unsaved). The editor prints the list
 # ("build: 0 a.scene | 1 b.scene") whenever it changes. Controls are clicked by
-# name (--click @build.up.1), so no pixel positions live here.
+# name (--click @build.up.1), so no pixel positions live here. A row shows
+# the scene's name without .scene (the path is its tooltip); double-clicking
+# one opens that scene, through the Save changes prompt when the open one has
+# unsaved changes.
 # usage: python3 buildscenescheck.py <splashedit>   (needs a display: xvfb-run -a)
 import os, shutil, subprocess, sys, tempfile
 
@@ -22,15 +25,15 @@ def check(name, ok, detail=''):
     fails += not ok
 
 
-def run(args):
+def run(args, pre=()):
     """Runs the editor on a fresh courtyard copy holding level2.scene too
     (courtyard.scene opens, nothing selected, so the inspector shows the
-    scene), then `args`. Returns the printed build: lines, the other output
-    lines, and scenes.list's text (None when there is none)."""
+    scene), then `args` (`pre` goes before the tab is clicked). Returns the
+    printed build: lines, the other output lines, and scenes.list's text (None when there is none)."""
     project = os.path.join(tempfile.mkdtemp(), 'courtyard')
     shutil.copytree(example, project)
     shutil.copyfile(os.path.join(project, 'courtyard.scene'), os.path.join(project, 'level2.scene'))
-    cmd = [editor, '--size', '1600x960', '--project', project, '--wait', '5'] + TAB + args + [
+    cmd = [editor, '--size', '1600x960', '--project', project, '--wait', '5'] + list(pre) + TAB + args + [
         '--wait', '5', '--screenshot', os.path.join(project, 'shot.png')]
     r = subprocess.run(cmd, capture_output=True, text=True, env=ENV, timeout=120)
     lines = (r.stdout + r.stderr).strip().splitlines()
@@ -72,6 +75,29 @@ check('the first scene added to an empty list goes after the open one',
       builds == ['build: (empty)', 'build: 0 courtyard.scene | 1 level2.scene'], builds)
 check('scenes.list is written at once, Ctrl+Z leaves it', text == 'courtyard.scene\nlevel2.scene\n', repr(text))
 check('the build list is no scene edit', 'unsaved changes: no' in lines, [l for l in lines if l.startswith('unsaved')])
+
+# Double-click a row: that scene opens. The open one (row 0) stays put.
+def status(lines):
+    return [l for l in lines if l.startswith('status:')]
+
+
+builds, lines, text = run(add('level2.scene') + ['--dblclick', '@build.row.0', '--wait', '3'])
+check('double-clicking the open scene opens nothing', status(lines) == ['status: '], status(lines))
+builds, lines, text = run(add('level2.scene') + ['--dblclick', '@build.row.1', '--wait', '5'])
+check('double-clicking a row opens its scene', status(lines) == ['status: Opened courtyard / level2.scene'], status(lines))
+check('... with no prompt when nothing is unsaved', 'popups open: no' in lines, [l for l in lines if l.startswith('popups')])
+# With unsaved changes (Crate deleted) the Save changes prompt comes first ...
+DIRTY = ['--select', 'Crate', '--key', 'delete', '--wait', '3']
+builds, lines, text = run(add('level2.scene') + ['--dblclick', '@build.row.1', '--wait', '5'], pre=DIRTY)
+check('with changes, a double-click asks first',
+      'popups open: yes' in lines and 'control discard' in {l.split(' at ')[0] for l in lines},
+      [l for l in lines if l.startswith('popups') or l.startswith('control discard')])
+check('... and has not opened it yet',
+      'unsaved changes: yes' in lines and status(lines) != ['status: Opened courtyard / level2.scene'], status(lines))
+# ... and Don't save opens it.
+builds, lines, text = run(add('level2.scene') + ['--dblclick', '@build.row.1', '--wait', '5'] + click('discard'), pre=DIRTY)
+check("Don't save then opens it",
+      status(lines) == ['status: Opened courtyard / level2.scene'] and 'unsaved changes: no' in lines, status(lines))
 
 print('%d failure%s' % (fails, '' if fails == 1 else 's'))
 sys.exit(1 if fails else 0)
