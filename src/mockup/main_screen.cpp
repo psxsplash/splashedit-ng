@@ -2687,6 +2687,17 @@ static void unsavedPrompt(State& st, editor::Document& doc, ImVec2 size) {
     if (st.openUnsaved) {
         st.openUnsaved = false;
         ImGui::OpenPopup(id);
+        // Asked from a minimized or background window (closed from the
+        // taskbar): bring it up, and flash it in case the system refuses
+        // to let it take focus.
+        if (SDL_Window* win = SDL_GL_GetCurrentWindow()) {
+            const SDL_WindowFlags flags = SDL_GetWindowFlags(win);
+            if (flags & SDL_WINDOW_MINIMIZED) SDL_RestoreWindow(win);
+            if (!(flags & SDL_WINDOW_INPUT_FOCUS)) {
+                SDL_RaiseWindow(win);
+                SDL_FlashWindow(win, SDL_FLASH_UNTIL_FOCUSED);
+            }
+        }
     }
     const float w = 440;
     ImGui::SetNextWindowPos(ImVec2(size.x * 0.5f, size.y * 0.42f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
