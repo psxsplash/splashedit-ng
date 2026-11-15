@@ -1429,10 +1429,11 @@ void RecentScenes::load() {
 }
 
 void RecentScenes::add(const fs::path& scene) {
-    remove(scene);
+    m_items.erase(std::remove(m_items.begin(), m_items.end(), scene), m_items.end());
     m_items.insert(m_items.begin(), scene);
     if (m_items.size() > kMax) m_items.resize(kMax);
     save();
+    if (m_onChange) m_onChange(m_items);
 }
 
 void RecentScenes::remove(const fs::path& scene) {
@@ -1440,6 +1441,7 @@ void RecentScenes::remove(const fs::path& scene) {
     if (it == m_items.end()) return;
     m_items.erase(it, m_items.end());
     save();
+    if (m_onChange) m_onChange(m_items);
 }
 
 void RecentScenes::save() const {

@@ -52,6 +52,7 @@
 #include "editor/play.hh"
 #include "editor/linkplay.hh"
 #include "editor/relay.hh"
+#include "editor/jumplist.hh"
 #include "editor/project.hh"
 #include "editor/psxmon.hh"
 #include "editor/serial.hh"
@@ -3246,6 +3247,54 @@ void testProject() {
     back.load();
     CHECK(back.items().size() == editor::RecentScenes::kMax - 1 && back.items().front() == proj / "s5.scene");
     CHECK(std::find(back.items().begin(), back.items().end(), proj / "s9.scene") == back.items().end());
+}
+
+// The taskbar Jump List's entries (Windows): one per recent project that is
+// still a folder, newest first, capped, each running --project "<folder>"
+// quoted so CommandLineToArgvW reads the path back whole. Recent projects
+// tell the list of each change.
+void testJumpList() {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    fs::path dir = g_outDir / "jumplist";
+    fs::remove_all(dir, ec);
+    const fs::path spaced = dir / "My Game", plain = dir / "level", gone = dir / "deleted";
+    fs::create_directories(spaced, ec);
+    fs::create_directories(plain, ec);
+    std::vector<editor::JumpListEntry> e = editor::jumpListEntries({spaced, gone, plain});
+    CHECK(e.size() == 2);
+    if (e.size() == 2) {
+        CHECK(e[0].title == "My Game" && e[1].title == "level");
+        CHECK(e[0].description == spaced.string() && e[1].description == plain.string());
+        CHECK(e[0].arguments == "--project \"" + spaced.string() + "\"");
+        CHECK(e[1].arguments == "--project \"" + plain.string() + "\"");
+    }
+    // Backslashes double only before a quote: a drive root keeps its closing quote.
+    CHECK(editor::quoteArgument("C:\\") == "\"C:\\\\\"");
+    CHECK(editor::quoteArgument("C:\\My Game") == "\"C:\\My Game\"");
+    CHECK(editor::quoteArgument("a\\\"b") == "\"a\\\\\\\"b\"");
+    CHECK(editor::quoteArgument("") == "\"\"");
+    std::vector<fs::path> many;
+    for (int i = 0; i < 12; ++i) many.push_back(spaced);
+    CHECK(editor::jumpListEntries(many).size() == editor::kJumpListMax);
+    CHECK(editor::jumpListEntries({gone}).empty());
+
+    editor::RecentScenes recents;
+    int calls = 0;
+    std::vector<fs::path> seen;
+    recents.onChange([&](const std::vector<fs::path>& items) {
+        ++calls;
+        seen = items;
+    });
+    recents.add(plain);
+    recents.add(spaced);
+    CHECK(calls == 2 && seen.size() == 2 && seen.front() == spaced);
+    recents.add(plain);  // moved to the front: one change, not a remove and an add
+    CHECK(calls == 3 && seen.front() == plain);
+    recents.remove(gone);  // not in the list: no change
+    CHECK(calls == 3);
+    recents.remove(spaced);
+    CHECK(calls == 4 && seen.size() == 1);
 }
 
 // New Project's templates: the listing (built-in empty first, then by order
@@ -21687,6 +21736,7 @@ int main(int argc, char** argv) {
     testProject();
     testProjectScenes();
     testProjectTemplates();
+    testJumpList();
     testAdoptAsset();
     testNewScript();
     testExternalEditorSetup();

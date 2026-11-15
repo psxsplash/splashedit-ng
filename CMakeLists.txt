@@ -131,6 +131,7 @@ add_library(splasheditdoc STATIC
     src/editor/relay.cpp
     src/editor/model_import.cpp
     src/editor/project.cpp
+    src/editor/jumplist.cpp
     src/editor/file_swaps.cpp
     src/editor/skin_clips.cpp
     src/editor/serial.cpp
@@ -163,7 +164,8 @@ target_include_directories(splasheditdoc PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/gen
 find_package(Threads REQUIRED)
 target_link_libraries(splasheditdoc PUBLIC splashcore Threads::Threads)
 if(WIN32)
-    target_link_libraries(splasheditdoc PUBLIC ws2_32)
+    # ole32/shell32/uuid: the taskbar Jump List (src/editor/jumplist.cpp).
+    target_link_libraries(splasheditdoc PUBLIC ws2_32 ole32 shell32 uuid)
 endif()
 if(MSVC)
     target_compile_options(splasheditdoc PRIVATE /W4 /utf-8)
