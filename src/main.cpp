@@ -29,6 +29,7 @@
 #include "editor/document.hh"
 #include "editor/jumplist.hh"
 #include "editor/texture_preview.hh"
+#include "emulator.h"
 #include "gl.h"
 #include "mockup/main_screen.h"
 #include "ui/brand.h"
@@ -662,6 +663,8 @@ void attachParentConsole() {
 #endif
 
 int main(int argc, char** argv) {
+    // Play's player, on its way to pcsx-redux (Emulator::start): nothing else first.
+    if (int code = 0; Emulator::childTrampoline(argc, argv, &code)) return code;
 #ifdef _WIN32
     attachParentConsole();
 #endif

@@ -1,7 +1,9 @@
 // Emulator::stop on a process that ignores being asked to close, the way
 // pcsx-redux without its UI ignores WM_CLOSE on Windows. stop() must still
-// return, and the process must be gone. Also a stand-in pcsx-redux for
-// tests/gamekeys.sh (SPLASHEDIT_FAKE_REDUX set).
+// return, and the process must be gone. A process Emulator started dies with
+// the process that started it, killed outright (issue #358: an orphan player
+// holds psxsplash.bin). Also a stand-in pcsx-redux for tests/gamekeys.sh
+// (SPLASHEDIT_FAKE_REDUX set).
 #include <SDL3/SDL.h>
 
 #include <cstdint>
@@ -103,6 +105,49 @@ static int fakeRedux() {
     return 0;
 }
 
+// Parent mode: starts a stubborn child with Emulator, says its pid, then
+// waits to be killed (as an editor that crashes with Play running).
+static int parentOfStubborn(const char* self) {
+    Emulator emu;
+    std::string error;
+    if (!emu.start({self, "--stubborn-child"}, &error)) return 1;
+    for (Uint64 t = SDL_GetTicks(); SDL_GetTicks() - t < 10000; SDL_Delay(10)) {
+        emu.poll();
+        bool ready = false;
+        for (const std::string& l : emu.output()) ready = ready || l == "ready";
+        if (ready) break;
+    }
+    std::printf("child %lld\n", (long long)emu.pid());
+    std::fflush(stdout);
+    for (int i = 0; i < 6000; ++i) {
+        emu.poll();
+        SDL_Delay(10);
+    }
+    return 0;
+}
+
+#if defined(_WIN32) || defined(__linux__)
+// Whether `pid` is still a live process (a zombie is not).
+static bool alive(long long pid) {
+#ifdef _WIN32
+    HANDLE h = OpenProcess(SYNCHRONIZE, FALSE, DWORD(pid));
+    if (!h) return false;
+    const bool live = WaitForSingleObject(h, 0) == WAIT_TIMEOUT;
+    CloseHandle(h);
+    return live;
+#else
+    char path[64];
+    std::snprintf(path, sizeof path, "/proc/%lld/stat", pid);
+    FILE* f = std::fopen(path, "r");
+    if (!f) return false;
+    char state = 0;
+    const bool read = std::fscanf(f, "%*d (%*[^)]) %c", &state) == 1;
+    std::fclose(f);
+    return read && state != 'Z' && state != 'X';
+#endif
+}
+#endif
+
 static int failures = 0;
 static void check(bool ok, const char* what) {
     std::printf("%s: %s\n", ok ? "PASS" : "FAIL", what);
@@ -110,7 +155,9 @@ static void check(bool ok, const char* what) {
 }
 
 int main(int argc, char** argv) {
+    if (int code = 0; Emulator::childTrampoline(argc, argv, &code)) return code;
     if (argc > 1 && !std::strcmp(argv[1], "--stubborn-child")) return stubbornChild();
+    if (argc > 1 && !std::strcmp(argv[1], "--parent-of-stubborn")) return parentOfStubborn(argv[0]);
     // Play passes redux arguments, so this mode is chosen by the environment.
     if (std::getenv("SPLASHEDIT_FAKE_REDUX")) return fakeRedux();
 
@@ -129,6 +176,47 @@ int main(int argc, char** argv) {
     std::printf("stop() took %llu ms\n", (unsigned long long)took);
     check(took < 5000, "stop() returns although the child ignores being asked to close");
     check(!emu.running(), "nothing running after stop()");
+
+#if defined(_WIN32) || defined(__linux__)
+    // The parent killed outright: its child goes with it.
+    {
+        Emulator parent;
+        check(parent.start({argv[0], "--parent-of-stubborn"}, &error), "parent starts");
+        long long child = 0;
+        for (Uint64 t = SDL_GetTicks(); !child && SDL_GetTicks() - t < 10000; SDL_Delay(10)) {
+            parent.poll();
+            for (const std::string& l : parent.output())
+                if (l.rfind("child ", 0) == 0) child = std::atoll(l.c_str() + 6);
+        }
+        check(child > 0 && alive(child), "the parent's child is running");
+        // Killed as a crash would end it: no chance to stop its child.
+#ifdef _WIN32
+        HANDLE h = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE, DWORD(parent.pid()));
+        if (h) {
+            TerminateProcess(h, 9);
+            WaitForSingleObject(h, 5000);
+            CloseHandle(h);
+        }
+#else
+        kill(pid_t(parent.pid()), SIGKILL);
+#endif
+        bool gone = false;
+        for (Uint64 t = SDL_GetTicks(); !gone && SDL_GetTicks() - t < 5000; SDL_Delay(20)) gone = child > 0 && !alive(child);
+        check(gone, "the child dies with its parent, killed outright");
+        if (!gone && child > 0) {
+#ifdef _WIN32
+            if (HANDLE c = OpenProcess(PROCESS_TERMINATE, FALSE, DWORD(child))) {
+                TerminateProcess(c, 9);
+                CloseHandle(c);
+            }
+#else
+            kill(pid_t(child), SIGKILL);
+#endif
+        }
+    }
+#else
+    std::printf("SKIP: a child dying with its parent (no mechanism on this platform)\n");
+#endif
     std::printf(failures ? "%d FAILED\n" : "All tests passed\n", failures);
     return failures ? 1 : 0;
 }

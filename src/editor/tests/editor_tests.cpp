@@ -1820,6 +1820,21 @@ void testPlay() {
     const auto packTime = fs::last_write_time(dir / "scene_0.splashpack", ec);
     CHECK(!editor::reloadForPlay(bad, project, dir, 4).ok());
     CHECK(flag() == "3" && fs::exists(dir / "scene_0.vram") && fs::last_write_time(dir / "scene_0.splashpack", ec) == packTime);
+    // Issue #358: refused access to a build file says a previous player
+    // (an orphan from an editor that crashed) still has it; another failure does not.
+    {
+        const std::string held = splash::replaceError(dir / "psxsplash.bin", std::make_error_code(std::errc::permission_denied));
+        CHECK(held.rfind("Cannot replace ", 0) == 0 && held.find("psxsplash.bin: ") != std::string::npos);
+        CHECK(held.find("a previous player, pcsx-redux, is probably still running") != std::string::npos);
+        CHECK(held.find('\n') == std::string::npos);
+        const std::string other = splash::replaceError(dir / "psxsplash.bin", std::make_error_code(std::errc::no_space_on_device));
+        CHECK(other.find("Cannot replace ") == 0 && other.find("previous player") == std::string::npos);
+#ifdef _WIN32
+        // What MoveFileEx reports over a file pcsx-redux has open, as Win32 codes.
+        CHECK(splash::replaceError(dir / "psxsplash.bin", std::error_code(5, std::system_category())).find("previous player") != std::string::npos);
+        CHECK(splash::replaceError(dir / "psxsplash.bin", std::error_code(32, std::system_category())).find("previous player") != std::string::npos);
+#endif
+    }
 
     // Settings: round trip (non-ASCII path), missing file, unknown keys.
     const fs::path cfg = g_outDir / "play" / "play.cfg";
@@ -9664,6 +9679,47 @@ void testTimelineRenameDelete() {
     CHECK(d.undo() && d.scene().cutscenes.size() == 2 && *editor::seqName(d, intro) == "opening" &&
           *editor::seqName(d, outro) == "outro");
     CHECK(editor::removeSequence(d, spin) && d.scene().animations.empty() && d.scene().cutscenes.size() == 2);
+}
+
+// Issue #358: a new animation picked in the timeline and deleted from its
+// picker left the timeline on an index past the end, read in the same frame
+// (a crash). What it shows after a delete is always a sequence or none.
+void testTimelineShownAfterRemove() {
+    using editor::SeqKind;
+    splash::Scene sc;
+    splash::Cutscene c;
+    c.name = "intro";
+    sc.cutscenes.push_back(c);
+    for (const char* n : {"animation", "animation (2)"}) {
+        splash::Animation a;
+        a.name = n;
+        sc.animations.push_back(a);
+    }
+    editor::Document d;
+    d.reset(sc);
+    const editor::SeqRef intro{SeqKind::Cutscene, 0}, anim{SeqKind::Animation, 0}, anim2{SeqKind::Animation, 1};
+    // The open one, the last of its kind: on to the first sequence, not index 1 of one animation.
+    CHECK(editor::removeSequence(d, anim2));
+    editor::SeqRef shown = editor::shownAfterRemove(d, anim2, anim2);
+    CHECK(editor::valid(d, shown) && shown == intro);
+    // The open one with one after it: that one, slid into its place.
+    CHECK(d.undo());
+    CHECK(editor::removeSequence(d, anim));
+    shown = editor::shownAfterRemove(d, anim, anim);
+    CHECK(shown == anim && *editor::seqName(d, shown) == "animation (2)");
+    // One before the open one: the open one, an index lower.
+    CHECK(d.undo());
+    CHECK(editor::removeSequence(d, anim));
+    shown = editor::shownAfterRemove(d, anim2, anim);
+    CHECK(shown == anim && *editor::seqName(d, shown) == "animation (2)");
+    // Another kind: unchanged.
+    CHECK(d.undo());
+    CHECK(editor::removeSequence(d, intro));
+    CHECK(editor::shownAfterRemove(d, anim2, intro) == anim2);
+    // The last sequence of all: none.
+    CHECK(editor::removeSequence(d, anim2) && editor::removeSequence(d, anim));
+    shown = editor::shownAfterRemove(d, anim, anim);
+    CHECK(!editor::valid(d, shown) && shown == editor::SeqRef{});
 }
 
 // A track pointed at another target: one step, keys kept; refused where the
@@ -21686,6 +21742,7 @@ int main(int argc, char** argv) {
     testTimelineEdit();
     testTimelinePreview();
     testTimelineRenameDelete();
+    testTimelineShownAfterRemove();
     testTimelineRetarget();
     testTimelineDuplicateTrack();
     testTimelineFixedSample();

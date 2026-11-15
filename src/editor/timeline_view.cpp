@@ -351,7 +351,7 @@ void TimelinePanel::header(ImDrawList* dl, ImRect r, editor::Document& doc) {
     }
 
     // The sequence: a dropdown of every cutscene and animation.
-    const bool have = editor::valid(doc, m_ref);
+    bool have = editor::valid(doc, m_ref);
     {
         const ImRect dd(ImVec2(x, cy - 13), ImVec2(x + (tabs ? 176 : 210), cy + 13));
         std::string label = have ? *editor::seqName(doc, m_ref) : std::string("No cutscenes");
@@ -384,6 +384,8 @@ void TimelinePanel::header(ImDrawList* dl, ImRect r, editor::Document& doc) {
         m_renameArm = false;
         x = dd.Max.x + space::md;
     }
+    // The picker may have deleted the last one: the rest reads m_ref.
+    have = editor::valid(doc, m_ref);
 
     // Close, at the right.
     if (iconButton("close", ImRect(ImVec2(r.Max.x - 34, cy - 13), ImVec2(r.Max.x - 8, cy + 13)), icon::x, false, "Close the timeline"))
@@ -542,14 +544,15 @@ void TimelinePanel::remove(editor::Document& doc, SeqRef ref) {
     const std::string name = *editor::seqName(doc, ref);
     if (!editor::removeSequence(doc, ref)) return;
     note("Deleted '" + name + "' (Ctrl+Z brings it back)");
-    if (ref == m_ref) {
+    const bool wasOpen = ref == m_ref;
+    // Never left pointing past the end: the rest of this frame draws m_ref.
+    m_ref = editor::shownAfterRemove(doc, m_ref, ref);
+    if (wasOpen) {
         // On to whatever sits there now, or the first one.
         m_sel = {};
         m_frame = 0;
         m_playing = false;
         m_fitPending = true;
-    } else if (ref.kind == m_ref.kind && ref.index < m_ref.index) {
-        --m_ref.index;  // the open one moved down
     }
 }
 

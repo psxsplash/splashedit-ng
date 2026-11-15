@@ -1174,6 +1174,17 @@ namespace {
 fs::path scenePart(size_t i, const char* kind) { return "scene_" + std::to_string(i) + kind; }
 }  // namespace
 
+std::string replaceError(const fs::path& target, const std::error_code& ec) {
+    std::string m = "Cannot replace " + utf8(target) + ": " + ec.message();
+    bool held = ec == std::errc::permission_denied;
+#ifdef _WIN32
+    // ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION, ERROR_LOCK_VIOLATION, however the runtime maps them.
+    held = held || (ec.category() == std::system_category() && (ec.value() == 5 || ec.value() == 32 || ec.value() == 33));
+#endif
+    if (held) m += " (a previous player, pcsx-redux, is probably still running and holding it: close it, then try again)";
+    return m;
+}
+
 std::string writePcdrvImage(const fs::path& dir, size_t scenes) {
     // The kinds in the order loadScene reads them, as the disc has them.
     static const char* const kOrder[] = {".loading", ".vram", ".spu", ".splashpack", ".geo"};
@@ -1197,7 +1208,7 @@ std::string writePcdrvImage(const fs::path& dir, size_t scenes) {
         writeArchiveImage(files, {}, "PSXSPLASH", next, {}, {}, 0);
         fs::remove(dir / "psxsplash-next.cue", ec);
         fs::rename(next, dir / kPcdrvImage, ec);
-        if (ec) return "Cannot replace " + utf8(dir / kPcdrvImage) + ": " + ec.message();
+        if (ec) return replaceError(dir / kPcdrvImage, ec);
     } catch (const std::exception& e) {
         return e.what();
     }
