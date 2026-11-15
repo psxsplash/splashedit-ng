@@ -560,7 +560,7 @@ splash::ExportResult reloadForPlay(const splash::Scene& scene, const fs::path& p
     for (const fs::directory_entry& e : fs::directory_iterator(next, ec)) {
         fs::rename(e.path(), dir / e.path().filename(), ec);
         if (ec) {
-            r.errors.push_back("Cannot replace " + utf8(dir / e.path().filename()) + ": " + ec.message());
+            r.errors.push_back(splash::replaceError(dir / e.path().filename(), ec));
             return r;
         }
     }

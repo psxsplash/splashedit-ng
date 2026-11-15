@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <string>
+#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -281,6 +282,11 @@ inline constexpr const char* kPcdrvImage = "psxsplash.bin";
 // moved over the old image, so the engine never opens half of one. Returns ""
 // or what went wrong.
 std::string writePcdrvImage(const std::filesystem::path& dir, size_t scenes = size_t(-1));
+// "Cannot replace <target>: <why>", from moving a file over `target` failing
+// with `ec`. Refused access (on Windows, a file another process has open) adds
+// that a previous player is probably still running: a pcsx-redux left from an editor
+// that crashed holds the build's files.
+std::string replaceError(const std::filesystem::path& target, const std::error_code& ec);
 
 // A bootable disc: SYSTEM.CNF, the engine as PSX.EXE, and each scene's files
 // under SCENE<i>/ as SCENE_<i>.SPK, .VRM, .SPU (and .GEO when it streams),

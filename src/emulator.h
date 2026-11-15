@@ -18,7 +18,15 @@ public:
     ~Emulator();
 
     // Starts `cmd` (program, then arguments). False with `error` set if it cannot.
+    // The process dies with this one, however this one ends (a crash, a kill):
+    // on Windows it is put in a kill-on-close job object; on Linux it is
+    // started through childTrampoline with a parent-death signal. macOS has
+    // no such mechanism here: a player outlives an editor that crashes.
     bool start(const std::vector<std::string>& cmd, std::string* error);
+    // Call first thing in main() of a program that uses start(): true when
+    // this process is start()'s trampoline (Linux), with `exitCode` to return
+    // if it could not become the real program. Never true elsewhere.
+    static bool childTrampoline(int argc, char** argv, int* exitCode);
     // Call once a frame: collects output and notices the process exiting.
     void poll();
     void stop();

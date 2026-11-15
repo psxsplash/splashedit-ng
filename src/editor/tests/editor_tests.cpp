@@ -1819,6 +1819,21 @@ void testPlay() {
     const auto packTime = fs::last_write_time(dir / "scene_0.splashpack", ec);
     CHECK(!editor::reloadForPlay(bad, project, dir, 4).ok());
     CHECK(flag() == "3" && fs::exists(dir / "scene_0.vram") && fs::last_write_time(dir / "scene_0.splashpack", ec) == packTime);
+    // Issue #358: refused access to a build file says a previous player
+    // (an orphan from an editor that crashed) still has it; another failure does not.
+    {
+        const std::string held = splash::replaceError(dir / "psxsplash.bin", std::make_error_code(std::errc::permission_denied));
+        CHECK(held.rfind("Cannot replace ", 0) == 0 && held.find("psxsplash.bin: ") != std::string::npos);
+        CHECK(held.find("a previous player, pcsx-redux, is probably still running") != std::string::npos);
+        CHECK(held.find('\n') == std::string::npos);
+        const std::string other = splash::replaceError(dir / "psxsplash.bin", std::make_error_code(std::errc::no_space_on_device));
+        CHECK(other.find("Cannot replace ") == 0 && other.find("previous player") == std::string::npos);
+#ifdef _WIN32
+        // What MoveFileEx reports over a file pcsx-redux has open, as Win32 codes.
+        CHECK(splash::replaceError(dir / "psxsplash.bin", std::error_code(5, std::system_category())).find("previous player") != std::string::npos);
+        CHECK(splash::replaceError(dir / "psxsplash.bin", std::error_code(32, std::system_category())).find("previous player") != std::string::npos);
+#endif
+    }
 
     // Settings: round trip (non-ASCII path), missing file, unknown keys.
     const fs::path cfg = g_outDir / "play" / "play.cfg";
