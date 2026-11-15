@@ -74,6 +74,9 @@ c = config(player)
 check('its pcsx.json: no linear filtering, fast boot, a 2x window', c['emulator']['LinearFiltering'] is False and
       c['emulator']['FastBoot'] is True and c['gui']['WindowSizeX'] == 640 and c['gui']['WindowSizeY'] == 480 and
       c['emulator']['AutoUpdate'] is False, c)
+# The window: titled with the folder's name; no icon image of its own, so pcsx-redux's.
+check('its window: the project\'s name, no icon file', c['gui'].get('WindowTitle') == 'courtyard' and
+      'WindowIcon' not in c['gui'] and not os.path.exists(os.path.join(player, 'config', 'window-icon.png')), c)
 
 # player.json: the game's name, the launcher's, the project's own pcsx.json.
 os.makedirs(os.path.join(project, 'player'))
@@ -99,7 +102,8 @@ check('the section says so', 'player settings: name Lamp Night exe night linear 
 c = config(named) if os.path.isdir(os.path.join(named, 'config')) else {}
 check('its pcsx.json: fast boot off, the project\'s keys over the rest',
       c.get('emulator', {}).get('FastBoot') is False and c['emulator'].get('Dither') == 0 and
-      c['emulator'].get('LinearFiltering') is False and c.get('gui') == {'WindowSizeX': 1280, 'WindowSizeY': 960}, c)
+      c['emulator'].get('LinearFiltering') is False and c.get('gui') == {'WindowSizeX': 1280, 'WindowSizeY': 960,
+                                                                  'WindowTitle': 'Lamp Night'}, c)
 
 # A pcsx.json that is not JSON: the export fails and says why.
 with open(os.path.join(project, 'player', 'pcsx.json'), 'w') as f:

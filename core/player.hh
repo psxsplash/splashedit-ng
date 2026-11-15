@@ -108,11 +108,18 @@ bool setExeResources(const std::filesystem::path& exe, const ExeIcon* icon, cons
 //                The size is fixed at export, as the screen the player runs on
 //                is not known then; 2 (640x480) fits every desktop. Where the
 //                window opens is pcsx-redux's choice (it does not centre it).
+//   windowTitle  the window's title, gui.WindowTitle; empty: pcsx-redux's.
+//   windowIcon   the window's icon, written beside pcsx.json as
+//                kWindowIconFile (RGBA, 256 pixels square or its size when
+//                smaller) and named by gui.WindowIcon; size 0: pcsx-redux's.
+//                pcsx-redux without these settings ignores them.
 //   reduxConfig  the project's own pcsx.json (JSON text), merged over the
 //                above (RFC 7386 merge patch: its keys win, null removes one).
 struct PlayerOptions {
     std::string exeName;
     ExeIcon icon;
+    std::string windowTitle;
+    ExeIcon windowIcon;
     ExeDetails details;
     bool linearFiltering = false;
     bool fastBoot = true;
@@ -120,10 +127,14 @@ struct PlayerOptions {
     std::string reduxConfig;
 };
 
+// The window icon's file, beside the player's pcsx.json; gui.WindowIcon names
+// it relative to there (pcsx-redux's -portable folder).
+inline constexpr const char* kWindowIconFile = "window-icon.png";
+
 // The pcsx.json a player folder starts with: no first-run "Update
 // configuration" dialog over the game, no update checks, and `opt`'s
-// filtering, boot and window, then opt.reduxConfig over it. "" with `error`
-// set when opt.reduxConfig is not a JSON object.
+// filtering, boot and window (size, title and icon), then opt.reduxConfig
+// over it. "" with `error` set when opt.reduxConfig is not a JSON object.
 std::string reduxConfig(const PlayerOptions& opt, std::string& error);
 // reduxConfig with the default PlayerOptions.
 std::string seededReduxConfig();
@@ -157,9 +168,9 @@ bool writePlayerSettings(const std::filesystem::path& file, const PlayerSettings
 
 // `s` as PlayerOptions for a project at `projectRoot` whose player is called
 // `title` (s.name, or the project folder's name when that is empty): the icon image
-// (any format loadImage reads) and the pcsx.json read, details.product and
-// .description the title. What cannot be read is an error: "" when all was,
-// else out has the rest.
+// (any format loadImage reads; the launcher's and the window's) and the
+// pcsx.json read, details.product, .description and windowTitle the title.
+// What cannot be read is an error: "" when all was, else out has the rest.
 std::string playerOptions(const PlayerSettings& s, const std::filesystem::path& projectRoot, const std::string& title,
                           PlayerOptions& out);
 
@@ -178,6 +189,7 @@ void removeExported(const std::filesystem::path& out, const char* marker);
 //   game/<bin and cue>    `bin` and the .cue beside it, under their names;
 //   redux/...             the ReduxInstall of `redux`;
 //   config/pcsx.json      reduxConfig(opt);
+//   config/window-icon.png  opt.windowIcon, when it has one (kWindowIconFile);
 //   <name>.bat|.command|.sh  the launcher, executable, <name> opt.exeName or
 //                         the title;
 //   .splashedit-player    the marker.
