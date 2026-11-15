@@ -27,6 +27,7 @@
 #include <stb_image_write.h>
 
 #include "editor/document.hh"
+#include "editor/jumplist.hh"
 #include "editor/texture_preview.hh"
 #include "gl.h"
 #include "mockup/main_screen.h"
@@ -598,15 +599,15 @@ std::string resourceDir(const char* rel, const char* compiled) {
 // are reported and leave an empty scene open.
 void openDocument(editor::Document& doc, const Args& args) {
     bool bundled = !args.project;
-    std::filesystem::path project = bundled ? std::filesystem::path(reinterpret_cast<const char8_t*>(resourceDir("examples/courtyard", SPLASHEDIT_EXAMPLE_DIR).c_str())) : std::filesystem::path(args.project);
-    std::filesystem::path scene = args.scene ? std::filesystem::path(args.scene) : editor::firstScene(project);
+    std::filesystem::path project = bundled ? std::filesystem::path(reinterpret_cast<const char8_t*>(resourceDir("examples/courtyard", SPLASHEDIT_EXAMPLE_DIR).c_str())) : std::filesystem::path(std::u8string(args.project, args.project + std::strlen(args.project)));
+    std::filesystem::path scene = args.scene ? std::filesystem::path(args.scene) : editor::projectStartScene(project);
     if (scene.empty()) {
-        std::fprintf(stderr, "no .scene file in %s; opening an empty scene\n", project.string().c_str());
+        std::fprintf(stderr, "no .scene file in %s; opening an empty scene\n", reinterpret_cast<const char*>(project.u8string().c_str()));
         doc.load(project, "untitled.scene");
         return;
     }
     if (auto err = doc.load(project, scene)) {
-        std::fprintf(stderr, "could not load %s: %s; opening an empty scene\n", (project / scene).string().c_str(), err->c_str());
+        std::fprintf(stderr, "could not load %s: %s; opening an empty scene\n", reinterpret_cast<const char*>((project / scene).u8string().c_str()), err->c_str());
         return;
     }
     const char* select = args.select ? args.select : bundled && !args.scene ? "Crate" : nullptr;
@@ -676,6 +677,8 @@ int main(int argc, char** argv) {
         if (env && *env && !ui::parseUiScale(env, args.uiScale))
             std::fprintf(stderr, "SPLASHEDIT_UI_SCALE=%s: want a number from 0.5 to 4; using the display's scale\n", env);
     }
+    // Before any window, so the taskbar button and its Jump List match.
+    if (!args.screenshot) editor::setTaskbarAppId();
     if (!SDL_Init(SDL_INIT_VIDEO)) {
         std::fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
         return 1;
@@ -790,6 +793,9 @@ int main(int argc, char** argv) {
             state.recent.load();
             state.recentProjects = editor::RecentScenes(prefDir / "recent-projects.cfg");
             state.recentProjects.load();
+            // The taskbar's Jump List (Windows) follows File > Recent projects.
+            state.recentProjects.onChange(editor::updateJumpList);
+            editor::updateJumpList(state.recentProjects.items());
         }
     } else if (!args.recentProjects.empty()) {
         // Screenshot runs keep recents in memory, unless a file is named for them.

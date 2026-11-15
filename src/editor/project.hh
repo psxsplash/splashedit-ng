@@ -5,6 +5,7 @@
 
 #include <chrono>
 #include <filesystem>
+#include <functional>
 #include <map>
 #include <optional>
 #include <string>
@@ -359,11 +360,14 @@ class RecentScenes {
     void add(const std::filesystem::path& scene);
     void remove(const std::filesystem::path& scene);
     const std::vector<std::filesystem::path>& items() const { return m_items; }
+    // Called with the items after each add or remove that changes them.
+    void onChange(std::function<void(const std::vector<std::filesystem::path>&)> f) { m_onChange = std::move(f); }
 
   private:
     void save() const;
     std::filesystem::path m_file;  // empty = kept in memory only
     std::vector<std::filesystem::path> m_items;
+    std::function<void(const std::vector<std::filesystem::path>&)> m_onChange;
 };
 
 }  // namespace editor
