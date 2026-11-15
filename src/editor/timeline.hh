@@ -167,6 +167,11 @@ struct ScriptRenames {
 bool renameSequence(Document& doc, SeqRef ref, const std::string& name, ScriptRenames* scripts = nullptr);
 // Removes the sequence; the ones after it move down an index.
 bool removeSequence(Document& doc, SeqRef ref);
+// What a view that had `open` shows once `removed` is gone (call after
+// removeSequence): `open` itself, an index lower when one before it went;
+// for `open` itself, whatever slid into its place, else the first sequence,
+// else none. Always valid() or the empty SeqRef, never a dangling index.
+SeqRef shownAfterRemove(const Document& doc, SeqRef open, SeqRef removed);
 // The new track's index, or -1: the type is not allowed in this kind of
 // sequence, the target is missing where needed, the same type and target is
 // already there, or the sequence has kMaxTimelineTracks.

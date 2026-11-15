@@ -9617,6 +9617,47 @@ void testTimelineRenameDelete() {
     CHECK(editor::removeSequence(d, spin) && d.scene().animations.empty() && d.scene().cutscenes.size() == 2);
 }
 
+// Issue #358: a new animation picked in the timeline and deleted from its
+// picker left the timeline on an index past the end, read in the same frame
+// (a crash). What it shows after a delete is always a sequence or none.
+void testTimelineShownAfterRemove() {
+    using editor::SeqKind;
+    splash::Scene sc;
+    splash::Cutscene c;
+    c.name = "intro";
+    sc.cutscenes.push_back(c);
+    for (const char* n : {"animation", "animation (2)"}) {
+        splash::Animation a;
+        a.name = n;
+        sc.animations.push_back(a);
+    }
+    editor::Document d;
+    d.reset(sc);
+    const editor::SeqRef intro{SeqKind::Cutscene, 0}, anim{SeqKind::Animation, 0}, anim2{SeqKind::Animation, 1};
+    // The open one, the last of its kind: on to the first sequence, not index 1 of one animation.
+    CHECK(editor::removeSequence(d, anim2));
+    editor::SeqRef shown = editor::shownAfterRemove(d, anim2, anim2);
+    CHECK(editor::valid(d, shown) && shown == intro);
+    // The open one with one after it: that one, slid into its place.
+    CHECK(d.undo());
+    CHECK(editor::removeSequence(d, anim));
+    shown = editor::shownAfterRemove(d, anim, anim);
+    CHECK(shown == anim && *editor::seqName(d, shown) == "animation (2)");
+    // One before the open one: the open one, an index lower.
+    CHECK(d.undo());
+    CHECK(editor::removeSequence(d, anim));
+    shown = editor::shownAfterRemove(d, anim2, anim);
+    CHECK(shown == anim && *editor::seqName(d, shown) == "animation (2)");
+    // Another kind: unchanged.
+    CHECK(d.undo());
+    CHECK(editor::removeSequence(d, intro));
+    CHECK(editor::shownAfterRemove(d, anim2, intro) == anim2);
+    // The last sequence of all: none.
+    CHECK(editor::removeSequence(d, anim2) && editor::removeSequence(d, anim));
+    shown = editor::shownAfterRemove(d, anim, anim);
+    CHECK(!editor::valid(d, shown) && shown == editor::SeqRef{});
+}
+
 // A track pointed at another target: one step, keys kept; refused where the
 // export could not tell the tracks apart or the track has no target.
 // Box selections: keys on several lanes and events move together and
@@ -21637,6 +21678,7 @@ int main(int argc, char** argv) {
     testTimelineEdit();
     testTimelinePreview();
     testTimelineRenameDelete();
+    testTimelineShownAfterRemove();
     testTimelineRetarget();
     testTimelineDuplicateTrack();
     testTimelineFixedSample();

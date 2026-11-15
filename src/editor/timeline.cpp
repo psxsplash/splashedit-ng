@@ -846,6 +846,13 @@ bool removeSequence(Document& doc, SeqRef ref) {
     return true;
 }
 
+SeqRef shownAfterRemove(const Document& doc, SeqRef open, SeqRef removed) {
+    if (open.kind == removed.kind && removed.index < open.index) --open.index;  // it moved down
+    if (valid(doc, open)) return open;
+    const std::vector<SeqRef> all = allSequences(doc);
+    return all.empty() ? SeqRef{} : all.front();
+}
+
 int addTrack(Document& doc, SeqRef ref, TrackType type, const std::string& target) {
     int added = -1;
     editSeq(doc, ref, [&](SeqMut& m) {

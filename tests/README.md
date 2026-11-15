@@ -1087,7 +1087,8 @@ timeline's sequence picker, undo of a rename, a taken name and a 25-character on
 rename rewriting the scene script's `Cutscene.Play("intro")` calls and a variable holding the name
 that the script plays (an "intro" that is only dialogue left alone and listed, path:line, in the
 status), deleting
-one from the inspector and undoing it, pointing a track at another object from its lane menu (and
+one from the inspector and undoing it, deleting a new animation the timeline shows from its picker
+(issue #358: the last one, which crashed the editor), pointing a track at another object from its lane menu (and
 undoing that), each read back from the saved scene; the Scene view previewing a light track and a
 UV offset track (pixels at frame 0 against frame 75) without touching the scene file; and, with
 `tests/skin`'s arm added, a skin clip event naming a clip the arm does not have drawn red in the skin

@@ -27,6 +27,8 @@ INSPECTOR_NAME = '1301,301'      # the scene inspector's first sequence name ("i
 INSPECTOR_DELETE = '1452,309'    # its delete button
 PICKER = '560,630'               # the timeline's sequence dropdown (right of the Project | Timeline tabs)
 PICKER_RENAME = '540,581'        # its Rename... (the popup opens upwards)
+PICKER_DELETE = '540,600'        # its Delete '<name>', under Rename...
+INSPECTOR_NEW_ANIM = '1460,389'  # the scene inspector's New animation, under intro and outro
 LANE0_MENU = '478,691'           # the first lane's ... button
 DRIVE_INSTEAD = '345,761'        # the lane menu's Drive instead
 DRIVE_CRATE2 = '435,894'         # Crate (2) in its submenu
@@ -70,6 +72,7 @@ def project_copy(tracks=None, skin=None):
 
 LOGIC = os.path.join('scripts', 'game_logic.lua')  # Game Logic's script
 script_after = None  # with `lua`: the script as the run left it
+last_rc = None  # the last run's exit code
 
 
 def run(args, tracks=None, save=True, lua=None, skin=None):
@@ -77,7 +80,7 @@ def run(args, tracks=None, save=True, lua=None, skin=None):
     returns the scene file's bytes, the screenshot path and the output. With
     `lua`, Game Logic's script gets it appended first and script_after its
     text after the run."""
-    global script_after
+    global script_after, last_rc
     project = project_copy(tracks, skin)
     if lua is not None:
         with open(os.path.join(project, LOGIC), 'a', encoding='utf-8', newline='') as f:
@@ -88,6 +91,7 @@ def run(args, tracks=None, save=True, lua=None, skin=None):
         cmd += ['--key', 'ctrl+s', '--wait', '10']
     cmd += ['--screenshot', shot]
     r = subprocess.run(cmd, capture_output=True, text=True, env=ENV, timeout=120)
+    last_rc = r.returncode
     data = open(os.path.join(project, 'courtyard.scene'), 'rb').read()
     if lua is not None:
         script_after = open(os.path.join(project, LOGIC), encoding='utf-8', newline='').read()
@@ -216,6 +220,17 @@ check('the inspector deletes a cutscene', names(saved) == ['outro'], str(names(s
 saved, _, out = run(['--click', INSPECTOR_DELETE, '--wait', '3', '--key', 'ctrl+z', '--wait', '3'])
 check('undo brings the deleted cutscene back in place', names(saved) == ['intro', 'outro'] and
       json.loads(saved)['cutscenes'][0]['tracks'][0]['target'] == 'Crate', str(names(saved)) + ' | ' + out[-200:])
+
+# Issue #358: a new animation (the inspector opens it in the timeline), then
+# Delete from the timeline's picker: the last one, so nothing slid into its
+# place; the editor crashed reading it in the same frame.
+anims = lambda data: [a['name'] for a in json.loads(data).get('animations', [])]
+saved, _, out = run(['--timeline', 'intro', '--click', INSPECTOR_NEW_ANIM, '--wait', '3'])
+check('the inspector adds an animation', anims(saved) == ['animation'], str(anims(saved)) + ' | ' + out[-200:])
+saved, shot, out = run(['--timeline', 'intro', '--click', INSPECTOR_NEW_ANIM, '--wait', '3', '--click', PICKER, '--wait', '3',
+                        '--click', PICKER_DELETE, '--wait', '3'])
+check('the timeline\'s picker deletes the new animation it shows, and the editor goes on', last_rc == 0 and os.path.exists(shot) and
+      anims(saved) == [] and names(saved) == ['intro', 'outro'], f'exit {last_rc} {anims(saved)} | ' + out[-200:])
 
 # Retarget the first lane (Crate: Position) to Crate (2) from its menu.
 retarget = ['--timeline', 'intro', '--click', LANE0_MENU, '--wait', '3', '--move', DRIVE_INSTEAD, '--wait', '3', '--move',
