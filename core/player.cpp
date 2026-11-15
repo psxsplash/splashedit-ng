@@ -10,6 +10,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "stb_image_write.h"
 #include "texture.hh"
 
 #ifdef _WIN32
@@ -98,6 +99,47 @@ bool isAppImage(const fs::path& file) {
     char head[11] = {};
     f.read(head, sizeof head);
     return f && head[0] == 0x7f && head[1] == 'E' && head[8] == 'A' && head[9] == 'I' && head[10] == 2;
+}
+
+// Texel (x, y) of `ic` drawn `n` pixels square, 0xAABBGGRR: a 16x16 icon
+// (the memory card's) nearest-neighbour, a bigger one averaged down (colour
+// weighted by alpha) or nearest up.
+uint32_t iconTexel(const ExeIcon& ic, int n, int x, int y) {
+    const int s = ic.size;
+    if (s == 16 || s <= n) return ic.rgba[size_t(y * s / n) * size_t(s) + size_t(x * s / n)];
+    // The source texels under this one, colour weighted by alpha.
+    const int x0 = x * s / n, x1 = std::max(x0 + 1, (x + 1) * s / n);
+    const int y0 = y * s / n, y1 = std::max(y0 + 1, (y + 1) * s / n);
+    uint64_t r = 0, g = 0, b = 0, a = 0;
+    for (int sy = y0; sy < y1; ++sy)
+        for (int sx = x0; sx < x1; ++sx) {
+            const uint32_t c = ic.rgba[size_t(sy) * size_t(s) + size_t(sx)];
+            const uint32_t ca = c >> 24;
+            r += (c & 0xff) * ca;
+            g += ((c >> 8) & 0xff) * ca;
+            b += ((c >> 16) & 0xff) * ca;
+            a += ca;
+        }
+    const uint64_t count = uint64_t(x1 - x0) * uint64_t(y1 - y0);
+    if (!a) return 0;
+    return uint32_t(r / a) | uint32_t(g / a) << 8 | uint32_t(b / a) << 16 | uint32_t(a / count) << 24;
+}
+
+// `ic` as a PNG, RGBA (colour type 6, what pcsx-redux's gui.WindowIcon
+// decodes), 256 pixels square or its own size when smaller.
+void writeIconPng(const ExeIcon& ic, const fs::path& file) {
+    const int n = std::min(ic.size, 256);
+    std::vector<uint8_t> rgba;
+    rgba.reserve(size_t(n) * size_t(n) * 4);
+    for (int y = 0; y < n; ++y)
+        for (int x = 0; x < n; ++x) {
+            const uint32_t c = iconTexel(ic, n, x, y);
+            for (int k = 0; k < 4; ++k) rgba.push_back(uint8_t(c >> (8 * k)));
+        }
+    std::string png;
+    auto put = [](void* to, void* data, int size) { static_cast<std::string*>(to)->append(static_cast<const char*>(data), size_t(size)); };
+    if (!stbi_write_png_to_func(put, &png, n, n, 4, rgba.data(), n * 4)) throw std::runtime_error("cannot encode " + utf8(file));
+    writeText(file, png);
 }
 
 }  // namespace
@@ -215,30 +257,11 @@ void put32(std::vector<uint8_t>& b, uint32_t v) {
 // One RT_ICON image, `n` pixels square: a BITMAPINFOHEADER (the height
 // doubled for the mask), 32-bit BGRA rows bottom up, then the 1-bit AND mask.
 // A 16x16 icon (the memory card's) is scaled nearest-neighbour, alpha below
-// 128 transparent and the rest opaque; a bigger one averaged down (nearest
-// up), its alpha kept.
+// 128 transparent and the rest opaque; a bigger one as iconTexel scales it,
+// its alpha kept.
 std::vector<uint8_t> iconImage(const ExeIcon& ic, int n) {
-    const int s = ic.size;
-    const bool hard = s == 16;
-    auto at = [&](int x, int y) -> uint32_t {
-        if (hard || s <= n) return ic.rgba[size_t(y * s / n) * size_t(s) + size_t(x * s / n)];
-        // The source texels under this one, colour weighted by alpha.
-        const int x0 = x * s / n, x1 = std::max(x0 + 1, (x + 1) * s / n);
-        const int y0 = y * s / n, y1 = std::max(y0 + 1, (y + 1) * s / n);
-        uint64_t r = 0, g = 0, b = 0, a = 0;
-        for (int sy = y0; sy < y1; ++sy)
-            for (int sx = x0; sx < x1; ++sx) {
-                const uint32_t c = ic.rgba[size_t(sy) * size_t(s) + size_t(sx)];
-                const uint32_t ca = c >> 24;
-                r += (c & 0xff) * ca;
-                g += ((c >> 8) & 0xff) * ca;
-                b += ((c >> 16) & 0xff) * ca;
-                a += ca;
-            }
-        const uint64_t count = uint64_t(x1 - x0) * uint64_t(y1 - y0);
-        if (!a) return 0;
-        return uint32_t(r / a) | uint32_t(g / a) << 8 | uint32_t(b / a) << 16 | uint32_t(a / count) << 24;
-    };
+    const bool hard = ic.size == 16;
+    auto at = [&](int x, int y) { return iconTexel(ic, n, x, y); };
     std::vector<uint8_t> b;
     put32(b, 40);
     put32(b, uint32_t(n));
@@ -543,6 +566,8 @@ std::string reduxConfig(const PlayerOptions& opt, std::string& error) {
          {{"ShownAutoUpdateConfig", true}, {"AutoUpdate", false}, {"LinearFiltering", opt.linearFiltering}, {"FastBoot", opt.fastBoot}}},
         {"gui", {{"WindowSizeX", 320 * scale}, {"WindowSizeY", 240 * scale}}},
     };
+    if (!opt.windowTitle.empty()) j["gui"]["WindowTitle"] = opt.windowTitle;
+    if (opt.windowIcon.size) j["gui"]["WindowIcon"] = kWindowIconFile;
     if (!opt.reduxConfig.empty()) {
         const nlohmann::json own = nlohmann::json::parse(opt.reduxConfig, nullptr, false);
         if (!own.is_object()) {
@@ -613,6 +638,7 @@ std::string playerOptions(const PlayerSettings& s, const fs::path& projectRoot, 
     out.linearFiltering = s.linearFiltering;
     out.fastBoot = s.fastBoot;
     out.windowScale = clampScale(s.windowScale);
+    out.windowTitle = title;
     auto resolve = [&](const std::string& p) {
         const fs::path f = fromUtf8(p);
         return f.is_absolute() ? f : projectRoot / f;
@@ -630,6 +656,7 @@ std::string playerOptions(const PlayerSettings& s, const fs::path& projectRoot, 
                     rgba[size_t(y) * size_t(img.width) + size_t(x)] = byte(p.r) | byte(p.g) << 8 | byte(p.b) << 16 | byte(p.a) << 24;
                 }
             out.icon = squareIcon(rgba, img.width, img.height);
+            out.windowIcon = out.icon;
         } catch (const std::exception& e) {
             error = "the player's icon " + s.icon + " cannot be read: " + e.what();
         }
@@ -741,6 +768,7 @@ PlayerResult writePlayer(const fs::path& bin, const fs::path& redux, const fs::p
 
         fs::create_directories(out / "config");
         writeText(out / "config" / "pcsx.json", config);
+        if (opt.windowIcon.size) writeIconPng(opt.windowIcon, out / "config" / kWindowIconFile);
 
         const std::string cueRel = "game/" + utf8(cue.filename());
         const bool stub = ri.os == PlayerOs::Windows && !launcherStub.empty() && fs::is_regular_file(launcherStub, ec);

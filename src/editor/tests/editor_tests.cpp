@@ -21287,6 +21287,137 @@ void testPlayerOptions() {
     }
 }
 
+// A standalone player's window (pcsx-redux's gui.WindowTitle and gui.WindowIcon):
+// the game's name, and its icon image (here RGB, 3 channels) written beside
+// pcsx.json as an RGBA PNG; the project's pcsx.json over both; neither without
+// a name or an icon of its own (the memory card's is the launcher's only).
+void testPlayerWindow() {
+    namespace fs = std::filesystem;
+    const fs::path dir = g_outDir / "player-window";
+    fs::remove_all(dir);
+    auto write = [](const fs::path& p, const std::string& text) {
+        fs::create_directories(p.parent_path());
+        std::ofstream(p, std::ios::binary) << text;
+    };
+    auto read = [](const fs::path& p) {
+        std::ifstream in(p, std::ios::binary);
+        return std::string((std::istreambuf_iterator<char>(in)), {});
+    };
+    auto parse = [](const std::string& t) { return nlohmann::json::parse(t, nullptr, false); };
+    auto be32 = [](uint32_t v) {
+        std::string s;
+        for (int k = 3; k >= 0; --k) s += char(uint8_t(v >> (8 * k)));
+        return s;
+    };
+    auto crc = [](const std::string& s) {
+        uint32_t c = 0xffffffffu;
+        for (unsigned char b : s) {
+            c ^= b;
+            for (int k = 0; k < 8; ++k) c = c & 1 ? 0xedb88320u ^ (c >> 1) : c >> 1;
+        }
+        return ~c;
+    };
+    auto chunk = [&](const std::string& type, const std::string& data) {
+        return be32(uint32_t(data.size())) + type + data + be32(crc(type + data));
+    };
+    // A PNG of colour type 2 (RGB, no alpha), deflate's stored blocks: savePng writes RGBA only.
+    auto rgbPng = [&](int w, int h) {
+        std::string raw;
+        for (int y = 0; y < h; ++y) {
+            raw += '\0';
+            for (int x = 0; x < w; ++x) raw += {char(200), char(uint8_t(x)), char(uint8_t(y))};
+        }
+        std::string z = "\x78\x01";
+        for (size_t at = 0; at < raw.size(); at += 65535) {
+            const size_t n = std::min<size_t>(65535, raw.size() - at);
+            z += char(at + n == raw.size() ? 1 : 0);
+            z += {char(n & 0xff), char(n >> 8), char(~n & 0xff), char((~n >> 8) & 0xff)};
+            z += raw.substr(at, n);
+        }
+        uint32_t a = 1, b = 0;
+        for (unsigned char c : raw) a = (a + c) % 65521, b = (b + a) % 65521;
+        z += be32(b << 16 | a);
+        return std::string("\x89PNG\r\n\x1a\n", 8) + chunk("IHDR", be32(uint32_t(w)) + be32(uint32_t(h)) + std::string("\x08\x02\x00\x00\x00", 5)) +
+               chunk("IDAT", z) + chunk("IEND", "");
+    };
+    auto byteAt = [](const std::string& s, size_t i) { return i < s.size() ? int(uint8_t(s[i])) : -1; };
+    auto ihdrSize = [&](const std::string& s, size_t at) {
+        uint32_t v = 0;
+        for (size_t k = 0; k < 4; ++k) v = v << 8 | uint32_t(std::max(byteAt(s, at + k), 0));
+        return v;
+    };
+
+    const fs::path bin = dir / "disc" / "Night Drive.bin";
+    write(bin, "raw sectors");
+    write(dir / "disc" / "Night Drive.cue", "FILE \"Night Drive.bin\" BINARY\n");
+    const fs::path redux = dir / "img" / "pcsx-redux-x86_64.AppImage";
+    write(redux, "image");
+    const fs::path root = dir / "project";
+    const std::string big = rgbPng(300, 200), small = rgbPng(40, 30);
+    CHECK(byteAt(big, 25) == 2 && byteAt(small, 25) == 2);  // the sources are RGB
+    write(root / "art" / "badge-rgb.png", big);
+    write(root / "art" / "tiny-rgb.png", small);
+
+    // The name and an RGB icon: the title, and an RGBA PNG, 256 square, beside pcsx.json.
+    {
+        splash::PlayerSettings s;
+        s.name = "Night Drive";
+        s.icon = "art/badge-rgb.png";
+        splash::PlayerOptions o;
+        CHECK(splash::playerOptions(s, root, s.name, o).empty());
+        const fs::path out = dir / "out";
+        const splash::PlayerResult p = splash::writePlayer(bin, redux, out, s.name, {}, o);
+        CHECK(p.error.empty());
+        nlohmann::json c = parse(read(out / "config" / "pcsx.json"));
+        CHECK(c["gui"]["WindowTitle"] == "Night Drive" && c["gui"]["WindowSizeX"] == 640);
+        CHECK(c["gui"]["WindowIcon"].is_string());
+        const std::string name = c["gui"]["WindowIcon"].is_string() ? c["gui"]["WindowIcon"].get<std::string>() : "";
+        CHECK(!name.empty() && fs::path(name).filename() == fs::path(name) && name != "pcsx.json");
+        const std::string png = name.empty() ? "" : read(out / "config" / name);
+        CHECK(png.compare(0, 8, std::string("\x89PNG\r\n\x1a\n", 8)) == 0 && png.compare(12, 4, "IHDR") == 0);
+        CHECK(ihdrSize(png, 16) == 256 && ihdrSize(png, 20) == 256 && byteAt(png, 24) == 8);
+        CHECK(byteAt(png, 25) == 6);  // RGBA: pcsx-redux decodes no other
+        // A smaller icon keeps its size (squared).
+        s.icon = "art/tiny-rgb.png";
+        CHECK(splash::playerOptions(s, root, s.name, o).empty());
+        CHECK(splash::writePlayer(bin, redux, dir / "out-small", s.name, {}, o).error.empty());
+        const std::string sp = read(dir / "out-small" / "config" / splash::kWindowIconFile);
+        CHECK(ihdrSize(sp, 16) == 40 && ihdrSize(sp, 20) == 40 && byteAt(sp, 25) == 6);
+    }
+
+    // The project's pcsx.json wins over both.
+    {
+        write(root / "player" / "own-pcsx.json", R"({"gui":{"WindowTitle":"Custom Title","WindowIcon":"own-icon.png"}})");
+        splash::PlayerSettings s;
+        s.name = "Night Drive";
+        s.icon = "art/badge-rgb.png";
+        s.pcsxJson = "player/own-pcsx.json";
+        splash::PlayerOptions o;
+        CHECK(splash::playerOptions(s, root, s.name, o).empty());
+        CHECK(splash::writePlayer(bin, redux, dir / "out-own", s.name, {}, o).error.empty());
+        nlohmann::json c = parse(read(dir / "out-own" / "config" / "pcsx.json"));
+        CHECK(c["gui"]["WindowTitle"] == "Custom Title" && c["gui"]["WindowIcon"] == "own-icon.png" && c["gui"]["WindowSizeY"] == 480);
+        // null removes them: pcsx-redux's own.
+        o.reduxConfig = R"({"gui":{"WindowTitle":null,"WindowIcon":null}})";
+        std::string error;
+        nlohmann::json d = parse(splash::reduxConfig(o, error));
+        CHECK(error.empty() && !d["gui"].contains("WindowTitle") && !d["gui"].contains("WindowIcon"));
+    }
+
+    // No name, no icon of its own (the memory card's for the launcher): neither key, no PNG.
+    {
+        splash::PlayerOptions o;
+        CHECK(splash::playerOptions(splash::PlayerSettings(), root, "", o).empty());
+        o.icon = {16, std::vector<uint32_t>(256, 0xff00ff00u)};
+        const fs::path out = dir / "out-none";
+        CHECK(splash::writePlayer(bin, redux, out, "Night Drive", {}, o).error.empty());
+        nlohmann::json c = parse(read(out / "config" / "pcsx.json"));
+        CHECK(c["gui"]["WindowSizeX"] == 640 && !c["gui"].contains("WindowTitle") && !c["gui"].contains("WindowIcon"));
+        CHECK(!fs::exists(out / "config" / splash::kWindowIconFile));
+        CHECK(parse(splash::seededReduxConfig()) == c);
+    }
+}
+
 // splash::writeWeb with a stand-in pcsx-redux web build: what is copied, the
 // page, a missing file, the folders it refuses and a previous export written over.
 void testWebExport() {
@@ -21649,6 +21780,7 @@ int main(int argc, char** argv) {
     testDiscMusic();
     testStandalonePlayer();
     testPlayerOptions();
+    testPlayerWindow();
     testWebExport();
 #ifdef _WIN32
     testPlayerExeIcon();
