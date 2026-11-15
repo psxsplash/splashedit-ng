@@ -600,7 +600,7 @@ std::string resourceDir(const char* rel, const char* compiled) {
 void openDocument(editor::Document& doc, const Args& args) {
     bool bundled = !args.project;
     std::filesystem::path project = bundled ? std::filesystem::path(reinterpret_cast<const char8_t*>(resourceDir("examples/courtyard", SPLASHEDIT_EXAMPLE_DIR).c_str())) : std::filesystem::path(std::u8string(args.project, args.project + std::strlen(args.project)));
-    std::filesystem::path scene = args.scene ? std::filesystem::path(args.scene) : editor::firstScene(project);
+    std::filesystem::path scene = args.scene ? std::filesystem::path(args.scene) : editor::projectStartScene(project);
     if (scene.empty()) {
         std::fprintf(stderr, "no .scene file in %s; opening an empty scene\n", reinterpret_cast<const char*>(project.u8string().c_str()));
         doc.load(project, "untitled.scene");
