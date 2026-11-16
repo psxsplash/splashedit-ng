@@ -6189,14 +6189,15 @@ static std::string gameChipText(const State::Play& p, const GameView& game) {
     return b;
 }
 
-static float gameChip(ImDrawList* dl, ImVec2 at, const std::string& label, const State::Play& p, const GameView& game) {
+static float gameChip(ImDrawList* dl, ImVec2 at, const std::string& label, const State::Play& p, const GameView& game,
+                      const std::string& name) {
     Fonts& f = fonts();
     const ImVec2 ls = measure(f.medium, type::label, label.c_str());
     const ImRect chip(at, at + ImVec2(ls.x + 20, 24));
     dl->AddRectFilled(chip.Min, chip.Max, p.paused ? rgb(0x5a3d0a, 230) : rgb(0x0e1014, 190), radius::pill);
     textCentered(dl, chip, f.medium, type::label, p.paused ? color::warn : color::text, label.c_str());
-    interact("game.fps", chip);
-    nameRect("game.fps", chip);
+    interact(name.c_str(), chip);
+    nameRect(name, chip);
     const double hz = game.rate().hz();
     char tip[400];
     std::snprintf(tip, sizeof tip,
@@ -6238,6 +6239,8 @@ static GameLayout gamePicture(State& st, ImDrawList* dl, ImRect r, int i, const 
     if (l.strip) {
         dl->AddRectFilled(l.top.Min, l.top.Max, rgb(0x0e1014), radius::window, ImDrawFlags_RoundCornersTop);
         dl->AddRectFilled(l.bottom.Min, l.bottom.Max, rgb(0x0e1014), radius::window, ImDrawFlags_RoundCornersBottom);
+        nameRect(p.players >= 2 ? "game.console" + std::to_string(i + 1) + ".striptop" : std::string("game.striptop"), l.top);
+        nameRect(p.players >= 2 ? "game.console" + std::to_string(i + 1) + ".stripbottom" : std::string("game.stripbottom"), l.bottom);
     }
     const GameFrame g = gameFrameRect(p, game, l.pic);
     if (unsigned tex = game.texture()) drawGameFrame(p, dl, g, tex, frameName);
@@ -6247,7 +6250,9 @@ static GameLayout gamePicture(State& st, ImDrawList* dl, ImRect r, int i, const 
         textCentered(dl, tag, f.medium, type::label,
                      p.players >= 2 ? (active ? IM_COL32_WHITE : color::textDim) : (active ? color::text : color::textDim), label);
     }
-    if (!chip.empty()) gameChip(dl, l.shown ? ImVec2(tag.Max.x + space::sm, tag.Min.y) : tag.Min, chip, p, game);
+    if (!chip.empty())
+        gameChip(dl, l.shown ? ImVec2(tag.Max.x + space::sm, tag.Min.y) : tag.Min, chip, p, game,
+                 p.players >= 2 ? "game.console" + std::to_string(i + 1) + ".fps" : std::string("game.fps"));
     if (bar && l.shown) {
         if (viewButtons) gameViewButtons(st, tag, rightMax);
         gameDisplayBar(st, tag, fit);

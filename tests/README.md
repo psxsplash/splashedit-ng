@@ -662,6 +662,19 @@ toggle must be saved in the play settings. Needs a display (CI runs it under `xv
 
     python3 safeareacheck.py <splashedit> [screenshot prefix]
 
+`gameviewcheck.py` starts Play against the same stand-in, with `SPLASHEDIT_FAKE_REDUX_FLIP=6`: vblanks
+at about 60 a second, the display area moved every 6 of them, and nothing moving while
+`pause.flag` is in its console directory, as `framecapture.lua` pauses pcsx-redux. The frame rate
+must read about 10 fps at about 60 Hz, Pause 0 and 0, Resume bring the vblanks back; Screenshot
+must write `screenshots/courtyard_001.png` in the project, 320x240 and equal to the frame pixel for
+pixel with the guides on; cropped to action or title safe the first colour bar edge must move left
+by the inset; with the overlay in strips the display bar must be in the top strip and the picture
+between the strips, and on hover nothing but the picture may be drawn with the pointer away; the VRAM window must open at 1x and show
+the frame at y 0 and y 256. Every toggle must be saved in the play settings. Needs a display (CI runs
+it under `xvfb-run`).
+
+    python3 gameviewcheck.py <splashedit> [screenshot prefix]
+
 `linkplaycheck.py` plays a copy of the courtyard whose scripts call `Net.Connect()` and
 `Net.Send()` with 2 linked consoles, on a real pcsx-redux: both views must show frames, their
 status lines must reach Linked with exactly one host, slots 0 and 1 and the no-Network-id hint;

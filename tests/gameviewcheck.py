@@ -12,8 +12,8 @@
 #    pixel, with the safe-area guides on in the view.
 #  - Cropped to action safe (90%) or title safe (80%), the first colour bar
 #    edge moves left by the inset, scaled; uncropped it is where it was.
-#  - Overlay in strips: the display bar sits above the picture. Hover: with
-#    the pointer away nothing but the picture is drawn.
+#  - Overlay in strips: the display bar in the top strip, the picture between
+#    the strips. Hover: with the pointer away nothing but the picture is drawn.
 #  - The VRAM window shows all 1024 x 512 at 1x, live, the frame's pixels at
 #    y 0 and at y 256.
 #  - The toggles are saved in the play settings (--play-settings).
@@ -183,6 +183,7 @@ if path and os.path.isfile(path):
     bad = [(x, y, px(png, x, y), fake_pixel(x, y)) for y in range(min(sh, FH)) for x in range(min(sw, FW)) if px(png, x, y) != fake_pixel(x, y)]
     check('every screenshot pixel is the frame\'s, no guide or overlay in it', not bad, bad[:5])
 check('the frame rate toggle is saved', 'game_fps=1\n' in cfg, cfg)
+check('over the picture: no strips', 'game.striptop' not in controls and 'game.stripbottom' not in controls)
 if img and 'game.frame' in controls:
     check('uncropped: the first bar spans both probes', bar_probes(img, controls['game.frame']) == (GREY, GREY),
           bar_probes(img, controls['game.frame']))
@@ -202,13 +203,15 @@ check('hover, pointer on the game: the buttons are drawn', 'game.pause' in contr
 
 # 3. Cropped to title safe, the overlay moved into strips by its button.
 lines, controls, img, cfg = run('strip', ['--click', '@game.overlay', '--wait', '30', '--move', '1100,880', '--wait', '20'],
-                                'game_crop=title\n')
-f = controls.get('game.frame')
-check('strips: the picture is drawn', f is not None, sorted(controls))
-if f:
-    for c in ('game.pause', 'game.safearea', 'game.look/RGB', 'game.capture', 'game.vram'):
+                                'game_crop=title\ngame_fps=1\n')
+f, top, bottom = controls.get('game.frame'), controls.get('game.striptop'), controls.get('game.stripbottom')
+check('strips: the picture and both strips are drawn', f and top and bottom, sorted(controls))
+if f and top and bottom:
+    check('strips: the picture is between them', top[3] <= f[1] and f[3] <= bottom[1], (top, f, bottom))
+    for c in ('game.pause', 'game.safearea', 'game.look/RGB', 'game.capture', 'game.vram', 'game.fps'):
         r = controls.get(c)
-        check('strips: %s sits above the picture' % c, r is not None and r[3] <= f[1], (r, f))
+        check('strips: %s is in the top strip' % c, r is not None and top[0] <= r[0] and r[2] <= top[2] and top[1] <= r[1] and r[3] <= top[3],
+              (r, top))
     if img:
         # 8 of 256 grey across 476 is under 25.
         check('title safe: the first bar ends before both probes', bar_probes(img, f) == (YELLOW, YELLOW), bar_probes(img, f))
