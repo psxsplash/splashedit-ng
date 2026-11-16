@@ -59,6 +59,8 @@
 #include "ui/texture_image.h"
 #include "ui/widgets.h"
 #include "viewport/ps1view.h"
+// The implementation comes from splashcore (core/stb_impl.cpp).
+#include <stb_image_write.h>
 
 using namespace theme;
 using namespace ui;
@@ -230,6 +232,71 @@ static void pollFrameCapture(State& st) {
            false);
     scriptLine(nullptr, "frame: captured from console " + std::to_string(p.captureConsole + 1) + " " + utf8(dir));
 }
+// Pause (the Game view): framecapture.lua in each console pauses its
+// emulation while that console's pause.flag is out. Linked consoles pause
+// and resume together, so they stay in step.
+static bool canPause(const State& st) {
+    const State::Play& p = st.play;
+    return p.cons[0].emu.running() && consoleGame(p, 0).attached() && !p.captureScript.empty();
+}
+
+static void setPaused(State& st, bool paused) {
+    State::Play& p = st.play;
+    if (paused && !canPause(st)) return;
+    std::string err;
+    bool ok = true;
+    for (int i = 0; i < std::max(1, p.players); ++i) ok = editor::requestPause(captureDir(p, i), paused, &err) && ok;
+    if (!ok) notify(st, (paused ? "Pause: " : "Resume: ") + err, true);
+    p.paused = paused && ok;
+    p.pausedAt = SDL_GetTicks();
+    p.pauseChecked = false;
+    scriptLine(nullptr, p.paused ? "game: pause requested" : "game: resume requested");
+}
+
+// A pause redux did not take (a pcsx-redux without luv timers keeps going):
+// once the vblank rate has had time to fall, still climbing means it runs.
+static void checkPause(State& st) {
+    State::Play& p = st.play;
+    if (!p.paused || p.pauseChecked || SDL_GetTicks() - p.pausedAt < 3000) return;
+    p.pauseChecked = true;
+    if (consoleGame(p, 0).rate().hz() > 5) {
+        setPaused(st, false);
+        notify(st, "pcsx-redux did not pause; Pause needs a pcsx-redux with luv timers in its Lua", true);
+        scriptLine(nullptr, "game: pause not taken");
+    }
+}
+
+// Screenshot (the Game view): the frame as the console shows it, at its
+// own resolution (320 x 240 for most psxsplash scenes), without the look,
+// the crop, the guides or anything drawn over it. Into the project's
+// screenshots folder as <scene>_NNN.png, else into the Play directory.
+static void saveGameScreenshot(State& st, const editor::Document& doc) {
+    State::Play& p = st.play;
+    const int i = p.players >= 2 ? p.focus : 0;
+    const GameView& g = consoleGame(p, i);
+    if (!g.texture() || g.frame().size() != size_t(g.width()) * size_t(g.height()) * 4) {
+        notify(st, "Screenshot: no frame from the game yet", true);
+        return;
+    }
+    const std::filesystem::path dir = doc.projectRoot().empty() ? playDir() : doc.projectRoot() / "screenshots";
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    std::string stem = utf8(doc.scenePath().stem());
+    if (stem.empty()) stem = "game";
+    const std::filesystem::path file = editor::nextScreenshotPath(dir, stem);
+    std::ofstream out(file, std::ios::binary | std::ios::trunc);
+    auto put = [](void* ctx, void* data, int n) { static_cast<std::ofstream*>(ctx)->write(static_cast<const char*>(data), n); };
+    const bool ok = out && stbi_write_png_to_func(put, &out, g.width(), g.height(), 4, g.frame().data(), g.width() * 4) && out.flush();
+    out.close();
+    if (!ok) {
+        notify(st, "Screenshot: cannot write " + utf8(file), true);
+        scriptLine(nullptr, "game: screenshot failed " + utf8(file));
+        return;
+    }
+    notify(st, "Saved screenshot " + utf8(file), false);
+    scriptLine(nullptr, "game: screenshot " + std::to_string(g.width()) + "x" + std::to_string(g.height()) + " " + utf8(file));
+}
+
 // What a click on an object in the viewport selects: a prefab instance as a
 // whole (its content is edited in the prefab), else the object itself.
 static editor::ObjectPath pickTarget(const editor::Document& doc, const editor::ObjectPath& path) {
@@ -683,6 +750,9 @@ static void updatePlay(State& st, const editor::Document& doc) {
     if (p.cons[0].emu.running()) {
         if (!p.cons[0].game.attached() && p.cons[0].game.attach(p.cons[0].emu.pid())) p.gameFocus = true;
         p.cons[0].game.update();
+        checkPause(st);
+        if (p.screenshot) saveGameScreenshot(st, doc);
+        p.screenshot = false;
         if (!p.cons[0].game.attached() && p.message.empty() && SDL_GetTicks() - p.startedAt > 10000)
             p.message = "pcsx-redux started but shows nothing here; it needs -shmdisplay support";
     } else {
@@ -694,6 +764,8 @@ static void updatePlay(State& st, const editor::Document& doc) {
             p.cons[0].game.detach();
             p.gameFocus = false;
         }
+        p.paused = false;
+        p.screenshot = false;
     }
     for (int k = 1; k < editor::kMaxPlayers; ++k) {
         State::Play::Console& c = p.cons[size_t(k)];
@@ -793,6 +865,7 @@ static void updatePlay(State& st, const editor::Document& doc) {
     }
     else {
         p.startedAt = SDL_GetTicks();
+        p.paused = false;
         editor::restartLog(p.cons[0].log);
         for (const std::string& n : relayNotes) p.cons[0].emu.note("splashedit: " + n);
         scriptLine(nullptr, "play: boots " + utf8(engine.filename()));
@@ -5875,46 +5948,137 @@ static std::optional<editor::relay::Connection> relayConnection(const State::Pla
 }
 
 // Where a console's frame shows in `pic`: 4:3 like a TV, or integer scaled
-// (Game view display bar). Also tells the console's view whether the
-// frame's lines are tall enough on screen for the look's scanlines.
-static ImRect gameFrameRect(State::Play& p, GameView& game, ImRect pic) {
-    const editor::tv::Rect d =
-        editor::tv::displayRect({pic.Min.x, pic.Min.y, pic.Max.x, pic.Max.y}, game.width(), game.height(), p.tools.tvAspect);
-    game.setLook(editor::tv::Look(std::clamp(p.tools.look, 0, 2)), game.height() > 0 && d.h() >= 2.0f * float(game.height()));
-    return ImRect(d.x0, d.y0, d.x1, d.y1);
+// (Game view display bar), cropped to a safe area when asked. `uv0`-`uv1`
+// is the part of the texture shown; `whole` is where the whole frame would
+// show, so the guides still mark the uncropped frame's safe areas. Also
+// tells the console's view whether the frame's lines are tall enough on
+// screen for the look's scanlines.
+struct GameFrame {
+    ImRect rect, whole;
+    ImVec2 uv0{0, 0}, uv1{1, 1};
+};
+static GameFrame gameFrameRect(State::Play& p, GameView& game, ImRect pic) {
+    const int fw = game.width(), fh = game.height();
+    const editor::tv::Crop c = editor::tv::cropDisplay({pic.Min.x, pic.Min.y, pic.Max.x, pic.Max.y}, fw, fh,
+                                                       editor::tv::cropFraction(p.tools.gameCrop), p.tools.tvAspect);
+    game.setLook(editor::tv::Look(std::clamp(p.tools.look, 0, 2)), fh > 0 && c.dst.h() >= 2.0f * c.src.h());
+    GameFrame g;
+    g.rect = g.whole = ImRect(c.dst.x0, c.dst.y0, c.dst.x1, c.dst.y1);
+    if (fw > 0 && fh > 0 && c.src.w() > 0 && c.src.h() > 0) {
+        g.uv0 = ImVec2(c.src.x0 / float(fw), c.src.y0 / float(fh));
+        g.uv1 = ImVec2(c.src.x1 / float(fw), c.src.y1 / float(fh));
+        const float sx = c.dst.w() / c.src.w(), sy = c.dst.h() / c.src.h();
+        g.whole = ImRect(c.dst.x0 - c.src.x0 * sx, c.dst.y0 - c.src.y0 * sy, c.dst.x1 + (float(fw) - c.src.x1) * sx,
+                         c.dst.y1 + (float(fh) - c.src.y1) * sy);
+    }
+    return g;
 }
 
-// The Game view's display bar, from `x` on the row of the view's tag (`tag`),
-// up to `maxX`: the safe-area guides, 4:3 or integer scaling, dithering on
-// or off, and the RGB, S-video or composite look. Without room the look goes
-// to a second row from the tag's left (up to `rowMaxX`), then gives way,
-// then the aspect and dithering. Saved with Play's tools.
-static void gameDisplayBar(State& st, ImRect tag, float x, float maxX, float rowMaxX) {
-    State::Play& p = st.play;
-    Fonts& f = fonts();
-    ImDrawList* dl = ImGui::GetWindowDrawList();
-    const float h = size::field + 2, y = std::floor(tag.GetCenter().y - h / 2);
-    auto segW = [&](std::initializer_list<const char*> items) {
-        float w = 4;
-        for (const char* it : items) w += measure(f.medium, type::label, it).x + space::md * 2;
-        return w;
+// The frame and its guides, named `name` for scripted checks.
+static void drawGameFrame(const State::Play& p, ImDrawList* dl, const GameFrame& g, unsigned tex, const std::string& name) {
+    ui::addTextureImage(dl, (ImTextureID)(intptr_t)tex, g.rect.Min, g.rect.Max, g.uv0, g.uv1);
+    if (p.tools.safeArea) {
+        dl->PushClipRect(g.rect.Min, g.rect.Max, true);
+        safeAreaGuides(dl, g.whole);
+        dl->PopClipRect();
+    }
+    nameRect(name, g.rect);
+}
+
+// Where the display bar's groups go, in order: Pause and Screenshot, the
+// safe-area guides and crop, 4:3 or integer scaling and dithering, then the
+// look. They fill the tag's row from `x` up to `maxX`; from the first that
+// does not fit, a second row from `tagMinX` up to `rowMaxX`; what does not
+// fit there either gives way.
+struct GameBarFit {
+    struct Slot {
+        int row = 0;  // 1 or 2; 0: not shown
+        float x = 0;
     };
-    const float safeW = 28, aspectW = segW({"4:3", "Integer"}) + space::sm + safeW, lookW = segW({"RGB", "S-video", "Composite"});
-    const bool showSafe = x + safeW <= maxX, showAspect = x + safeW + space::sm + aspectW <= maxX,
-               lookInRow = showAspect && x + safeW + space::sm + aspectW + space::sm + lookW <= maxX,
-               showLook = lookInRow || tag.Min.x + lookW <= rowMaxX;
+    Slot transport, safe, aspect, look;
+    int rows() const { return std::max({1, transport.row, safe.row, aspect.row, look.row}); }
+};
+static constexpr float kBarIconW = 28;
+static float barSegW(std::initializer_list<const char*> items) {
+    float w = 4;
+    for (const char* it : items) w += measure(fonts().medium, type::label, it).x + space::md * 2;
+    return w;
+}
+static GameBarFit gameBarFit(float x, float maxX, float rowMaxX, float tagMinX) {
+    const float iconW = kBarIconW, pairW = iconW * 2 + space::sm;
+    const float aspectW = barSegW({"4:3", "Integer"}) + space::sm + iconW, lookW = barSegW({"RGB", "S-video", "Composite"});
+    GameBarFit f;
+    GameBarFit::Slot* slots[] = {&f.transport, &f.safe, &f.aspect, &f.look};
+    const float widths[] = {pairW, pairW, aspectW, lookW};
+    int row = 1;
+    for (int k = 0; k < 4; ++k) {
+        if (row == 1 && x + widths[k] > maxX) row = 2, x = tagMinX;
+        if (row == 2 && x + widths[k] > rowMaxX) break;
+        slots[k]->row = row, slots[k]->x = x;
+        x += widths[k] + space::sm * (k == 0 ? 2 : 1);
+    }
+    return f;
+}
+
+// The Game view's display bar on the row of the view's tag (`tag`) and the
+// one below, as `fit` (gameBarFit) lays it out: Pause and Screenshot, the
+// safe-area guides and crop, 4:3 or integer scaling, dithering on or off,
+// and the RGB, S-video or composite look. Saved with Play's tools.
+static void gameDisplayBar(State& st, ImRect tag, const GameBarFit& fit) {
+    State::Play& p = st.play;
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const float h = size::field + 2, y1 = std::floor(tag.GetCenter().y - h / 2);
+    const float safeW = kBarIconW, aspectW = barSegW({"4:3", "Integer"}) + space::sm + safeW, lookW = barSegW({"RGB", "S-video", "Composite"});
     bool changed = false;
-    if (showSafe) {
-        const ImRect sr(ImVec2(x, y), ImVec2(x + safeW, y + h));
-        dl->AddRectFilled(sr.Min, sr.Max, rgb(0x0e1014, 210), radius::button + 2);
+    float y = y1;
+    auto iconAt = [&](float at) {
+        const ImRect b(ImVec2(at, y), ImVec2(at + safeW, y + h));
+        dl->AddRectFilled(b.Min, b.Max, rgb(0x0e1014, 210), radius::button + 2);
+        return b;
+    };
+    // Each group at its slot: its left and its row.
+    float x = 0;
+    auto at = [&](const GameBarFit::Slot& s) {
+        x = s.x;
+        y = s.row == 2 ? y1 + h + space::xs : y1;
+        return s.row != 0;
+    };
+    if (at(fit.transport)) {
+        const ImRect pr = iconAt(x);
+        const bool can = canPause(st) || p.paused;
+        const char* pauseTip = p.paused ? "Paused. Click to resume the game"
+                               : p.captureScript.empty() ? "Pause needs framecapture.lua beside the editor"
+                               : p.players >= 2         ? "Pause the game: every linked console together"
+                                                        : "Pause the game";
+        if (iconButton("game.pause", pr, p.paused ? icon::play : icon::pause, p.paused, pauseTip, color::textDim, can))
+            setPaused(st, !p.paused);
+        nameRect("game.pause", pr);
+        const ImRect sr = iconAt(pr.Max.x + space::sm);
+        const bool hasFrame = consoleGame(p, p.players >= 2 ? p.focus : 0).texture() != 0;
+        if (iconButton("game.screenshot", sr, icon::imageDown, false,
+                       hasFrame ? "Save the frame as a PNG at the console's own resolution, without the overlay, guides, look or "
+                                  "crop: into the project's screenshots folder"
+                                : "Save the frame as a PNG, once the game shows one",
+                       color::textDim, hasFrame))
+            p.screenshot = true;
+        nameRect("game.screenshot", sr);
+    }
+    if (at(fit.safe)) {
+        const ImRect sr = iconAt(x);
         if (iconButton("game.safearea", sr, icon::squareDashed, p.tools.safeArea,
                        p.tools.safeArea ? "Safe area guides: on. Orange: action safe (90%), blue: title safe (80%). A TV may crop outside them"
                                         : "Show the safe area guides: what a TV's overscan may crop"))
             p.tools.safeArea = !p.tools.safeArea, changed = true;
         nameRect("game.safearea", sr);
-        x = sr.Max.x + space::sm;
+        const ImRect cr = iconAt(sr.Max.x + space::sm);
+        const int crop = std::clamp(p.tools.gameCrop, 0, 2);
+        const char* cropTip = crop == 1   ? "Cropped to action safe (90%), as most TVs show it. Click for title safe (80%)"
+                              : crop == 2 ? "Cropped to title safe (80%), what every TV shows. Click to show the whole frame"
+                                          : "Crop the picture to action safe (90%), as most TVs show it; click again for title safe (80%)";
+        if (iconButton("game.crop", cr, icon::crop, crop != 0, cropTip)) p.tools.gameCrop = (crop + 1) % 3, changed = true;
+        nameRect("game.crop", cr);
     }
-    if (showAspect) {
+    if (at(fit.aspect)) {
         const float segmentW = aspectW - space::sm - safeW;
         const int a = segmented("game.aspect", ImVec2(x, y), {"4:3", "Integer"}, p.tools.tvAspect ? 0 : 1);
         if ((a == 0) != p.tools.tvAspect) p.tools.tvAspect = a == 0, changed = true;
@@ -5923,8 +6087,7 @@ static void gameDisplayBar(State& st, ImRect tag, float x, float maxX, float row
                     "console's frame that fits, square pixels, sharp (4:3 when even 1x does not fit)");
         x += segmentW + space::sm;
         // pcsx-redux reads its dithering setting once, at startup: the next Play.
-        const ImRect dr(ImVec2(x, y), ImVec2(x + safeW, y + h));
-        dl->AddRectFilled(dr.Min, dr.Max, rgb(0x0e1014, 210), radius::button + 2);
+        const ImRect dr = iconAt(x);
         const std::string ditherTip =
             std::string(p.tools.dither ? "Dithering: on, as the PS1 dithers shaded and blended polygons"
                                        : "Dithering: off, smooth shading the PS1 does not have") +
@@ -5932,13 +6095,12 @@ static void gameDisplayBar(State& st, ImRect tag, float x, float maxX, float row
         if (iconButton("game.dither", dr, icon::grip, p.tools.dither, ditherTip.c_str()))
             p.tools.dither = !p.tools.dither, changed = true;
         nameRect("game.dither", dr);
-        x = dr.Max.x + space::sm;
     }
-    if (showLook) {
-        const ImVec2 at = lookInRow ? ImVec2(x, y) : ImVec2(tag.Min.x, y + h + space::xs);
-        const int l = segmented("game.look", at, {"RGB", "S-video", "Composite"}, std::clamp(p.tools.look, 0, 2));
+    if (at(fit.look)) {
+        const ImVec2 lookAt(x, y);
+        const int l = segmented("game.look", lookAt, {"RGB", "S-video", "Composite"}, std::clamp(p.tools.look, 0, 2));
         if (l != p.tools.look) p.tools.look = l, changed = true;
-        if (ImGui::IsMouseHoveringRect(at, at + ImVec2(lookW, h)))
+        if (ImGui::IsMouseHoveringRect(lookAt, lookAt + ImVec2(lookW, h)))
             tooltip("The picture through an RGB, S-video or composite cable: chroma blurred across, scanlines in 240-line modes");
     }
     if (changed && !p.settingsFile.empty()) editor::savePlayTools(p.settingsFile, p.tools);
@@ -5946,6 +6108,171 @@ static void gameDisplayBar(State& st, ImRect tag, float x, float maxX, float row
     scriptLine("game.display", std::string("game: display safe ") + (p.tools.safeArea ? "on" : "off") + " aspect " +
                                    (p.tools.tvAspect ? "4:3" : "integer") + " look " +
                                    editor::tv::lookName(editor::tv::Look(std::clamp(p.tools.look, 0, 2))));
+}
+
+// The view buttons, right-aligned to `maxX` on the tag's row: the frame
+// rate, where the overlay goes and the VRAM window. Saved with Play's tools.
+static constexpr float kViewButtonsW = kBarIconW * 3 + space::sm * 2;
+static void gameViewButtons(State& st, ImRect tag, float maxX) {
+    State::Play& p = st.play;
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const float h = size::field + 2, y = std::floor(tag.GetCenter().y - h / 2);
+    bool changed = false;
+    float x = maxX - kViewButtonsW;
+    auto iconAt = [&](float at) {
+        const ImRect b(ImVec2(at, y), ImVec2(at + kBarIconW, y + h));
+        dl->AddRectFilled(b.Min, b.Max, rgb(0x0e1014, 210), radius::button + 2);
+        return b;
+    };
+    const ImRect fr = iconAt(x);
+    if (iconButton("game.showfps", fr, icon::gauge, p.tools.gameFps,
+                   p.tools.gameFps ? "Frame rate: shown beside the tag. Click to hide it"
+                                   : "Show the game's frame rate: how many new frames it shows a second"))
+        p.tools.gameFps = !p.tools.gameFps, changed = true;
+    nameRect("game.showfps", fr);
+    const ImRect or_ = iconAt(fr.Max.x + space::sm);
+    const int mode = std::clamp(p.tools.gameOverlay, 0, 2);
+    static const char* const overlayIcon[] = {icon::appWindow, icon::panelTop, icon::eyeOff};
+    const char* overlayTip = mode == 1   ? "Buttons above and below the picture. Click to show them over it only while the pointer is on the game"
+                             : mode == 2 ? "Buttons show only while the pointer is on the game. Click to keep them over the picture"
+                                         : "Buttons over the picture. Click to move them into strips above and below it";
+    if (iconButton("game.overlay", or_, overlayIcon[mode], mode != 0, overlayTip)) p.tools.gameOverlay = (mode + 1) % 3, changed = true;
+    nameRect("game.overlay", or_);
+    const ImRect vr = iconAt(or_.Max.x + space::sm);
+    const int i = p.players >= 2 ? p.focus : 0;
+    const bool attached = consoleGame(p, i).attached();
+    if (iconButton("game.vram", vr, icon::memoryStick, p.vramShown,
+                   attached ? "Show the console's whole VRAM, live, in a window" : "Show the console's VRAM, once pcsx-redux is up",
+                   color::textDim, attached))
+        p.vramOpen = true;
+    nameRect("game.vram", vr);
+    if (changed && !p.settingsFile.empty()) editor::savePlayTools(p.settingsFile, p.tools);
+}
+
+// The Game view's overlay (PlayTools::gameOverlay) for one picture in `r`:
+// over it, in strips above and below it (`rows` rows of display bar in the
+// top one), or over it only while the pointer is on it.
+struct GameLayout {
+    ImRect pic, top, bottom;
+    bool strip = false, shown = true;
+    float hintBottom = 0;  // where the keys hint ends, at the bottom
+};
+static GameLayout gameLayout(const State::Play& p, ImRect r, int rows) {
+    GameLayout l;
+    l.pic = r;
+    const int mode = std::clamp(p.tools.gameOverlay, 0, 2);
+    l.shown = mode != 2 || ImGui::IsMouseHoveringRect(r.Min, r.Max);
+    l.strip = mode == 1;
+    if (l.strip) {
+        const float topH = space::md + 24 + space::sm + float(rows - 1) * (size::field + 2 + space::xs);
+        const float bottomH = space::sm + 24 + space::sm;
+        if (r.GetHeight() > topH + bottomH + 48) {
+            l.top = ImRect(r.Min, ImVec2(r.Max.x, r.Min.y + topH));
+            l.bottom = ImRect(ImVec2(r.Min.x, r.Max.y - bottomH), r.Max);
+            l.pic = ImRect(ImVec2(r.Min.x, l.top.Max.y), ImVec2(r.Max.x, l.bottom.Min.y));
+        } else
+            l.strip = false;
+    }
+    l.hintBottom = l.strip ? l.bottom.Max.y - space::sm : l.pic.Max.y - space::md;
+    return l;
+}
+
+// The chip beside a picture's tag: Paused, else the frame rate when shown
+// (PlayTools::gameFps). Empty for none.
+static std::string gameChipText(const State::Play& p, const GameView& game) {
+    if (p.paused) return "Paused";
+    if (!p.tools.gameFps) return {};
+    const double fps = game.rate().fps();
+    if (fps < 0) return "-- fps";
+    char b[32];
+    std::snprintf(b, sizeof b, "%.0f fps", fps);
+    return b;
+}
+
+static float gameChip(ImDrawList* dl, ImVec2 at, const std::string& label, const State::Play& p, const GameView& game) {
+    Fonts& f = fonts();
+    const ImVec2 ls = measure(f.medium, type::label, label.c_str());
+    const ImRect chip(at, at + ImVec2(ls.x + 20, 24));
+    dl->AddRectFilled(chip.Min, chip.Max, p.paused ? rgb(0x5a3d0a, 230) : rgb(0x0e1014, 190), radius::pill);
+    textCentered(dl, chip, f.medium, type::label, p.paused ? color::warn : color::text, label.c_str());
+    interact("game.fps", chip);
+    nameRect("game.fps", chip);
+    const double hz = game.rate().hz();
+    char tip[400];
+    std::snprintf(tip, sizeof tip,
+                  "%sFrame rate: how many new frames the game shows a second, counted from the display area moving to "
+                  "the buffer it has just drawn, over the last second. The console vblanks %.0f times a second. A game "
+                  "showing more frames a second than the editor draws reads lower than it is.",
+                  p.paused ? "Paused. " : "", hz < 0 ? 0.0 : hz);
+    tooltip(tip);
+    return chip.Max.x;
+}
+
+// One picture of the Game view in `r` (the whole view with 1 console, a
+// console's part without its status line with more): the frame or `waiting`,
+// the tag (`label`, lit when `active`), the Paused or frame rate chip, and
+// with `bar` (the console with the keyboard) the view buttons, the display
+// bar and Capture frame, placed as the overlay setting says.
+static GameLayout gamePicture(State& st, ImDrawList* dl, ImRect r, int i, const char* label, bool active, bool bar,
+                              const std::string& waiting, ImU32 waitingColour, const std::string& frameName) {
+    Fonts& f = fonts();
+    State::Play& p = st.play;
+    GameView& game = p.cons[size_t(i)].game;
+    const ImVec2 ls = measure(f.medium, type::label, label);
+    const ImRect tag(r.Min + ImVec2(space::md, space::md), r.Min + ImVec2(space::md + ls.x + 20, space::md + 24));
+    const std::string chip = gameChipText(p, game);
+    // The chip keeps the width of its widest text, so the bar does not jump as the rate changes.
+    const float chipW = chip.empty() ? 0
+                                     : std::max({measure(f.medium, type::label, chip.c_str()).x, measure(f.medium, type::label, "000 fps").x,
+                                                 measure(f.medium, type::label, "Paused").x}) + 20;
+    const float flowX = tag.Max.x + space::sm + (chip.empty() ? 0 : chipW + space::sm);
+    const float capW =
+        p.captureScript.empty() ? 0 : std::max(buttonWidth(icon::camera, "Capturing..."), buttonWidth(icon::camera, "Capture frame")) + space::sm;
+    const float rightMax = r.Max.x - space::md - capW;
+    const bool viewButtons = bar && flowX + kViewButtonsW <= rightMax;
+    const float barMax = viewButtons ? rightMax - kViewButtonsW - space::sm : rightMax;
+    const GameBarFit fit = bar ? gameBarFit(flowX, barMax, r.Max.x - space::md, tag.Min.x) : GameBarFit();
+    const GameLayout l = gameLayout(p, r, fit.rows());
+
+    dl->AddRectFilled(r.Min, r.Max, IM_COL32_BLACK, radius::window);
+    if (l.strip) {
+        dl->AddRectFilled(l.top.Min, l.top.Max, rgb(0x0e1014), radius::window, ImDrawFlags_RoundCornersTop);
+        dl->AddRectFilled(l.bottom.Min, l.bottom.Max, rgb(0x0e1014), radius::window, ImDrawFlags_RoundCornersBottom);
+    }
+    const GameFrame g = gameFrameRect(p, game, l.pic);
+    if (unsigned tex = game.texture()) drawGameFrame(p, dl, g, tex, frameName);
+    else textCentered(dl, l.pic, f.regular, type::body, waitingColour, cutTo(f.regular, type::body, waiting, l.pic.GetWidth() - space::md * 2).c_str());
+    if (l.shown) {
+        dl->AddRectFilled(tag.Min, tag.Max, active && i >= 0 && p.players >= 2 ? color::accent : rgb(0x0e1014, 190), radius::pill);
+        textCentered(dl, tag, f.medium, type::label,
+                     p.players >= 2 ? (active ? IM_COL32_WHITE : color::textDim) : (active ? color::text : color::textDim), label);
+    }
+    if (!chip.empty()) gameChip(dl, l.shown ? ImVec2(tag.Max.x + space::sm, tag.Min.y) : tag.Min, chip, p, game);
+    if (bar && l.shown) {
+        if (viewButtons) gameViewButtons(st, tag, rightMax);
+        gameDisplayBar(st, tag, fit);
+        // Capture frame, at the top right: one GPU frame into the Frame tab.
+        if (!p.captureScript.empty()) {
+            const char* capLabel = p.capturing ? "Capturing..." : "Capture frame";
+            const float bw = buttonWidth(icon::camera, capLabel);
+            const ImVec2 at(r.Max.x - space::md - bw, r.Min.y + space::md - 3);
+            if (button("game.capture", at, icon::camera, capLabel, ButtonKind::Secondary, nullptr,
+                       p.players >= 2 ? "Record the next frame this console draws and open it in the Frame tab"
+                                      : "Record the next frame the game draws and open it in the Frame tab") &&
+                !p.capturing)
+                captureFrame(st);
+        }
+    }
+    if (bar) {
+        const GameView& gv = consoleGame(p, i);
+        char rate[64];
+        std::snprintf(rate, sizeof rate, "fps %.0f hz %.0f", gv.rate().fps(), gv.rate().hz());
+        scriptLine("game.view", std::string("game: view overlay ") + editor::gameOverlayName(p.tools.gameOverlay) + (l.shown ? " shown" : " hidden") +
+                                    " crop " + editor::gameCropName(p.tools.gameCrop) + " fps " + (p.tools.gameFps ? "on" : "off") +
+                                    (p.paused ? " paused" : " running"));
+        scriptLine("game.rate", std::string("game: ") + rate);
+    }
+    return l;
 }
 
 // One of the linked consoles: its picture, a "Console N" tag, the keys while
@@ -5957,49 +6284,33 @@ static void consolePanel(State& st, ImDrawList* dl, ImRect r, int i) {
     State::Play& p = st.play;
     const GameView& game = consoleGame(p, i);
     const bool focused = p.focus == i;
-    const ImRect pic(r.Min, ImVec2(r.Max.x, r.Max.y - kLinkStatusH));
-    dl->AddRectFilled(pic.Min, pic.Max, IM_COL32_BLACK, radius::window);
-    const ImRect g = gameFrameRect(p, p.cons[size_t(i)].game, pic);
-    if (unsigned tex = game.texture()) {
-        ui::addTextureImage(dl, (ImTextureID)(intptr_t)tex, g.Min, g.Max);
-        if (p.tools.safeArea) safeAreaGuides(dl, g);
-        nameRect("game.console" + std::to_string(i + 1) + ".frame", g);
-    } else if (i > 0 && !p.linkError.empty() && !consoleEmu(p, i).running())
-        textCentered(dl, pic, f.regular, type::body, color::bad,
-                     cutTo(f.regular, type::body, p.linkError, pic.GetWidth() - space::md * 2).c_str());
-    else {
-        const std::string wait = p.starting == i && i > 0
-                                     ? (p.relayed ? "Waiting for console " + std::to_string(i) + " to reach the relay..."
-                                                  : std::string("Waiting for console 1's link..."))
-                                 : p.starting > 0 && i > p.starting ? std::string("Starts after console ") + std::to_string(i)
-                                                                    : std::string("Waiting for pcsx-redux...");
-        textCentered(dl, pic, f.regular, type::body, color::textDim, cutTo(f.regular, type::body, wait, pic.GetWidth() - space::md * 2).c_str());
-    }
+    const ImRect area(r.Min, ImVec2(r.Max.x, r.Max.y - kLinkStatusH));
+    const bool failed = i > 0 && !p.linkError.empty() && !consoleEmu(p, i).running();
+    const std::string wait = failed ? p.linkError
+                             : p.starting == i && i > 0
+                                 ? (p.relayed ? "Waiting for console " + std::to_string(i) + " to reach the relay..."
+                                              : std::string("Waiting for console 1's link..."))
+                             : p.starting > 0 && i > p.starting ? std::string("Starts after console ") + std::to_string(i)
+                                                                : std::string("Waiting for pcsx-redux...");
     const std::string name = "Console " + std::to_string(i + 1);
-    const ImVec2 ls = measure(f.medium, type::label, name.c_str());
-    const ImRect tag(pic.Min + ImVec2(space::md, space::md), pic.Min + ImVec2(space::md + ls.x + 20, space::md + 24));
     const bool active = focused && p.gameFocus;
-    dl->AddRectFilled(tag.Min, tag.Max, active ? color::accent : rgb(0x0e1014, 190), radius::pill);
-    textCentered(dl, tag, f.medium, type::label, active ? IM_COL32_WHITE : color::textDim, name.c_str());
-    // The display bar on the focused console, short of where Capture frame goes.
-    if (focused)
-        gameDisplayBar(st, tag, tag.Max.x + space::sm,
-                       pic.Max.x - space::md - (p.captureScript.empty() ? 0 : buttonWidth(icon::camera, "Capturing...") + space::sm),
-                       pic.Max.x - space::md);
+    // The display bar on the focused console.
+    const GameLayout l = gamePicture(st, dl, area, i, name.c_str(), active, focused, wait, failed ? color::bad : color::textDim,
+                                     "game.console" + std::to_string(i + 1) + ".frame");
+    const ImRect pic = l.strip ? area : l.pic;
     // The keys, shortened when the picture is narrow; the other console says how to take them.
     const char* full = "Arrows  \xc2\xb7  Z X A S  \xc2\xb7  Q W 1 2  \xc2\xb7  Enter Start  \xc2\xb7  Backspace Select";
     const char* brief = "Arrows  \xc2\xb7  Z X A S  \xc2\xb7  Enter Start";
     const char* info = active ? full : focused ? "Click to control this console" : "Click to control this console instead";
     const float room = pic.GetWidth() - space::md * 2 - 20;
     if (active && measure(f.regular, type::caption, info).x > room) info = brief;
-    if (measure(f.regular, type::caption, info).x <= room) {
+    if (l.shown && measure(f.regular, type::caption, info).x <= room) {
         const ImVec2 is = measure(f.regular, type::caption, info);
-        const ImRect chip(ImVec2(pic.Min.x + space::md, pic.Max.y - space::md - 24),
-                          ImVec2(pic.Min.x + space::md + is.x + 20, pic.Max.y - space::md));
+        const ImRect chip(ImVec2(pic.Min.x + space::md, l.hintBottom - 24), ImVec2(pic.Min.x + space::md + is.x + 20, l.hintBottom));
         dl->AddRectFilled(chip.Min, chip.Max, rgb(0x0e1014, 190), radius::pill);
         textCentered(dl, chip, f.regular, type::caption, color::textDim, info);
     }
-    if (active) dl->AddRect(pic.Min, pic.Max, color::accent, radius::window, 0, 2.0f);
+    if (active) dl->AddRect(area.Min, area.Max, color::accent, radius::window, 0, 2.0f);
     // The link status line: what this console's engine last reported.
     const std::optional<editor::LinkStatus>& ls2 = p.cons[size_t(i)].link;
     std::string line;
@@ -6022,14 +6333,14 @@ static void consolePanel(State& st, ImDrawList* dl, ImRect r, int i) {
         line = relay + " \xc2\xb7 " + line;
         if (!rc || !rc->open) dot = color::bad;
     }
-    const ImRect sl(ImVec2(r.Min.x, pic.Max.y), r.Max);
+    const ImRect sl(ImVec2(r.Min.x, area.Max.y), r.Max);
     const float y = sl.Min.y + (sl.GetHeight() - measure(f.regular, type::caption, "Ag").y) * 0.5f;
     dl->AddCircleFilled(ImVec2(sl.Min.x + 8, sl.GetCenter().y), 3.5f, dot, 12);
     const std::string shown = cutTo(f.regular, type::caption, line, sl.GetWidth() - 22);
     text(dl, ImVec2(sl.Min.x + 18, y), f.regular, type::caption, color::textDim, shown.c_str());
     const std::string id = "game.console" + std::to_string(i + 1);
     interact((id + ".status").c_str(), sl);
-    nameRect(id, pic);
+    nameRect(id, area);
     nameRect(id + ".status", sl);
     if (shown != line) tooltip(line.c_str());
     scriptLine(id.c_str(), "game: console " + std::to_string(i + 1) + (game.texture() ? " frames" : " waiting") +
@@ -6046,53 +6357,31 @@ static void gamePanel(State& st, ImDrawList* dl, ImRect r) {
         // The keyboard and pad go to the focused console only.
         const uint16_t pad = hostPad(p.gameFocus);
         for (int i = 0; i < p.players; ++i) p.cons[size_t(i)].game.setPads(p.focus == i ? pad : 0xffff, 0xffff);
-        if (!p.captureScript.empty() && p.focus < p.players) {
-            const char* capLabel = p.capturing ? "Capturing..." : "Capture frame";
-            const float bw = buttonWidth(icon::camera, capLabel);
-            const ImRect fr = cr[size_t(p.focus)];
-            const ImVec2 at(fr.Max.x - space::md - bw, fr.Min.y + space::md - 3);
-            if (button("game.capture", at, icon::camera, capLabel, ButtonKind::Secondary, nullptr,
-                       "Record the next frame this console draws and open it in the Frame tab") &&
-                !p.capturing)
-                captureFrame(st);
-        }
         return;
     }
-    dl->AddRectFilled(r.Min, r.Max, IM_COL32_BLACK, radius::window);
-    const ImRect g = gameFrameRect(p, p.cons[0].game, r);
-    if (unsigned tex = p.cons[0].game.texture()) {
-        ui::addTextureImage(dl, (ImTextureID)(intptr_t)tex, g.Min, g.Max);
-        if (p.tools.safeArea) safeAreaGuides(dl, g);
-        nameRect("game.frame", g);
-    } else
-        textCentered(dl, r, f.regular, type::body, color::textDim, "Waiting for pcsx-redux...");
+    const GameLayout l = gamePicture(st, dl, r, 0, "Game", p.gameFocus, true, "Waiting for pcsx-redux...", color::textDim, "game.frame");
     // The keyboard is the controller only while the Game view has focus; a gamepad always is.
     p.cons[0].game.setPads(hostPad(p.gameFocus), 0xffff);
-    const char* label = "Game";
-    ImVec2 ls = measure(f.medium, type::label, label);
-    ImRect tag(r.Min + ImVec2(space::md, space::md), r.Min + ImVec2(space::md + ls.x + 20, space::md + 24));
-    dl->AddRectFilled(tag.Min, tag.Max, rgb(0x0e1014, 190), radius::pill);
-    textCentered(dl, tag, f.medium, type::label, p.gameFocus ? color::text : color::textDim, label);
-    gameDisplayBar(st, tag, tag.Max.x + space::sm,
-                   r.Max.x - space::md - (p.captureScript.empty() ? 0 : buttonWidth(icon::camera, "Capturing...") + space::sm),
-                   r.Max.x - space::md);
     const char* info = p.gameFocus ? "Arrows  ·  Z X A S  ·  Q W 1 2  ·  Enter Start  ·  Backspace Select"
                                    : "Click to control the game with the keyboard";
     ImVec2 is = measure(f.regular, type::caption, info);
-    ImRect chip(ImVec2(r.Min.x + space::md, r.Max.y - space::md - 24), ImVec2(r.Min.x + space::md + is.x + 20, r.Max.y - space::md));
-    dl->AddRectFilled(chip.Min, chip.Max, rgb(0x0e1014, 190), radius::pill);
-    textCentered(dl, chip, f.regular, type::caption, color::textDim, info);
-    // Triangles the engine lost or bent lately, above that. It reports only
-    // when there are some, every 60 frames, so a report much older than the
-    // gap between the last two means there are none now.
+    ImRect chip(ImVec2(r.Min.x + space::md, l.hintBottom - 24), ImVec2(r.Min.x + space::md + is.x + 20, l.hintBottom));
+    if (l.shown) {
+        dl->AddRectFilled(chip.Min, chip.Max, rgb(0x0e1014, 190), radius::pill);
+        textCentered(dl, chip, f.regular, type::caption, color::textDim, info);
+    }
+    // Triangles the engine lost or bent lately, above that (over the
+    // picture's bottom with the overlay in strips). It reports only when
+    // there are some, every 60 frames, so a report much older than the gap
+    // between the last two means there are none now.
     const bool lostNow = p.cons[0].emu.running() && p.lost && p.lost->any() &&
                          ImGui::GetTime() - p.lostAt <= std::max(3.0, 1.5 * p.lostGap);
-    if (lostNow) {
+    if (lostNow && l.shown) {
+        const float above = l.strip ? l.pic.Max.y - space::sm : chip.Min.y - space::xs;
         const std::string lost = "Last 60 frames: " + editor::describeRenderLost(*p.lost);
         const float wrap = std::max(120.0f, r.GetWidth() - space::md * 2 - 20);
         const ImVec2 ts = f.regular->CalcTextSizeA(type::caption, FLT_MAX, wrap, lost.c_str());
-        ImRect lr(ImVec2(r.Min.x + space::md, chip.Min.y - space::xs - ts.y - 10),
-                  ImVec2(r.Min.x + space::md + ts.x + 20, chip.Min.y - space::xs));
+        ImRect lr(ImVec2(r.Min.x + space::md, above - ts.y - 10), ImVec2(r.Min.x + space::md + ts.x + 20, above));
         dl->AddRectFilled(lr.Min, lr.Max, rgb(0x0e1014, 210), ts.y > 24 ? radius::window : radius::pill);
         dl->AddText(f.regular, type::caption, ImVec2(lr.Min.x + 10, lr.Min.y + 5), color::warn, lost.c_str(), nullptr, wrap);
         interact("game.lost", lr);
@@ -6103,17 +6392,87 @@ static void gamePanel(State& st, ImDrawList* dl, ImRect r) {
                 "into smaller ones.");
     }
     scriptLine("game.lost", "game: lost " + (lostNow ? editor::describeRenderLost(*p.lost) : std::string("none")));
-    // Capture frame, at the top right: one GPU frame into the Frame tab.
-    if (!p.captureScript.empty()) {
-        const char* capLabel = p.capturing ? "Capturing..." : "Capture frame";
-        const float bw = buttonWidth(icon::camera, capLabel);
-        const ImVec2 at(r.Max.x - space::md - bw, r.Min.y + space::md - 3);
-        if (button("game.capture", at, icon::camera, capLabel, ButtonKind::Secondary, nullptr,
-                   "Record the next frame the game draws and open it in the Frame tab") &&
-            !p.capturing)
-            captureFrame(st);
-    }
     if (p.gameFocus) dl->AddRect(r.Min, r.Max, color::accent, radius::window, 0, 2.0f);
+}
+
+// The VRAM window (the Game view's VRAM button): the whole 1024 x 512 VRAM
+// of the console with the keyboard, live, at the largest whole scale that
+// fits the editor (1x at least, smaller only when even that does not fit),
+// the display area outlined, texture pages marked every 64 pixels, and the
+// word under the pointer read out. Escape or Close shuts it.
+static void vramWindow(State& st, ImVec2 size) {
+    State::Play& p = st.play;
+    const int i = p.players >= 2 ? std::clamp(p.focus, 0, p.players - 1) : 0;
+    const char* id = "##vramview";
+    if (p.vramOpen) {
+        p.vramOpen = false;
+        if (consoleGame(p, i).attached()) ImGui::OpenPopup(id);
+    }
+    const float pad = space::lg, headH = 52;
+    const float fitW = (size.x - 80 - pad * 2) / 1024.0f, fitH = (size.y - 80 - pad * 2 - headH) / 512.0f;
+    const float fit = std::min(fitW, fitH);
+    const float scale = fit >= 1 ? std::floor(fit) : std::max(0.25f, fit);
+    const float w = 1024 * scale + pad * 2, h = 512 * scale + pad * 2 + headH;
+    ImGui::SetNextWindowPos(ImVec2(size.x * 0.5f, size.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(w, h));
+    pushPopupStyle();
+    const bool open = ImGui::BeginPopupModal(id, nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoMove |
+                                                               ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse |
+                                                               ImGuiWindowFlags_NoResize);
+    ImGui::PopStyleVar(4);
+    ImGui::PopStyleColor(2);
+    for (int k = 0; k < editor::kMaxPlayers; ++k) p.cons[size_t(k)].game.setWantVram(open && k == i);
+    p.vramShown = open;
+    if (!open) return;
+    Fonts& f = fonts();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 o = ImGui::GetCursorScreenPos();
+    const GameView& game = consoleGame(p, i);
+    char scaleText[16];
+    std::snprintf(scaleText, sizeof scaleText, scale == std::floor(scale) ? "%.0fx" : "%.2fx", scale);
+    text(dl, o, f.semibold, type::title, color::text, "VRAM");
+    const std::string sub = (p.players >= 2 ? "Console " + std::to_string(i + 1) + ", live. " : std::string("Live. ")) +
+                            "1024 x 512, 16-bit words, shown " + scaleText + (p.paused ? ", paused" : "") +
+                            ". The display area is outlined; lines mark the 64-pixel texture pages.";
+    text(dl, ImVec2(o.x, o.y + 28), f.regular, type::caption, color::textDim, sub.c_str());
+    bool close = !game.attached();
+    {
+        const float cw = buttonWidth(icon::x, "Close");
+        if (button("vram.close", ImVec2(o.x + w - pad * 2 - cw, o.y), icon::x, "Close", ButtonKind::Secondary)) close = true;
+        nameRect("vram.close", ImRect(ImVec2(o.x + w - pad * 2 - cw, o.y), ImVec2(o.x + w - pad * 2, o.y + size::field)));
+    }
+    if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) close = true;
+    const ImRect img(ImVec2(o.x, o.y + headH), ImVec2(o.x + 1024 * scale, o.y + headH + 512 * scale));
+    dl->AddRectFilled(img.Min, img.Max, IM_COL32_BLACK);
+    if (unsigned tex = game.vramTexture()) ui::addTextureImage(dl, (ImTextureID)(intptr_t)tex, img.Min, img.Max);
+    for (int x = 64; x < 1024; x += 64)
+        dl->AddLine(ImVec2(img.Min.x + x * scale, img.Min.y), ImVec2(img.Min.x + x * scale, img.Max.y), IM_COL32(255, 255, 255, 28));
+    dl->AddLine(ImVec2(img.Min.x, img.Min.y + 256 * scale), ImVec2(img.Max.x, img.Min.y + 256 * scale), IM_COL32(255, 255, 255, 28));
+    if (game.width() > 0 && game.height() > 0) {
+        // A 24-bit frame takes 3 bytes a pixel: 1.5 words.
+        const float dw = float(game.width()) * (game.depth24() ? 1.5f : 1.0f), dx = float(game.displayX()), dy = float(game.displayY());
+        const ImVec2 a(img.Min.x + dx * scale, img.Min.y + dy * scale);
+        dl->AddRect(a, a + ImVec2(dw * scale, float(game.height()) * scale), color::accent, 0, 0, 2.0f);
+    }
+    interact("vram.image", img);
+    nameRect("vram.image", img);
+    const ImVec2 m = ImGui::GetIO().MousePos;
+    if (img.Contains(m) && game.vram().size() >= size_t(1024 * 512 * 2)) {
+        const int vx = std::clamp(int((m.x - img.Min.x) / scale), 0, 1023), vy = std::clamp(int((m.y - img.Min.y) / scale), 0, 511);
+        const size_t at = (size_t(vy) * 1024 + size_t(vx)) * 2;
+        const unsigned v = game.vram()[at] | game.vram()[at + 1] << 8;
+        char tip[96];
+        std::snprintf(tip, sizeof tip, "x %d, y %d: 0x%04x (r %u g %u b %u%s), texture page %d", vx, vy, v, v & 31, v >> 5 & 31,
+                      v >> 10 & 31, v & 0x8000 ? ", mask" : "", vx / 64 + (vy / 256) * 16);
+        tooltip(tip);
+    }
+    scriptLine("vram", std::string("vram: open console ") + std::to_string(i + 1) + " scale " + scaleText + " texture " +
+                           (game.vramTexture() ? "live" : "waiting"));
+    if (close) {
+        scriptLine("vram", "vram: closed");
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
 }
 
 // While a game runs the viewport splits in two, Scene and Game, both live: the
@@ -16086,6 +16445,7 @@ ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view,
     newSceneModal(st, doc, size);
     unityImportModal(st, doc, size);
     stringsWindow(st, doc, size);
+    vramWindow(st, size);
     ImGui::End();
     return bar;
 }
