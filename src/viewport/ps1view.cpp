@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdio>
+#include <filesystem>
 #include <set>
 
 #include <stb_image.h>
@@ -275,6 +276,40 @@ unsigned Ps1View::textureFor(const std::string& projectPath) {
     return id;
 }
 
+const Ps1View::SkinBake& Ps1View::skinBake(const splash::FlatObject& fo, const std::string& meshPath,
+                                           const splash::MeshSkin& skin) {
+    const splash::SkinComponent& sc = *fo.object->skin;
+    const float gte = m_doc->scene().settings.gteScaling;
+    // Whatever the bake reads: the files (by write time), the rate, the scale.
+    auto stamp = [&](const std::string& p) {
+        std::error_code ec;
+        auto t = std::filesystem::last_write_time(m_doc->resolve(p), ec);
+        return ec ? std::string("-") : std::to_string(t.time_since_epoch().count());
+    };
+    char nums[96];
+    std::snprintf(nums, sizeof nums, "%d %.9g %.9g %.9g %.9g", sc.fps, fo.lossyScale.x, fo.lossyScale.y, fo.lossyScale.z, gte);
+    std::string key = meshPath + "@" + stamp(meshPath) + " " + nums;
+    for (const std::string& c : sc.clips) key += "|" + c + "@" + stamp(c);
+    SkinBake& b = m_skinCache[fo.object->name];
+    if (b.key == key) return b;
+    b = SkinBake{};
+    b.key = key;
+    std::vector<std::string> errors;
+    bool clamped = false;
+    for (const std::string& c : sc.clips) {
+        try {
+            b.clips.push_back(splash::bakeClip(skin, splash::loadAnim(m_doc->resolve(c)), sc.fps, fo.lossyScale, gte, errors, clamped));
+        } catch (const std::exception& e) {
+            errors.push_back(e.what());
+        }
+    }
+    b.bind = splash::bindPositions(skin, fo.lossyScale, gte, errors, clamped);
+    b.vertexBone = splash::dominantJoints(skin);
+    b.ok = errors.empty() && !b.clips.empty();
+    if (!errors.empty()) std::fprintf(stderr, "viewport: skin preview of %s: %s\n", fo.object->name.c_str(), errors[0].c_str());
+    return b;
+}
+
 const splash::Scene* Ps1View::drawnScene() const {
     if (m_posed) return &*m_posed;
     return m_doc ? &m_doc->scene() : nullptr;
@@ -358,7 +393,26 @@ void Ps1View::rebuild() {
 
         // World positions (Unity space); render space negates Z.
         std::vector<splash::Vec3> wp(mesh->positions.size());
-        for (size_t i = 0; i < mesh->positions.size(); ++i) wp[i] = fo.localToWorld.point(mesh->positions[i]);
+        // A skin pose bends the mesh with the bones psxsplash computes for it:
+        // each vertex moved by its one bone, in the exporter's 4.12 GTE space.
+        std::vector<splash::BoneMatrix> bones;
+        const SkinBake* bake = nullptr;
+        if (auto pit = m_preview.objects.find(fo.object->name);
+            pit != m_preview.objects.end() && pit->second.skin && fo.object->skin && mesh->skin) {
+            bake = &skinBake(fo, mc.mesh, *mesh->skin);
+            if (!bake->ok || bake->vertexBone.size() != mesh->positions.size() ||
+                !splash::skinPose(bake->clips, bake->bind, editor::skinPlay(*pit->second.skin, bake->clips), bones))
+                bake = nullptr;
+        }
+        const float gte = scene.settings.gteScaling;
+        for (size_t i = 0; i < mesh->positions.size(); ++i) {
+            splash::Vec3 p = mesh->positions[i];
+            if (bake) {
+                size_t b = size_t(bake->vertexBone[i]);
+                p = splash::skinVertex(bones[b < bones.size() ? b : 0], p, fo.lossyScale, gte);
+            }
+            wp[i] = fo.localToWorld.point(p);
+        }
         const bool haveUv = mesh->uv.size() == mesh->positions.size();
         // A UV offset track: texels added to the triangles the exporter flags,
         // those whose texture index (splash::uvTextureSlot) is uvOffsetMaterial.

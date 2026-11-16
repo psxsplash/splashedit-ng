@@ -5,6 +5,7 @@
 #include "editor/pick.hh"
 #include "editor/timeline.hh"
 #include "scene.hh"
+#include "skin.hh"
 
 #include <algorithm>
 #include <cstdint>
@@ -140,6 +141,8 @@ class Ps1View {
 
     void rebuild();
     unsigned textureFor(const std::string& projectPath);  // cached; white/fallback on empty/error
+    struct SkinBake;
+    const SkinBake& skinBake(const splash::FlatObject& fo, const std::string& meshPath, const splash::MeshSkin& skin);
 
     const editor::Document* m_doc = nullptr;
     uint32_t m_drawDistance = 0;
@@ -155,6 +158,16 @@ class Ps1View {
     std::map<unsigned, std::pair<int, int>> m_texSize;  // by GL id, for the preview's UV offsets (texels)
     editor::PickMesh m_pick;  // drawn triangles in Unity world space, by object
     std::map<std::string, splash::Mesh> m_meshCache;  // by project path, for the current load
+    // A skinned object's clips baked as the exporter bakes them, for the
+    // preview's skin pose; by object name, rebaked when `key` changes.
+    struct SkinBake {
+        std::string key;
+        bool ok = false;
+        std::vector<splash::BakedClip> clips;
+        std::vector<std::array<int16_t, 3>> bind;
+        std::vector<int> vertexBone;
+    };
+    std::map<std::string, SkinBake> m_skinCache;
     unsigned m_meshCacheLoad = ~0u;
     unsigned m_meshCacheAssets = 0;
     unsigned m_framedLoad = ~0u;
