@@ -1,4 +1,4 @@
--- SplashEdit frame capture, loaded into pcsx-redux by Play (-dofile).
+-- SplashEdit frame capture and pause, loaded into pcsx-redux by Play (-dofile).
 --
 -- Every 10 vsyncs it looks for capture.flag in the PCdrv directory (the one
 -- Play passes as -pcdrvbase). When the editor writes it, this records one
@@ -12,6 +12,11 @@
 -- fps leaves most vsync intervals empty, so recording stops at the end of the
 -- first interval that carried drawing (more than kFrameBytes), or after
 -- kMaxVsyncs intervals without any.
+--
+-- Pause: while pause.flag is in the same directory the emulation is paused.
+-- A paused emulator sends no vsyncs, so a libuv timer looks for the flag
+-- instead: redux runs its event loop while running and while paused. Only a
+-- pause this script made is resumed, so it never resumes one it did not make.
 
 local function base()
     -- One of 2 linked consoles: capture files in its own directory
@@ -131,6 +136,32 @@ local function finish()
     end
     os.remove(at('capture.flag'))
     print('framecapture: wrote ' .. at('capture.gpd'))
+end
+
+local pausedByFlag = false
+local function pollPause()
+    local flag = at('pause.flag')
+    if not flag then return end
+    local want = exists(flag)
+    if want and not pausedByFlag then
+        pausedByFlag = true
+        PCSX.pauseEmulator()
+        print('framecapture: paused')
+    elseif not want and pausedByFlag then
+        pausedByFlag = false
+        PCSX.resumeEmulator()
+        print('framecapture: resumed')
+    end
+end
+
+if type(luv) == 'table' and type(luv.new_timer) == 'function' then
+    SplashEditPauseTimer = luv.new_timer()
+    SplashEditPauseTimer:start(50, 50, function()
+        local ok, err = pcall(pollPause)
+        if not ok then print('framecapture: pause: ' .. tostring(err)) end
+    end)
+else
+    print('framecapture: this pcsx-redux has no luv timers; Pause is not available')
 end
 
 SplashEditFrameCapture = PCSX.Events.createEventListener('GPU::Vsync', function()
