@@ -60,6 +60,7 @@
 #include "editor/texture_preview.hh"
 #include "editor/strings_edit.hh"
 #include "editor/timeline.hh"
+#include "editor/frame_rate.hh"
 #include "editor/tv_preview.hh"
 #include "editor/unirom.hh"
 #include "editor/vertex_ao.hh"
@@ -21083,6 +21084,109 @@ static void testTvPreview() {
     CHECK(tv::lookFromName("bogus") == tv::Look::RGB);
 }
 
+// The Game view (#345): the crop to a safe area, the frame rate meter, where
+// Screenshot writes, the pause flag, and the overlay, crop and frame rate
+// settings saved with Play's tools.
+static void testGameView() {
+    namespace tv = editor::tv;
+    namespace fs = std::filesystem;
+    auto eq = [](tv::Rect r, float x0, float y0, float x1, float y1) { return r.x0 == x0 && r.y0 == y0 && r.x1 == x1 && r.y1 == y1; };
+    // Crop: the safe area's pixels of the frame, shown as displayRect shows a frame that size.
+    {
+        const tv::Rect panel{0, 0, 800, 600};
+        tv::Crop c = tv::cropDisplay(panel, 320, 240, 1.0f, true);
+        CHECK(eq(c.src, 0, 0, 320, 240) && eq(c.dst, 0, 0, 800, 600));
+        c = tv::cropDisplay(panel, 320, 240, tv::kActionSafe, true);
+        CHECK(eq(c.src, 16, 12, 304, 228) && eq(c.dst, 0, 0, 800, 600));
+        c = tv::cropDisplay(panel, 320, 240, tv::kTitleSafe, true);
+        CHECK(eq(c.src, 32, 24, 288, 216) && eq(c.dst, 0, 0, 800, 600));
+        // Integer: whole multiples of the cropped size, 288 x 216 twice.
+        CHECK(eq(tv::cropDisplay(panel, 320, 240, 1.0f, false).dst, 80, 60, 720, 540));
+        CHECK(eq(tv::cropDisplay(panel, 320, 240, tv::kActionSafe, false).dst, 112, 84, 688, 516));
+        // 256 x 240 to title safe: 25.6 rounds to 26 a side, 204 x 192, three times.
+        c = tv::cropDisplay(panel, 256, 240, tv::kTitleSafe, false);
+        CHECK(eq(c.src, 26, 24, 230, 216) && eq(c.dst, 94, 12, 706, 588));
+        CHECK(tv::cropFraction(0) == 1.0f && tv::cropFraction(1) == tv::kActionSafe && tv::cropFraction(2) == tv::kTitleSafe);
+        CHECK(tv::cropDisplay(panel, 0, 0, tv::kActionSafe, true).dst.w() == 0);
+    }
+    // The frame rate: display-area moves a second, and vblanks a second.
+    {
+        editor::FrameRate r;
+        CHECK(r.fps() < 0 && r.hz() < 0);
+        // 60 vblanks a second, the display moving every 2: 30 fps.
+        for (int v = 0; v <= 60; ++v) r.sample(v / 60.0, uint32_t(1000 + v), 0, (v / 2) % 2 ? 256 : 0);
+        CHECK(std::fabs(r.fps() - 30) < 0.01 && std::fabs(r.hz() - 60) < 0.01);
+        // Paused: nothing moves for a second.
+        for (int k = 1; k <= 60; ++k) r.sample(1.0 + k / 60.0, 1060, 0, 0);
+        CHECK(r.fps() == 0 && r.hz() == 0);
+        // Looked at 50 times a second, a game moving its display every 6 vblanks: 10 fps.
+        r.reset();
+        for (int k = 0; k <= 100; ++k) {
+            const double t = k / 50.0;
+            const uint32_t v = uint32_t(t * 60 + 1e-9);
+            r.sample(t, v, (v / 6) % 2 ? 320 : 0, 0);
+        }
+        CHECK(std::fabs(r.fps() - 10) < 0.6 && std::fabs(r.hz() - 60) < 0.6);
+        // The vblank counter wrapping round.
+        r.reset();
+        r.sample(0, 0xfffffff0u, 0, 0);
+        r.sample(1.0, 0x2cu, 0, 0);
+        CHECK(std::fabs(r.hz() - 60) < 0.01 && r.fps() == 0);
+    }
+    // Screenshot: <stem>_NNN.png, the first number not taken.
+    {
+        const fs::path dir = g_outDir / "gameview" / "shots";
+        std::error_code ec;
+        fs::remove_all(dir, ec);
+        fs::create_directories(dir, ec);
+        CHECK(editor::nextScreenshotPath(dir, "courtyard") == dir / "courtyard_001.png");
+        std::ofstream(dir / "courtyard_001.png") << "x";
+        std::ofstream(dir / "courtyard_003.png") << "x";
+        CHECK(editor::nextScreenshotPath(dir, "courtyard") == dir / "courtyard_002.png");
+        CHECK(editor::nextScreenshotPath(dir, "other") == dir / "other_001.png");
+    }
+    // Pause: the flag framecapture.lua looks for, written and taken away.
+    {
+        const fs::path dir = g_outDir / "gameview" / "console";
+        std::error_code ec;
+        fs::create_directories(dir, ec);
+        std::string err;
+        CHECK(editor::requestPause(dir, true, &err) && fs::is_regular_file(dir / "pause.flag") && err.empty());
+        CHECK(editor::requestPause(dir, false, &err) && !fs::exists(dir / "pause.flag"));
+        CHECK(editor::requestPause(dir, false, &err));  // nothing to take away
+        CHECK(!editor::requestPause(dir / "missing", true, &err) && !err.empty());
+        // A new Play clears a pause the last one left.
+        CHECK(editor::requestPause(dir, true, &err));
+        CHECK(editor::prepareConsole(dir, false, 0, &err, false, true, {}) && !fs::exists(dir / "pause.flag"));
+    }
+    // Saved with Play's tools: game_overlay, game_crop, game_fps.
+    {
+        const fs::path cfg = g_outDir / "gameview" / "play.cfg";
+        editor::PlayTools t;
+        CHECK(t.gameOverlay == 0 && t.gameCrop == 0 && !t.gameFps);
+        for (int o = 0; o < 3; ++o)
+            for (int c = 0; c < 3; ++c) {
+                t.gameOverlay = o, t.gameCrop = c, t.gameFps = (o + c) % 2;
+                const editor::PlayTools back = editor::savePlayTools(cfg, t) ? editor::loadPlayTools(cfg) : editor::PlayTools{};
+                CHECK(back.gameOverlay == o && back.gameCrop == c && back.gameFps == ((o + c) % 2 == 1));
+            }
+        {
+            std::ifstream in(cfg, std::ios::binary);
+            const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+            CHECK(text.find("game_overlay=hover\n") != std::string::npos && text.find("game_crop=title\n") != std::string::npos &&
+                  text.find("game_fps=0\n") != std::string::npos);
+        }
+        {
+            std::ofstream odd(g_outDir / "gameview" / "odd.cfg", std::ios::binary);
+            odd << "game_overlay=sideways\ngame_crop=half\ngame_fps=yes\n";
+        }
+        const editor::PlayTools odd = editor::loadPlayTools(g_outDir / "gameview" / "odd.cfg");
+        CHECK(odd.gameOverlay == 0 && odd.gameCrop == 0 && !odd.gameFps);
+        CHECK(editor::gameOverlayFromName("strip") == 1 && editor::gameCropFromName("action") == 1 && editor::gameCropFromName("x") == -1);
+        CHECK(std::string(editor::gameOverlayName(7)) == "hover" && std::string(editor::gameCropName(-1)) == "none");
+    }
+}
+
 // splash::writePlayer over each kind of pcsx-redux install, with stand-in
 // files: what is copied, the launcher each writes, the seeded pcsx.json, a
 // previous export written over and a folder that is neither refused.
@@ -22061,6 +22165,7 @@ int main(int argc, char** argv) {
     testPaletteGroup();
     testMeterFixSimplify();
     testTvPreview();
+    testGameView();
     testSkinCrossfade();
     if (g_failures) {
         std::fprintf(stderr, "editor_tests: %d of %d checks failed\n", g_failures, g_checks);

@@ -55,6 +55,9 @@ PlayTools loadPlayTools(const fs::path& file) {
         else if (key == "game_aspect") t.tvAspect = value != "integer" && value != "square";  // square: before integer
         else if (key == "game_dither") t.dither = value != "0";
         else if (key == "game_look") t.look = int(tv::lookFromName(value.c_str()));
+        else if (key == "game_overlay") t.gameOverlay = std::max(0, gameOverlayFromName(value));
+        else if (key == "game_crop") t.gameCrop = std::max(0, gameCropFromName(value));
+        else if (key == "game_fps") t.gameFps = value == "1";
         else if (key == "ui_safe_area") t.uiSafeArea = value == "1";
         else if (key == "scale_lock") t.scaleLock = value == "1";
     }
@@ -80,9 +83,40 @@ bool savePlayTools(const fs::path& file, const PlayTools& t) {
         << "game_aspect=" << (t.tvAspect ? "4:3" : "integer") << "\n"
         << "game_dither=" << (t.dither ? 1 : 0) << "\n"
         << "game_look=" << tv::lookName(tv::Look(std::clamp(t.look, 0, 2))) << "\n"
+        << "game_overlay=" << gameOverlayName(t.gameOverlay) << "\n"
+        << "game_crop=" << gameCropName(t.gameCrop) << "\n"
+        << "game_fps=" << (t.gameFps ? 1 : 0) << "\n"
         << "ui_safe_area=" << (t.uiSafeArea ? 1 : 0) << "\n"
         << "scale_lock=" << (t.scaleLock ? 1 : 0) << "\n";
     return bool(out);
+}
+
+namespace {
+const char* const kOverlayNames[] = {"over", "strip", "hover"};
+const char* const kCropNames[] = {"none", "action", "title"};
+}  // namespace
+
+const char* gameOverlayName(int overlay) { return kOverlayNames[std::clamp(overlay, 0, 2)]; }
+int gameOverlayFromName(const std::string& name) {
+    for (int i = 0; i < 3; ++i)
+        if (name == kOverlayNames[i]) return i;
+    return -1;
+}
+const char* gameCropName(int crop) { return kCropNames[std::clamp(crop, 0, 2)]; }
+int gameCropFromName(const std::string& name) {
+    for (int i = 0; i < 3; ++i)
+        if (name == kCropNames[i]) return i;
+    return -1;
+}
+
+fs::path nextScreenshotPath(const fs::path& dir, const std::string& stem) {
+    std::error_code ec;
+    for (int n = 1;; ++n) {
+        char num[16];
+        std::snprintf(num, sizeof num, "_%03d.png", n);
+        const fs::path p = dir / fromUtf8(stem + num);
+        if (!fs::exists(p, ec)) return p;
+    }
 }
 
 static void fromEnv(fs::path& p, const char* name) {
@@ -679,6 +713,23 @@ bool requestCapture(const fs::path& dir, std::string* error) {
     fs::rename(tmp, dir / "capture.flag", ec);
     if (ec) {
         if (error) *error = "Cannot write capture.flag: " + ec.message();
+        return false;
+    }
+    return true;
+}
+
+bool requestPause(const fs::path& dir, bool paused, std::string* error) {
+    std::error_code ec;
+    const fs::path flag = dir / "pause.flag";
+    if (!paused) {
+        fs::remove(flag, ec);
+        if (ec && error) *error = "Cannot remove " + utf8(flag) + ": " + ec.message();
+        return !ec;
+    }
+    std::ofstream out(flag, std::ios::binary | std::ios::trunc);
+    out << "1";
+    if (!out) {
+        if (error) *error = "Cannot write " + utf8(flag);
         return false;
     }
     return true;

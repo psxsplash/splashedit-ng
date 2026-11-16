@@ -26,6 +26,15 @@ Rect safeRect(Rect f, float fraction) {
     return {f.x0 + ix, f.y0 + iy, f.x1 - ix, f.y1 - iy};
 }
 
+Crop cropDisplay(Rect panel, int fw, int fh, float fraction, bool tvAspect) {
+    Crop c;
+    c.src = fraction >= 1 ? Rect{0, 0, float(fw), float(fh)} : safeRect({0, 0, float(std::max(fw, 0)), float(std::max(fh, 0))}, fraction);
+    c.dst = displayRect(panel, int(c.src.w()), int(c.src.h()), tvAspect);
+    return c;
+}
+
+float cropFraction(int crop) { return crop == 1 ? kActionSafe : crop == 2 ? kTitleSafe : 1.0f; }
+
 namespace {
 
 // A box blur of radius r along one row, edges clamped, in place.

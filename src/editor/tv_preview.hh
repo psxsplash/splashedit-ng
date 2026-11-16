@@ -30,6 +30,18 @@ Rect displayRect(Rect panel, int frameW, int frameH, bool tvAspect);
 // the frame's width or height and rounded to a whole pixel.
 Rect safeRect(Rect frame, float fraction);
 
+// Cropping to a safe area: the part of a frameW x frameH frame kept (in
+// frame pixels, the same rectangle safeRect gives on the whole frame) and
+// where it shows in `panel`, as displayRect shows a frame that size, 4:3
+// or integer scaled. `fraction` 1 keeps the whole frame.
+struct Crop {
+    Rect src;  // in frame pixels
+    Rect dst;  // in the panel
+};
+Crop cropDisplay(Rect panel, int frameW, int frameH, float fraction, bool tvAspect);
+// The fraction a Game view crop setting keeps: 1 (none), kActionSafe, kTitleSafe.
+float cropFraction(int crop);
+
 // RGB: the frame as is. S-video: luma sharp, chroma blurred across. Composite:
 // luma softened a little, chroma blurred much wider. Both can add scanlines
 // to a 240-line mode.

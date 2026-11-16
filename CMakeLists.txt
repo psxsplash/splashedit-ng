@@ -144,6 +144,7 @@ add_library(splasheditdoc STATIC
     src/editor/psxmon.cpp
     src/editor/texture_preview.cpp
     src/editor/tv_preview.cpp
+    src/editor/frame_rate.cpp
     src/editor/unirom.cpp
     src/editor/ui_canvas.cpp
     src/editor/vertex_ao.cpp
