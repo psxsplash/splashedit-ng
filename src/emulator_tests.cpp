@@ -112,7 +112,7 @@ static int fakeRedux(int argc, char** argv) {
     // While pause.flag is in the console directory (-portable, else
     // -pcdrvbase) nothing moves, as framecapture.lua pauses redux.
     if (const char* flip = std::getenv("SPLASHEDIT_FAKE_REDUX_FLIP"); flip && fh > 0 && fh <= 256) {
-        const int every = std::max(1, std::atoi(flip));
+        const int every = (std::max)(1, std::atoi(flip));  // windows.h defines max
         std::string dir;
         for (int a = 1; a + 1 < argc; ++a)
             if (!std::strcmp(argv[a], "-portable") || (dir.empty() && !std::strcmp(argv[a], "-pcdrvbase"))) dir = argv[a + 1];
