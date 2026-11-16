@@ -555,8 +555,14 @@ struct State {
 
     // The bottom dock under the middle panel holds the Project panel and,
     // while they are open, the Timeline and the Frame debugger as tabs; one
-    // shows at a time.
-    enum class BottomTab { Project, Timeline, Frame } bottomTab = BottomTab::Project;
+    // shows at a time. With the console docked (PlayTools::consoleDocked)
+    // Play's output is a Console tab there too.
+    enum class BottomTab { Project, Timeline, Frame, Console } bottomTab = BottomTab::Project;
+    // The Console tab: its height (the bar above it drags), where it was
+    // placed this frame, and whether Play ran last frame (a new Play raises it).
+    float consoleHeight = 280;
+    ImRect consoleRect;
+    bool consoleWasRunning = false;
     bool timelineWasOpen = false;  // to raise the Timeline tab when something opens it
     unsigned timelineShows = 0;
     // The Frame tab: a captured GPU frame, replayed and inspected.

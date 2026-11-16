@@ -28,8 +28,10 @@ public:
     CanvasView(const CanvasView&) = delete;
     CanvasView& operator=(const CanvasView&) = delete;
 
-    // The element list and the canvas, in `r`. Also takes the UI tab's keys.
+    // The element list and the canvas, in `r`. Also takes the UI tab's keys,
+    // unless takeKeys is off (the Game view beside it has the keyboard).
     void draw(ImDrawList* dl, ImRect r, editor::Document& doc);
+    bool takeKeys = true;
     // The inspector's body from `y` down in panel `r`: the selected element,
     // or the canvas when none is selected.
     void inspector(ImDrawList* dl, ImRect r, float y, editor::Document& doc);

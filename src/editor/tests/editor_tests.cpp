@@ -21185,6 +21185,34 @@ static void testGameView() {
         CHECK(editor::gameOverlayFromName("strip") == 1 && editor::gameCropFromName("action") == 1 && editor::gameCropFromName("x") == -1);
         CHECK(std::string(editor::gameOverlayName(7)) == "hover" && std::string(editor::gameCropName(-1)) == "none");
     }
+    // Saved with Play's tools: game_every_tab (on unless 0) and console_docked (off unless 1).
+    {
+        const fs::path cfg = g_outDir / "gameview" / "dock.cfg";
+        editor::PlayTools t;
+        CHECK(t.gameEveryTab && !t.consoleDocked);
+        for (int k = 0; k < 4; ++k) {
+            t.gameEveryTab = k & 1, t.consoleDocked = k & 2;
+            const editor::PlayTools back = editor::savePlayTools(cfg, t) ? editor::loadPlayTools(cfg) : editor::PlayTools{};
+            CHECK(back.gameEveryTab == bool(k & 1) && back.consoleDocked == bool(k & 2));
+        }
+        {
+            std::ifstream in(cfg, std::ios::binary);
+            const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+            CHECK(text.find("game_every_tab=1\n") != std::string::npos && text.find("console_docked=1\n") != std::string::npos);
+        }
+        {
+            std::ofstream old(g_outDir / "gameview" / "old.cfg", std::ios::binary);
+            old << "game_fps=1\n";  // written before #345's dock: neither key
+        }
+        const editor::PlayTools old = editor::loadPlayTools(g_outDir / "gameview" / "old.cfg");
+        CHECK(old.gameEveryTab && !old.consoleDocked && old.gameFps);
+        {
+            std::ofstream odd(g_outDir / "gameview" / "odd2.cfg", std::ios::binary);
+            odd << "game_every_tab=0\nconsole_docked=yes\n";
+        }
+        const editor::PlayTools odd = editor::loadPlayTools(g_outDir / "gameview" / "odd2.cfg");
+        CHECK(!odd.gameEveryTab && !odd.consoleDocked);
+    }
 }
 
 // splash::writePlayer over each kind of pcsx-redux install, with stand-in
