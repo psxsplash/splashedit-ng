@@ -152,6 +152,15 @@ struct State {
             double simAt = -1;
         } licencePreview;
         bool capturing = false;              // a capture.flag is out, waiting for capture.gpd
+        // Pause (the Game view): every console's pause.flag is out
+        // (editor::requestPause), since when (SDL ticks), and the vblank
+        // count then, to tell a redux that did not pause. vramView: the VRAM
+        // window is asked open (vramOpen: open it this frame) and is shown.
+        bool paused = false;
+        uint64_t pausedAt = 0;
+        bool pauseChecked = false;
+        bool vramOpen = false, vramShown = false;
+        bool screenshot = false;  // Screenshot was clicked; updatePlay saves it
         uint64_t captureAt = 0;               // SDL ticks when it was written
         std::future<splash::ExportResult> build;
         // The session's consoles, cons[0] being console 1 (the only one with

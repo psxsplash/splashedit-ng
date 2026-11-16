@@ -126,7 +126,7 @@ bool prepareConsole(const fs::path& dir, bool server, uint16_t port, std::string
         if (error) *error = "Cannot create " + utf8(dir) + ": " + ec.message();
         return false;
     }
-    for (const char* stale : {"capture.flag", "capture.gpd", "capture.err", "capture.gpd.part"}) fs::remove(dir / stale, ec);
+    for (const char* stale : {"capture.flag", "capture.gpd", "capture.err", "capture.gpd.part", "pause.flag"}) fs::remove(dir / stale, ec);
     return writeText(dir / "pcsx.json", sio1 ? linkSettings(server, port, dither, cards) : noLinkSettings(dither, cards), error) &&
            writeText(dir / "capturedir.lua", captureDirLua(dir), error);
 }

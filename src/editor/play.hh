@@ -41,6 +41,13 @@ struct PlayTools {
     // reads once, at startup; editor::prepareConsole writes it).
     bool dither = true;
     int look = 0;
+    // The Game view's tag, display bar and hints: over the picture (0), in
+    // strips above and below it (1), or over it only while the pointer is
+    // on the view (2). gameCrop: the picture cropped to action safe (1, the
+    // central 90%) or title safe (2, 80%), 0 shows it whole. gameFps: the
+    // game's frame rate beside the tag.
+    int gameOverlay = 0, gameCrop = 0;
+    bool gameFps = false;
     bool uiSafeArea = false;
     // The inspector's Scale lock (#264): one axis edited scales all three.
     bool scaleLock = false;
@@ -53,12 +60,25 @@ inline bool usesRelay(const PlayTools& t) { return t.players >= 3 || (t.players 
 // overlay_rooms=, boot_logo= (1 or 0), players= (1 to kMaxPlayers, clamped),
 // relay= (1 or 0), game_safe_area= (1 or 0), game_aspect= (4:3 or integer;
 // square, saved before integer scaling, reads as integer), game_dither= (1 or 0),
-// game_look= (rgb, svideo or composite), ui_safe_area= (1 or 0),
+// game_look= (rgb, svideo or composite), game_overlay= (over, strip or hover),
+// game_crop= (none, action or title), game_fps= (1 or 0), ui_safe_area= (1 or 0),
 // scale_lock= (1 or 0). A missing
 // file or key reads as empty or off, but boot_logo and game_dither as on,
-// players as 1 (also for a value that is not a number) and game_aspect as 4:3.
+// players as 1 (also for a value that is not a number) and game_aspect as 4:3;
+// an unknown game_overlay or game_crop as over and none.
 PlayTools loadPlayTools(const std::filesystem::path& file);
 bool savePlayTools(const std::filesystem::path& file, const PlayTools& tools);
+
+// The names game_overlay= and game_crop= take, from the PlayTools values
+// (clamped), and back (-1 for an unknown name).
+const char* gameOverlayName(int overlay);
+int gameOverlayFromName(const std::string& name);
+const char* gameCropName(int crop);
+int gameCropFromName(const std::string& name);
+
+// Where the Game view's Screenshot goes: `dir`/<stem>_NNN.png, the first
+// number from 001 with no file there yet.
+std::filesystem::path nextScreenshotPath(const std::filesystem::path& dir, const std::string& stem);
 
 // Fills empty entries from SPLASHEDIT_REDUX, SPLASHEDIT_REDUX_WEB, SPLASHEDIT_PSXSPLASH,
 // SPLASHEDIT_BIOS, SPLASHEDIT_DISC_ENGINE and SPLASHEDIT_PORT, then from the copies shipped in
@@ -279,6 +299,10 @@ bool readLicencePreview(const std::filesystem::path& dir, LicencePreview& out, s
 // capture.err. requestCapture() clears any earlier answer and writes the flag.
 bool requestCapture(const std::filesystem::path& dir, std::string* error);
 enum class CaptureState { Waiting, Done, Failed };
+// Pause while Play runs: framecapture.lua pauses the emulation while
+// pause.flag is in `dir` and resumes it when the flag goes. Writes or
+// removes the flag; false with `error` set when it cannot.
+bool requestPause(const std::filesystem::path& dir, bool paused, std::string* error);
 // Done: the capture is `dir`/capture.gpd. Failed: `message` says why.
 CaptureState pollCapture(const std::filesystem::path& dir, std::string* message);
 

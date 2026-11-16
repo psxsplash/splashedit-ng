@@ -67,4 +67,10 @@ inline constexpr const char* grip = "\xee\x8e\xb1";            // e3b1
 inline constexpr const char* paintBucket = "\xee\x8b\xa6";     // e2e6
 inline constexpr const char* pipette = "\xee\x84\xbb";         // e13b
 inline constexpr const char* brush = "\xee\x8b\xa7";           // e2e7 paintbrush
+inline constexpr const char* pause = "\xee\x84\xae";           // e12e
+inline constexpr const char* crop = "\xee\x82\xab";            // e0ab
+inline constexpr const char* imageDown = "\xee\x94\xbc";       // e53c
+inline constexpr const char* panelTop = "\xee\x90\xb5";        // e435
+inline constexpr const char* appWindow = "\xee\x90\xa6";       // e426
+inline constexpr const char* memoryStick = "\xee\x91\x85";     // e445
 }  // namespace icon

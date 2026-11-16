@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <vector>
 
+#include "editor/frame_rate.hh"
 #include "editor/tv_preview.hh"
 
 class GameView {
@@ -40,6 +41,24 @@ public:
     }
     editor::tv::Look look() const { return m_look; }
 
+    // The frame as redux shows it, RGBA, width() x height(), before the look
+    // or any crop: what Screenshot saves. Empty until the first frame.
+    const std::vector<uint8_t>& frame() const { return m_rgba; }
+    // How fast the game shows new frames and the console vblanks (editor/frame_rate.hh).
+    const editor::FrameRate& rate() const { return m_rate; }
+
+    // The whole 1024 x 512 VRAM as a texture, kept live while asked for
+    // (the VRAM view): 0 until asked and a copy has arrived. vram() is the
+    // last copy, 16-bit words, 2048 bytes a line.
+    void setWantVram(bool want) { m_wantVram = want; }
+    unsigned vramTexture() const { return m_wantVram ? m_vramTex : 0; }
+    const std::vector<uint8_t>& vram() const { return m_vram; }
+    // Where the display area was in VRAM in the last frame, in VRAM pixels
+    // (16-bit words across; a 24-bit frame is wider in bytes).
+    int displayX() const { return m_dispX; }
+    int displayY() const { return m_dispY; }
+    bool depth24() const { return m_depth24; }
+
     // Pad buttons for port 0 and 1, in the controller's active-low layout.
     void setPads(uint16_t pad0, uint16_t pad1);
 
@@ -57,6 +76,13 @@ private:
     editor::tv::Look m_look = editor::tv::Look::RGB;
     bool m_scanlines = false, m_relook = false;
     std::vector<uint8_t> m_vram, m_rgba;
+    editor::FrameRate m_rate;
+    bool m_wantVram = false;
+    unsigned m_vramTex = 0;
+    uint32_t m_vramFrame = 0;
+    int m_dispX = 0, m_dispY = 0;
+    bool m_depth24 = false;
+    void uploadVram();
 };
 
 // Pad bits, active-low: a pressed button clears its bit.

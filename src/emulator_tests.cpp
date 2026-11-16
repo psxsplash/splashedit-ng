@@ -6,6 +6,8 @@
 // (SPLASHEDIT_FAKE_REDUX set).
 #include <SDL3/SDL.h>
 
+#include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -58,7 +60,15 @@ static void unlinkAndExit(int) {
 }
 #endif
 
-static int fakeRedux() {
+static bool fileExists(const std::string& path) {
+    if (FILE* f = std::fopen(path.c_str(), "rb")) {
+        std::fclose(f);
+        return true;
+    }
+    return false;
+}
+
+static int fakeRedux(int argc, char** argv) {
     const uint32_t vramOffset = 4096, size = vramOffset + 1024 * 512 * 2;
     std::string name = "pcsx-redux-display-";
 #ifdef _WIN32
@@ -96,6 +106,44 @@ static int fakeRedux() {
     mem[0] = 0x44535850;  // magic "PXSD", last so a reader never sees a half header
     std::printf("fake redux up\n");
     std::fflush(stdout);
+    // SPLASHEDIT_FAKE_REDUX_FLIP=<n> (tests/gameviewcheck.py): vblanks at 60
+    // a second, the frame copied to y 256 and the display area moved between
+    // y 0 and y 256 every n of them, as a game showing 60/n frames a second.
+    // While pause.flag is in the console directory (-portable, else
+    // -pcdrvbase) nothing moves, as framecapture.lua pauses redux.
+    if (const char* flip = std::getenv("SPLASHEDIT_FAKE_REDUX_FLIP"); flip && fh > 0 && fh <= 256) {
+        const int every = (std::max)(1, std::atoi(flip));  // windows.h defines max
+        std::string dir;
+        for (int a = 1; a + 1 < argc; ++a)
+            if (!std::strcmp(argv[a], "-portable") || (dir.empty() && !std::strcmp(argv[a], "-pcdrvbase"))) dir = argv[a + 1];
+        const std::string flag = dir + "/pause.flag";
+        uint16_t* vram = (uint16_t*)((uint8_t*)mem + vramOffset);
+        for (int y = 0; y < fh; ++y) std::memcpy(vram + (y + 256) * 1024, vram + y * 1024, size_t(fw) * 2);
+        bool paused = false;
+        for (uint32_t vblank = 1; vblank < 60 * 120;) {
+            const bool want = !dir.empty() && fileExists(flag);
+            if (want != paused) {
+                paused = want;
+                std::printf("fake redux %s\n", paused ? "paused" : "resumed");
+                std::fflush(stdout);
+            }
+            if (!paused) {
+                ++vblank;
+                volatile uint32_t* seq = &mem[4];
+                *seq = *seq + 1;  // odd: writing
+                std::atomic_thread_fence(std::memory_order_release);
+                mem[5] = vblank;
+                mem[7] = (vblank / uint32_t(every)) % 2 ? 256 : 0;  // displayY
+                std::atomic_thread_fence(std::memory_order_release);
+                *seq = *seq + 1;
+            }
+            SDL_Delay(16);
+        }
+#ifndef _WIN32
+        shm_unlink(name.c_str());
+#endif
+        return 0;
+    }
 #ifdef _WIN32
     Sleep(120000);
 #else
@@ -159,7 +207,7 @@ int main(int argc, char** argv) {
     if (argc > 1 && !std::strcmp(argv[1], "--stubborn-child")) return stubbornChild();
     if (argc > 1 && !std::strcmp(argv[1], "--parent-of-stubborn")) return parentOfStubborn(argv[0]);
     // Play passes redux arguments, so this mode is chosen by the environment.
-    if (std::getenv("SPLASHEDIT_FAKE_REDUX")) return fakeRedux();
+    if (std::getenv("SPLASHEDIT_FAKE_REDUX")) return fakeRedux(argc, argv);
 
     Emulator emu;
     std::string error;

@@ -1,6 +1,7 @@
 #include "game_view.h"
 
 #include <atomic>
+#include <chrono>
 #include <cstring>
 #include <string>
 
@@ -56,6 +57,7 @@ void store(uint32_t& v, uint32_t x, std::memory_order) { __atomic_store_n(&v, x,
 GameView::~GameView() {
     detach();
     if (m_tex) glDeleteTextures(1, &m_tex);
+    if (m_vramTex) glDeleteTextures(1, &m_vramTex);
 }
 
 bool GameView::attach(int64_t pid) {
@@ -98,6 +100,8 @@ bool GameView::attach(int64_t pid) {
     }
     m_frames = 0;
     m_lastFrame = 0;
+    m_vramFrame = 0;
+    m_rate.reset();
     return true;
 }
 
@@ -130,6 +134,15 @@ void GameView::update() {
         std::atomic_thread_fence(std::memory_order_acquire);
         got = load(hd->sequence, std::memory_order_relaxed) == s1;
     }
+    if (got) {
+        const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        m_rate.sample(now, h.frame, h.displayX, h.displayY);
+        m_dispX = h.displayX, m_dispY = h.displayY, m_depth24 = h.displayDepth24 != 0;
+        if (m_wantVram && (!m_vramTex || h.frame != m_vramFrame)) {
+            m_vramFrame = h.frame;
+            uploadVram();
+        }
+    }
     const bool fresh = got && h.frame != m_lastFrame;
     // A new look redraws the last frame, as a paused game sends no new one.
     if (!fresh && !(m_relook && m_frames && m_fw > 0)) return;
@@ -158,6 +171,32 @@ void GameView::update() {
     }
     glBindTexture(GL_TEXTURE_2D, 0);
     if (fresh) ++m_frames;
+}
+
+// The copied VRAM, 1024 x 512 BGR555, into m_vramTex as RGBA.
+void GameView::uploadVram() {
+    std::vector<uint8_t> rgba((size_t)1024 * 512 * 4);
+    for (size_t i = 0; i < (size_t)1024 * 512; ++i) {
+        const uint16_t v = m_vram[i * 2] | m_vram[i * 2 + 1] << 8;
+        rgba[i * 4 + 0] = (uint8_t)((v & 31) << 3 | (v & 31) >> 2);
+        rgba[i * 4 + 1] = (uint8_t)((v >> 5 & 31) << 3 | (v >> 5 & 31) >> 2);
+        rgba[i * 4 + 2] = (uint8_t)((v >> 10 & 31) << 3 | (v >> 10 & 31) >> 2);
+        rgba[i * 4 + 3] = 255;
+    }
+    const bool fresh = !m_vramTex;
+    if (fresh) glGenTextures(1, &m_vramTex);
+    glBindTexture(GL_TEXTURE_2D, m_vramTex);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    if (fresh) {
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1024, 512, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+    } else {
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 1024, 512, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+    }
+    glBindTexture(GL_TEXTURE_2D, 0);
 }
 
 // The display area of the copied VRAM into m_rgba. False for a size redux
