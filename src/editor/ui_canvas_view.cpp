@@ -260,7 +260,7 @@ void CanvasView::draw(ImDrawList* dl, ImRect r, editor::Document& doc) {
     ImGui::PushID("uicanvasview");
     list(dl, left, doc);
     canvas(dl, right, doc);
-    keys(doc);
+    if (takeKeys) keys(doc);
     elementMenu(doc);
     ImGui::PopID();
 }

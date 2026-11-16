@@ -1118,10 +1118,22 @@ static ImRect g_menuRects[7];  // the six menus, then the Players button
 // label, its release must not open the menu again.
 static int g_menuIgnoreClick = -1;
 
-// The bottom dock: the Timeline and Frame tabs show while they are open; the one in front draws.
+// The bottom dock: the Timeline and Frame tabs show while they are open,
+// the Console tab while the console is docked; the one in front draws.
 static bool timelineInFront(const State& st) { return st.timeline.open && st.bottomTab == State::BottomTab::Timeline; }
 static bool frameInFront(const State& st) { return st.frame.open && st.bottomTab == State::BottomTab::Frame; }
-static bool projectInFront(const State& st) { return !timelineInFront(st) && !frameInFront(st); }
+static bool consoleInFront(const State& st) { return st.play.tools.consoleDocked && st.bottomTab == State::BottomTab::Console; }
+static bool projectInFront(const State& st) { return !timelineInFront(st) && !frameInFront(st) && !consoleInFront(st); }
+
+// Docks Play's output as the Console tab (in front) or puts it back in the
+// status bar's popup, and saves the choice with Play's tools.
+static void setConsoleDocked(State& st, bool on) {
+    State::Play& p = st.play;
+    p.tools.consoleDocked = on;
+    if (on) st.bottomTab = State::BottomTab::Console;
+    else if (st.bottomTab == State::BottomTab::Console) st.bottomTab = State::BottomTab::Project;
+    if (!p.settingsFile.empty()) editor::savePlayTools(p.settingsFile, p.tools);
+}
 
 // Shows the Project tab in front, or folds it to its header when it already is and shows.
 static void toggleProjectTab(State& st) {
@@ -1138,7 +1150,8 @@ static void toggleProjectTab(State& st) {
 // panel in front's header.
 static float dockTabWidth(const char* label) { return measure(fonts().semibold, type::body, label).x + 30 + space::md * 2; }
 static float dockTabsWidth(const State& st) {
-    return dockTabWidth("Project") + (st.timeline.open ? dockTabWidth("Timeline") : 0) + (st.frame.open ? dockTabWidth("Frame") : 0);
+    return dockTabWidth("Project") + (st.timeline.open ? dockTabWidth("Timeline") : 0) + (st.frame.open ? dockTabWidth("Frame") : 0) +
+           (st.play.tools.consoleDocked ? dockTabWidth("Console") : 0);
 }
 static void dockTabs(State& st, ImDrawList* dl, ImRect r) {
     Fonts& f = fonts();
@@ -1164,6 +1177,8 @@ static void dockTabs(State& st, ImDrawList* dl, ImRect r) {
         st.bottomTab = State::BottomTab::Timeline;
     if (st.frame.open && tab("tab_frame", "Frame", icon::image, rgb(0x5ccfe0), frameInFront(st), true))
         st.bottomTab = State::BottomTab::Frame;
+    if (st.play.tools.consoleDocked && tab("tab_console", "Console", icon::monitor, color::good, consoleInFront(st), true))
+        st.bottomTab = State::BottomTab::Console;
 }
 
 // The Players button's words for `t`: "1 player", "2 linked", "2 via relay", "4 players".
@@ -3822,6 +3837,14 @@ static std::vector<MenuEntry> menuEntries(int which, State& st, editor::Document
             m.push_back(separator());
             m.push_back(heading("Panels"));
             m.push_back(item("Project", "", true, [&] { toggleProjectTab(st); }, st.assets.open && projectInFront(st)));
+            m.push_back(item("Console", "", true, [&] {
+                if (consoleInFront(st)) setConsoleDocked(st, false);
+                else setConsoleDocked(st, true);
+            }, consoleInFront(st)));
+            m.push_back(item("Game View on Every Tab", "", true, [&] {
+                st.play.tools.gameEveryTab = !st.play.tools.gameEveryTab;
+                if (!st.play.settingsFile.empty()) editor::savePlayTools(st.play.settingsFile, st.play.tools);
+            }, st.play.tools.gameEveryTab));
             m.push_back(item("Strings", "", !doc.projectRoot().empty(), [&] { st.strings.open = true; }));
             m.push_back(item("Frame Debugger", "", true, [&] {
                 if (frameInFront(st)) {
@@ -6480,10 +6503,11 @@ static void vramWindow(State& st, ImVec2 size) {
     ImGui::EndPopup();
 }
 
-// While a game runs the viewport splits in two, Scene and Game, both live: the
-// scene stays editable while the game plays. Side by side when there is room,
-// stacked otherwise; the bar between them drags. A click in either one gives it
-// the keyboard. Returns the Scene part.
+// While a game runs the middle panel splits in two, the tab in front (Scene,
+// UI, Tilemap or a script) and Game, both live: the scene stays editable while
+// the game plays. Side by side when there is room, stacked otherwise; the bar
+// between them drags. A click in either one gives it the keyboard. Returns the
+// tab's part.
 static ImRect splitViewport(State& st, ImDrawList* dl, ImRect r) {
     State::Play& p = st.play;
     // Whichever way gives the 4:3 game the bigger picture at an even split.
@@ -7210,7 +7234,6 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
         st.prefabViews.pop_back();
     }
     Fonts& f = fonts();
-    if (st.play.cons[0].game.attached()) r = splitViewport(st, dl, r);
     view.clean = st.viewMode == 1;
     // In pixels, so the clean view stays sharp at any UI scale or pixel density.
     const ImVec2 fb = ImGui::GetIO().DisplayFramebufferScale;
@@ -14875,7 +14898,9 @@ static void scriptLine(const char* tag, const std::string& line) {
 // many lines show), then the lines after the clear point that match the
 // filter, errors in red, kept at the newest while scrolled to the bottom.
 // `who` ("play", "hw") names the controls and the scripted console: lines.
-static void outputLog(State& st, const char* who, const std::deque<std::string>& lines, uint64_t total, editor::LogView& v) {
+// The lines take `linesH` (below 0: all the room left but that much).
+static void outputLog(State& st, const char* who, const std::deque<std::string>& lines, uint64_t total, editor::LogView& v,
+                      float linesH = 360) {
     const std::string w = who;
     const ImVec2 o = ImGui::GetCursorScreenPos();
     const float width = ImGui::GetContentRegionAvail().x;
@@ -14918,7 +14943,7 @@ static void outputLog(State& st, const char* who, const std::deque<std::string>&
     ImGui::SetCursorScreenPos(ImVec2(o.x, o.y + rowH + space::sm));
     ImGui::PushFont(f.regular, type::caption);
     ImGui::PushStyleColor(ImGuiCol_ChildBg, color::field);
-    ImGui::BeginChild((w + "lines").c_str(), ImVec2(0, 360), ImGuiChildFlags_None, v.wrap ? 0 : ImGuiWindowFlags_HorizontalScrollbar);
+    ImGui::BeginChild((w + "lines").c_str(), ImVec2(0, linesH), ImGuiChildFlags_None, v.wrap ? 0 : ImGuiWindowFlags_HorizontalScrollbar);
     if (v.wrap) ImGui::PushTextWrapPos(0.0f);
     for (size_t i : shown) {
         ImGui::PushStyleColor(ImGuiCol_Text, editor::containsNoCase(lines[i], "error") ? color::bad : color::textDim);
@@ -14992,7 +15017,7 @@ static bool netChip(const std::string& id, ImVec2& at, float x0, float maxX, con
 
 // The relay's connections, a filter by console slot and by packet type, a
 // Pause, and every packet that passes, newest last.
-static void networkView(State& st) {
+static void networkView(State& st, float tableH = 340) {
     namespace rl = editor::relay;
     State::Play& p = st.play;
     Fonts& f = fonts();
@@ -15132,7 +15157,7 @@ static void networkView(State& st) {
     ImGui::PushStyleColor(ImGuiCol_TableHeaderBg, color::raised);
     const ImGuiTableFlags tf = ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingFixedFit |
                                ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_PadOuterX;
-    if (ImGui::BeginTable("##netpackets", 6, tf, ImVec2(width, 340))) {
+    if (ImGui::BeginTable("##netpackets", 6, tf, ImVec2(width, tableH))) {
         ImGui::TableSetupScrollFreeze(0, 1);
         ImGui::TableSetupColumn("Time", ImGuiTableColumnFlags_WidthFixed, 70);
         ImGui::TableSetupColumn("From", ImGuiTableColumnFlags_WidthFixed, 70);
@@ -15178,6 +15203,54 @@ static void networkView(State& st) {
     ImGui::PopFont();
 }
 
+// Play's output, in the status bar's popup or docked in the Console tab
+// (`docked`: the lines fill the room left above Stop and Restart). Relayed,
+// Output (the focused console's lines) or Network (the relay's packets).
+// The popup offers Dock, the Console tab Pop up: either moves it.
+static void playOutput(State& st, const editor::Document& doc, bool docked) {
+    State::Play& p = st.play;
+    const bool network = p.relay && p.outputTab == 1;
+    const int shownConsole = p.players >= 2 && p.focus < p.players ? p.focus : 0;
+    const bool running = p.cons[0].emu.running();
+    const float footH = size::field + 6 + ImGui::GetStyle().ItemSpacing.y;
+    if (p.relay) {
+        const ImVec2 c = ImGui::GetCursorScreenPos();
+        ImVec2 at = c;
+        const float maxX = c.x + ImGui::GetContentRegionAvail().x;
+        if (netChip("play.tab.output", at, c.x, maxX, "Output of console " + std::to_string(shownConsole + 1), color::accent, !network,
+                    "What the console with the keyboard printed; click a console in the Game view to read another"))
+            p.outputTab = 0;
+        if (netChip("play.tab.network", at, c.x, maxX, "Network", color::accent, network, "Every packet the relay routed between the consoles"))
+            p.outputTab = 1;
+        ImGui::SetCursorScreenPos(ImVec2(c.x, at.y + 24 + space::sm));
+        scriptLine("play.tab", std::string("play: output tab ") + (network ? "network" : "output"));
+    }
+    if (network) networkView(st, docked ? -footH : 340);
+    else {
+        State::Play::Console& c = p.cons[size_t(shownConsole)];
+        outputLog(st, "play", c.emu.output(), c.emu.lineCount(), c.log, docked ? -footH : 360);
+    }
+    const ImVec2 c = ImGui::GetCursorScreenPos();
+    if (running) {
+        float ws = 0;
+        if (button("stopplay", c, icon::square, "Stop", ButtonKind::Secondary, &ws)) stopPlay(p);
+        else if (button("restartplay", ImVec2(c.x + ws + space::sm, c.y), icon::restart, "Restart", ButtonKind::Secondary, nullptr,
+                        "Stop, rebuild and run again (Ctrl+Shift+F5)"))
+            restartPlay(st, doc);
+    }
+    const char* moveLabel = docked ? "Pop up" : "Dock";
+    const float mw = buttonWidth(icon::panelTop, moveLabel);
+    const ImVec2 mp(c.x + ImGui::GetContentRegionAvail().x - mw, c.y);
+    if (button(docked ? "play.popup" : "play.dock", mp, icon::panelTop, moveLabel, ButtonKind::Ghost, nullptr,
+               docked ? "Show the output in a popup off the status bar again, as it was"
+                      : "Keep the output on screen in a Console tab beside the Project panel")) {
+        setConsoleDocked(st, !docked);
+        if (docked) p.openOutput = true;
+    }
+    nameRect(docked ? "play.popup" : "play.dock", ImRect(mp, mp + ImVec2(mw, size::field + 6)));
+    ImGui::Dummy(ImVec2(1, size::field + 6));
+}
+
 // Status bar entry for Play: building, running (click for its output), how
 // it ended, or why it did not start.
 static float playStatus(ImDrawList* dl, ImRect bar, float x, float maxX, State& st, const editor::Document& doc) {
@@ -15212,15 +15285,19 @@ static float playStatus(ImDrawList* dl, ImRect bar, float x, float maxX, State& 
     nameRect("playstatus", r);
     if (label != whole) tooltip(whole.c_str());
     scriptLine("playstatus", "playstatus: " + whole);
-    if (hasOutput) {
+    if (hasOutput || p.tools.consoleDocked) {
         dl->AddRectFilled(r.Min, r.Max, lerpColor(color::raised, color::hover, h.hover), radius::pill);
-        if (h.clicked) ImGui::OpenPopup("##playoutput");
+        // Docked, the click brings the Console tab to the front instead.
+        if (h.clicked && p.tools.consoleDocked) st.bottomTab = State::BottomTab::Console;
+        else if (h.clicked || (p.openOutput && hasOutput)) ImGui::OpenPopup("##playoutput");
     }
+    p.openOutput = false;
     if (dot) dl->AddCircleFilled(ImVec2(r.Min.x + 12, r.GetCenter().y), 3.5f, dot, 12);
     text(dl, ImVec2(r.Min.x + pad, bar.Min.y + (size::statusBar - ls.y) * 0.5f), f.medium, type::caption, tone, label.c_str());
 
     const bool network = p.relay && p.outputTab == 1;
     const float popupW = network ? 900.0f : 720.0f;
+    if (p.tools.consoleDocked) return r.Max.x + space::md;  // the Console tab shows it
     // Kept inside the window: the status entry sits well right of the middle.
     const float popupX = std::max(space::sm, std::min(r.Min.x, ImGui::GetIO().DisplaySize.x - popupW - space::sm));
     ImGui::SetNextWindowPos(ImVec2(popupX, r.Min.y - space::xs), ImGuiCond_Always, ImVec2(0, 1));
@@ -15230,36 +15307,63 @@ static float playStatus(ImDrawList* dl, ImRect bar, float x, float maxX, State& 
     ImGui::PopStyleVar(4);
     ImGui::PopStyleColor(2);
     if (!open) return r.Max.x + space::md;
-    // Relayed: Output (the focused console's lines) or Network (the relay's packets).
-    const int shownConsole = p.players >= 2 && p.focus < p.players ? p.focus : 0;
-    if (p.relay) {
-        const ImVec2 c = ImGui::GetCursorScreenPos();
-        ImVec2 at = c;
-        const float maxX = c.x + ImGui::GetContentRegionAvail().x;
-        if (netChip("play.tab.output", at, c.x, maxX, "Output of console " + std::to_string(shownConsole + 1), color::accent, !network,
-                    "What the console with the keyboard printed; click a console in the Game view to read another"))
-            p.outputTab = 0;
-        if (netChip("play.tab.network", at, c.x, maxX, "Network", color::accent, network, "Every packet the relay routed between the consoles"))
-            p.outputTab = 1;
-        ImGui::SetCursorScreenPos(ImVec2(c.x, at.y + 24 + space::sm));
-        scriptLine("play.tab", std::string("play: output tab ") + (network ? "network" : "output"));
-    }
-    if (network) networkView(st);
-    else {
-        State::Play::Console& c = p.cons[size_t(shownConsole)];
-        outputLog(st, "play", c.emu.output(), c.emu.lineCount(), c.log);
-    }
-    if (p.cons[0].emu.running()) {
-        ImVec2 c = ImGui::GetCursorScreenPos();
-        float ws = 0;
-        if (button("stopplay", c, icon::square, "Stop", ButtonKind::Secondary, &ws)) stopPlay(p);
-        else if (button("restartplay", ImVec2(c.x + ws + space::sm, c.y), icon::restart, "Restart", ButtonKind::Secondary, nullptr,
-                        "Stop, rebuild and run again (Ctrl+Shift+F5)"))
-            restartPlay(st, doc);
-        ImGui::Dummy(ImVec2(1, size::field + 6));
-    }
+    playOutput(st, doc, false);
+    if (p.tools.consoleDocked) ImGui::CloseCurrentPopup();  // Dock was clicked
     ImGui::EndPopup();
     return r.Max.x + space::md;
+}
+
+// The Console tab (#345): Play's output docked at the bottom of the middle
+// panel like the Frame tab, so it stays on screen beside the Scene, UI or
+// script tab and the Game view. consoleDock takes the bottom of `area` (the
+// bar above it drags its height) and returns what is left above.
+static ImRect consoleDock(State& st, ImRect area) {
+    const float g = size::gutter, lo = 160;
+    const float hi = std::max(lo, area.GetHeight() - 160);
+    st.consoleHeight = std::clamp(st.consoleHeight, lo, hi);
+    const ImRect bar(ImVec2(area.Min.x, area.Max.y - st.consoleHeight - g), ImVec2(area.Max.x, area.Max.y - st.consoleHeight));
+    ImGui::SetCursorScreenPos(bar.Min);
+    ImGui::InvisibleButton("##consolesplit", ImMax(bar.GetSize(), ImVec2(1, 1)));
+    nameRect("console.split", bar);
+    if (ImGui::IsItemHovered() || ImGui::IsItemActive()) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
+    if (ImGui::IsItemActive()) st.consoleHeight = std::clamp(st.consoleHeight - ImGui::GetIO().MouseDelta.y, lo, hi);
+    st.consoleRect = ImRect(ImVec2(area.Min.x, area.Max.y - st.consoleHeight), area.Max);
+    return ImRect(area.Min, ImVec2(area.Max.x, bar.Min.y));
+}
+
+static void consoleTab(State& st, ImDrawList* dl, const editor::Document& doc, float tabsW) {
+    State::Play& p = st.play;
+    const ImRect r = st.consoleRect;
+    constexpr float headerH = 46, pad = 10;
+    dl->AddRectFilled(r.Min, r.Max, color::panel, radius::window);
+    dl->AddRect(r.Min, r.Max, color::border, radius::window);
+    const ImRect head(r.Min, ImVec2(r.Max.x, r.Min.y + headerH));
+    dl->AddLine(ImVec2(head.Min.x, head.Max.y - 0.5f), ImVec2(head.Max.x, head.Max.y - 0.5f), color::border);
+    dockTabs(st, dl, ImRect(head.Min, ImVec2(head.Min.x + tabsW, head.Max.y)));
+    nameRect("console.panel", r);
+    const ImRect body(ImVec2(r.Min.x + pad, head.Max.y + pad), ImVec2(r.Max.x - pad, r.Max.y - pad));
+    const bool hasOutput = !p.cons[0].emu.output().empty() || p.relay;
+    if (!hasOutput) {
+        Fonts& f = fonts();
+        const float cy = head.GetCenter().y;
+        text(dl, ImVec2(head.Min.x + tabsW + space::md, cy - 8), f.medium, type::label, color::textDim,
+             p.build.valid() ? "Building for Play..." : "Nothing printed yet: Play (F5) prints here.");
+        const char* label = "Pop up";
+        const float mw = buttonWidth(icon::panelTop, label);
+        const ImVec2 mp(head.Max.x - space::md - mw, cy - (size::field + 6) / 2);
+        if (button("play.popup", mp, icon::panelTop, label, ButtonKind::Ghost, nullptr,
+                   "Show the output in a popup off the status bar again, as it was"))
+            setConsoleDocked(st, false);
+        nameRect("play.popup", ImRect(mp, mp + ImVec2(mw, size::field + 6)));
+        scriptLine("console.dock", "console: docked, empty");
+        return;
+    }
+    ImGui::SetCursorScreenPos(body.Min);
+    ImGui::BeginChild("##consoletab", body.GetSize(), ImGuiChildFlags_None, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse |
+                                                                               ImGuiWindowFlags_NoBackground);
+    playOutput(st, doc, true);
+    ImGui::EndChild();
+    scriptLine("console.dock", "console: docked");
 }
 
 // Status bar entry for Run on hardware: building, uploading, running (click
@@ -16259,6 +16363,10 @@ ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view,
     st.timelineShows = st.timeline.shows;
     st.frameWasOpen = st.frame.open;
     st.frameShows = st.frame.shows;
+    // A new Play brings the docked console to the front.
+    if (!st.play.tools.consoleDocked && st.bottomTab == State::BottomTab::Console) st.bottomTab = State::BottomTab::Project;
+    if (st.play.tools.consoleDocked && st.play.cons[0].emu.running() && !st.consoleWasRunning) st.bottomTab = State::BottomTab::Console;
+    st.consoleWasRunning = st.play.cons[0].emu.running();
     // The timeline takes Delete and Space while it has focus, before the
     // scene's shortcuts see them; only while its tab is in front.
     if (timelineInFront(st)) st.timeline.takeKeys(doc);
@@ -16323,7 +16431,7 @@ ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view,
     }
     // The bottom dock: the tab in front takes its height from the bottom of
     // the middle panel; the other is not drawn until it is picked.
-    const bool tl = timelineInFront(st), fr = frameInFront(st);
+    const bool tl = timelineInFront(st), fr = frameInFront(st), co = consoleInFront(st);
     const float tabsW = dockTabsWidth(st);
     auto tabs = [&st](ImDrawList* d, ImRect r) { dockTabs(st, d, r); };
     st.timeline.tabs = tabs;
@@ -16333,7 +16441,18 @@ ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view,
     st.assets.tabs = tabs;
     st.assets.tabsWidth = tabsW;
     st.scripts.setTilesTab(doc.scene().tilemap.has_value());
-    const ImRect body = st.scripts.tabStrip(dl, tl ? st.timeline.dock(mid) : fr ? st.frame.dock(mid) : st.assets.dock(mid));
+    ImRect body = st.scripts.tabStrip(dl, tl   ? st.timeline.dock(mid)
+                                          : fr ? st.frame.dock(mid)
+                                          : co ? consoleDock(st, mid)
+                                               : st.assets.dock(mid));
+    if (co) consoleTab(st, dl, doc, tabsW);
+    // While a game runs the Game view shares the tab's room: the Scene tab's
+    // always, the UI, Tilemap and script tabs' too unless View > Game View on
+    // Every Tab is off (#345).
+    const bool gameShown = st.play.cons[0].game.attached() && (st.scripts.sceneShown() || st.play.tools.gameEveryTab);
+    if (gameShown) body = splitViewport(st, dl, body);
+    scriptLine("game.shown", std::string("game: shown ") + (gameShown ? "yes" : "no") + " every tab " +
+                                 (st.play.tools.gameEveryTab ? "on" : "off"));
     // The timeline takes this frame's scrub first, so the Scene draws the
     // pose at the new scrub head now rather than a frame late (empty when
     // closed or behind the Project tab).
@@ -16362,6 +16481,8 @@ ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view,
     } else if (st.scripts.uiShown()) {
         // Its safe-area toggle is saved with Play's tools, like the Game view's.
         st.canvasView.safeArea = st.play.tools.uiSafeArea;
+        // The game beside it with the keyboard: its keys are the controller.
+        st.canvasView.takeKeys = !(gameShown && st.play.gameFocus);
         st.canvasView.draw(dl, body, doc);
         if (st.canvasView.safeArea != st.play.tools.uiSafeArea) {
             st.play.tools.uiSafeArea = st.canvasView.safeArea;
@@ -16394,7 +16515,7 @@ ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view,
         if (!ec && !rel.empty()) savedScripts.push_back(utf8(rel.generic_u8string()));
     }
     if (!savedScripts.empty()) doc.refreshAssets(savedScripts);
-    if (!tl && !fr) st.assets.draw(dl, doc);
+    if (!tl && !fr && !co) st.assets.draw(dl, doc);
     // Project files renamed, moved or deleted (or that undone): open script
     // tabs follow their file; a move an undo or redo could not make is said.
     // A blocks tab's menu asked for its script as Lua.

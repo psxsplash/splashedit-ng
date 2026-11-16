@@ -675,6 +675,17 @@ it under `xvfb-run`).
 
     python3 gameviewcheck.py <splashedit> [screenshot prefix]
 
+`gamedockcheck.py` starts Play against the same stand-in. On the UI tab and on a script tab the
+Game view must stay drawn beside the tab (right of the UI canvas, not over it); with
+`game_every_tab=0` in the play settings, or View > Game View on Every Tab turned off, the UI tab
+must show without it while the Scene tab still splits. View > Console must dock Play's output as
+a Console tab under the middle panel, the Game view above it and no popup open; docked, the status
+bar entry must bring the tab back to the front, and Pop up must put the output back in the status
+bar's popup. Both choices must be saved in the play settings. Needs a display (CI runs it under
+`xvfb-run`).
+
+    python3 gamedockcheck.py <splashedit> [screenshot prefix]
+
 `linkplaycheck.py` plays a copy of the courtyard whose scripts call `Net.Connect()` and
 `Net.Send()` with 2 linked consoles, on a real pcsx-redux: both views must show frames, their
 status lines must reach Linked with exactly one host, slots 0 and 1 and the no-Network-id hint;

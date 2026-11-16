@@ -60,6 +60,8 @@ PlayTools loadPlayTools(const fs::path& file) {
         else if (key == "game_fps") t.gameFps = value == "1";
         else if (key == "ui_safe_area") t.uiSafeArea = value == "1";
         else if (key == "scale_lock") t.scaleLock = value == "1";
+        else if (key == "game_every_tab") t.gameEveryTab = value != "0";
+        else if (key == "console_docked") t.consoleDocked = value == "1";
     }
     return t;
 }
@@ -87,7 +89,9 @@ bool savePlayTools(const fs::path& file, const PlayTools& t) {
         << "game_crop=" << gameCropName(t.gameCrop) << "\n"
         << "game_fps=" << (t.gameFps ? 1 : 0) << "\n"
         << "ui_safe_area=" << (t.uiSafeArea ? 1 : 0) << "\n"
-        << "scale_lock=" << (t.scaleLock ? 1 : 0) << "\n";
+        << "scale_lock=" << (t.scaleLock ? 1 : 0) << "\n"
+        << "game_every_tab=" << (t.gameEveryTab ? 1 : 0) << "\n"
+        << "console_docked=" << (t.consoleDocked ? 1 : 0) << "\n";
     return bool(out);
 }
 
