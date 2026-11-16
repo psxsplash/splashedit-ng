@@ -1616,6 +1616,30 @@ splash::Quat quatEuler(splash::Vec3 deg) {
             float(cy * cx * cz + sy * sx * sz)};
 }
 
+splash::SkinPlay skinPlay(const ObjectPose::Skin& pose, const std::vector<splash::BakedClip>& clips) {
+    splash::SkinPlay p;
+    if (clips.empty()) return p;
+    // A clip that plays once stops at its end; the engine stops advancing it.
+    auto run = [&](int c, int n, uint16_t* f, uint16_t* sf, bool* playing) {
+        const splash::BakedClip& clip = clips[size_t(c)];
+        for (int i = 0; i < n && *playing; i++)
+            if (splash::skinAdvance(clip, false, f, sf, 4096)) *playing = false;
+    };
+    auto index = [&](int c) { return c >= 0 && size_t(c) < clips.size() ? c : 0; };
+    p.clip = index(pose.clip);
+    bool playing = true;
+    run(p.clip, pose.frames, &p.frame, &p.subFrame, &playing);
+    if (pose.fromClip >= 0 && pose.frames < pose.fadeFrames) {
+        p.prevClip = index(pose.fromClip);
+        bool prevPlaying = true;
+        run(p.prevClip, pose.fromFrames, &p.prevFrame, &p.prevSubFrame, &prevPlaying);
+        run(p.prevClip, pose.frames, &p.prevFrame, &p.prevSubFrame, &prevPlaying);
+        p.fadeLength = pose.fadeFrames;
+        p.fadePos = uint32_t(pose.frames) << 12;
+    }
+    return p;
+}
+
 void applyPreview(splash::Scene& scene, const Preview& preview) {
     // Objects, then lights: a light's pose is an object pose (its position)
     // plus the light component's own fields.

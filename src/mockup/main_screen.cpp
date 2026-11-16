@@ -13894,6 +13894,70 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                 if (!body.empty()) card("skinlong", "Long clip", body + " Lower the bake rate or trim the clip.", nullptr);
             }
         }
+        // The Scene view preview (obj.skinprev, obj.skinframe, obj.skinplay,
+        // obj.skinfrom, obj.skinfade): a clip as psxsplash plays it, maybe
+        // crossfading from another, while this section is on screen. Not saved.
+        {
+            State::SkinPreview& sp = st.skinPreview;
+            if (sp.object != o->name) sp = State::SkinPreview{}, sp.object = o->name, sp.pose.fadeFrames = 15;
+            sp.drawnFrame = ImGui::GetFrameCount();
+            const int n = int(sk.clips.size());
+            if (sp.pose.clip >= n) sp.on = false, sp.pose.clip = 0;
+            if (sp.pose.fromClip >= n) sp.pose.fromClip = -1;
+            std::vector<std::string> names;
+            for (const std::string& c : sk.clips) {
+                const std::optional<ClipInfo> ci = clipInfo(doc.projectRoot() / std::filesystem::path(c));
+                names.push_back(ci ? ci->name : std::filesystem::path(c).stem().string());
+            }
+            std::vector<const char*> clipItems{"Off"}, fromItems{"None"};
+            for (const std::string& nm : names) clipItems.push_back(nm.c_str()), fromItems.push_back(nm.c_str());
+            const ImRect pr = row("lskinprev", "Preview", "Shows a clip in the Scene view the way psxsplash plays it. Nothing is saved.");
+            nameRect("obj.skinprev", pr);
+            const int cur = sp.on ? sp.pose.clip + 1 : 0;
+            if (const int pick = dropdownMenu("skinprev", pr, nullptr, clipItems[size_t(cur)], clipItems, cur); pick >= 0) {
+                sp.on = pick > 0;
+                sp.pose.clip = std::max(0, pick - 1);
+                sp.pose.frames = 0;
+                sp.playing = false;
+            }
+            const float dimTop = y;
+            // Frames at 30 fps since the clip started; the button runs them on.
+            const ImRect fr = row("lskinframe", "Frame", "30 fps frames since SkinnedAnim.Play started the clip. Drag to scrub, or play.");
+            const float bw = fr.GetHeight();
+            const ImRect nf(fr.Min, ImVec2(fr.Max.x - bw - space::xs, fr.Max.y)), pb(ImVec2(fr.Max.x - bw, fr.Min.y), fr.Max);
+            nameRect("obj.skinframe", nf);
+            nameRect("obj.skinplay", pb);
+            float nv = float(sp.pose.frames);
+            const std::string shown = std::to_string(sp.pose.frames);
+            if (numberField("skinframe", nf, shown.c_str(), "frames", 0, nullptr, &nv, true).changed) {
+                sp.pose.frames = uint16_t(std::clamp(std::lround(nv), 0l, 65535l));
+                sp.playing = false;
+            }
+            if (iconButton("skinplay", pb, icon::play, sp.playing, sp.playing ? "Stop" : "Play at 30 fps") && sp.on)
+                sp.playing = !sp.playing, sp.carry = 0;
+            if (sp.playing && sp.on) {
+                sp.carry += ImGui::GetIO().DeltaTime;
+                for (; sp.carry >= 1.f / 30.f; sp.carry -= 1.f / 30.f) sp.pose.frames = uint16_t(sp.pose.frames == 65535 ? 0 : sp.pose.frames + 1);
+            }
+            const ImRect cr = row("lskinfrom", "Crossfade from", "The clip that was playing when this one started, from its first frame: "
+                                                                "SkinnedAnim.Play's fade blends out of it over the frames below.");
+            nameRect("obj.skinfrom", cr);
+            const int fcur = sp.pose.fromClip + 1;
+            if (const int pick = dropdownMenu("skinfrom", cr, nullptr, fromItems[size_t(fcur)], fromItems, fcur); pick >= 0)
+                sp.pose.fromClip = pick - 1;
+            const ImRect dr = row("lskinfade", "Fade", "The crossfade's length in 30 fps frames, as SkinnedAnim.Play takes it.");
+            nameRect("obj.skinfade", dr);
+            float fv = float(sp.pose.fadeFrames);
+            const std::string fshown = std::to_string(sp.pose.fadeFrames);
+            if (numberField("skinfade", dr, fshown.c_str(), "frames", 0, nullptr, &fv, true).changed)
+                sp.pose.fadeFrames = uint16_t(std::clamp(std::lround(fv), 0l, 65535l));
+            if (!sp.on) dimFrom(dimTop);
+            report("skinprev", !sp.on ? "skinpreview: " + o->name + " off"
+                                      : "skinpreview: " + o->name + " clip " + names[size_t(sp.pose.clip)] + " frame " +
+                                            std::to_string(sp.pose.frames) + " from " +
+                                            (sp.pose.fromClip < 0 ? std::string("none") : names[size_t(sp.pose.fromClip)]) + " fade " +
+                                            std::to_string(sp.pose.fadeFrames));
+        }
         sectionEnd(top);
     }
 
@@ -15917,7 +15981,13 @@ ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view,
             st.frame.notice.clear();
         }
     }
-    view.setPreview(tl ? st.timeline.preview(doc) : editor::Preview{});
+    {
+        editor::Preview pv = tl ? st.timeline.preview(doc) : editor::Preview{};
+        // The Skinned animation section's pose, while the section is on screen.
+        const State::SkinPreview& sp = st.skinPreview;
+        if (sp.on && !sp.object.empty() && sp.drawnFrame >= ImGui::GetFrameCount() - 1) pv.objects[sp.object].skin = sp.pose;
+        view.setPreview(pv);
+    }
     {
         const std::optional<splash::ExportResult>& live = st.live.result();
         view.setDrawDistance(live && live->ok() ? live->stats.orderingTableSize : 0);

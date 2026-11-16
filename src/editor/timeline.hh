@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "scene.hh"
+#include "skin.hh"
 
 namespace editor {
 
@@ -291,6 +292,19 @@ struct ObjectPose {
     std::optional<splash::Vec3> rotation;  // degrees, Quaternion.Euler, world space
     std::optional<bool> active;
     std::optional<std::array<float, 2>> uvOffset;  // texels, on the mesh's uvOffsetMaterial
+    // A skinned object's pose: one of its skin clips, maybe crossfading from
+    // another, as psxsplash has it `frames` 30 fps frames after
+    // SkinnedAnim.Play started the clip (the fade frame k is min(frames, N)).
+    // The Scene view draws the mesh bent by the bones the engine computes.
+    struct Skin {
+        int clip = 0;        // index into the skin's clips
+        uint16_t frames = 0;  // 30 fps frames since the clip started
+        int fromClip = -1;   // -1: no crossfade
+        uint16_t fromFrames = 0;  // how long the clip faded from had played when this one started
+        uint16_t fadeFrames = 0;  // N, 30 fps frames
+        bool operator==(const Skin&) const = default;
+    };
+    std::optional<Skin> skin;
     bool operator==(const ObjectPose&) const = default;
 };
 // A runtime point light's tracks.
@@ -324,6 +338,11 @@ Preview samplePreview(const Document& doc, SeqRef ref, float frame);
 // light's object (the Scene view lights from the scene it draws). UV offsets
 // are the renderer's to apply.
 void applyPreview(splash::Scene& scene, const Preview& preview);
+// The engine state a skin pose stands for, over the skin's baked clips:
+// each clip moved on from frame 0 one 30 fps frame at a time
+// (SkinPose_Advance, dt 4096), the faded-from one for fromFrames and then
+// frames more; the fade runs while frames < fadeFrames.
+splash::SkinPlay skinPlay(const ObjectPose::Skin& pose, const std::vector<splash::BakedClip>& clips);
 // Quaternion.Euler: about Z, then X, then Y (degrees).
 splash::Quat quatEuler(splash::Vec3 deg);
 

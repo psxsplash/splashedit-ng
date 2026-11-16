@@ -517,6 +517,16 @@ struct State {
 
     // Cutscene and animation tracks, docked under the Scene.
     ui::TimelinePanel timeline;
+    // The Skinned animation section's preview: the Scene view draws `object`
+    // in this pose (editor::ObjectPose::Skin) while `on`. Never saved.
+    struct SkinPreview {
+        std::string object;
+        bool on = false;
+        editor::ObjectPose::Skin pose;
+        bool playing = false;
+        float carry = 0;  // seconds toward the next 30 fps frame while playing
+        int drawnFrame = -10;  // ImGui frame the section last drew: the pose shows while it is on screen
+    } skinPreview;
 
     // Inspector texture preview: Source vs PS1, converted off the UI thread.
     ui::TexturePreviewView texPreview;

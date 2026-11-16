@@ -20871,6 +20871,99 @@ void testMeterFixSimplify() {
 
 // The Game view's TV preview (editor/tv_preview.hh): safe areas on whole
 // pixels, the frame 4:3 or square, and the S-video and composite looks.
+// The Scene view's skin preview runs psxsplash's crossfade (skinpose.cpp)
+// over the frames bakeClip writes (#244).
+static void testSkinCrossfade() {
+    const double kPi = 3.14159265358979323846;
+    splash::MeshSkin skin;
+    skin.joints.push_back({"root", -1, {0.5f, 0, 0}, {}, {1, 1, 1}});
+    skin.vertexJoints = {{0, 0, 0, 0}};
+    skin.vertexWeights = {{1, 0, 0, 0}};
+    // A: the rest pose. B: 160 degrees about Z and the joint 1 up, which the
+    // Y flip makes -160 in the PS1's space. The engine's quaternions of the
+    // two 4.12 matrices (w, x, y, z) are about (1, 0, 0, 0) and
+    // (-0.17, 0, 0, 0.98): a negative dot, so only the shortest-path flip
+    // keeps the fade on the 160 degree arc instead of the 200 degree one.
+    splash::AnimClip a{"a", 1, true, {}}, b{"b", 1, true, {}};
+    const float h = float(80 * kPi / 180);
+    b.channels.push_back({"root", splash::AnimProperty::Rotation, splash::AnimInterp::Linear, {0, 1},
+                          {0, 0, std::sin(h), std::cos(h), 0, 0, std::sin(h), std::cos(h)}});
+    b.channels.push_back({"root", splash::AnimProperty::Position, splash::AnimInterp::Linear, {0, 1}, {0.5f, 1, 0, 0.5f, 1, 0}});
+    std::vector<std::string> errs;
+    bool clamped = false;
+    std::vector<splash::BakedClip> clips{splash::bakeClip(skin, a, 15, {1, 1, 1}, 1, errs, clamped),
+                                         splash::bakeClip(skin, b, 15, {1, 1, 1}, 1, errs, clamped)};
+    const auto bind = splash::bindPositions(skin, {1, 1, 1}, 1, errs, clamped);
+    CHECK(errs.empty() && !clamped && clips[0].frameCount == 15 && clips[1].frameCount == 15);
+    CHECK(bind.size() == 1 && bind[0][0] == 2048 && bind[0][1] == 0 && bind[0][2] == 0);
+
+    splash::SkinPlay p;
+    p.clip = 1;
+    p.prevClip = 0;
+    p.fadeLength = 8;
+    std::vector<splash::BoneMatrix> out;
+    // k = 0 is clip A's pose, byte for byte; k = N is clip B's.
+    p.fadePos = 0;
+    CHECK(splash::skinPose(clips, bind, p, out) && out.size() == 1 && out[0] == clips[0].frames[0]);
+    p.fadePos = 8u << 12;
+    CHECK(splash::skinPose(clips, bind, p, out) && out[0] == clips[1].frames[0]);
+    CHECK(splash::skinFadeWeight(3u << 12, 8) == 3 * 4096 / 8 && splash::skinFadeWeight(0, 0) == 4096);
+    // The same through the editor's pose: Play(b) with an 8 frame fade from a.
+    editor::ObjectPose::Skin pose;
+    pose.clip = 1, pose.fromClip = 0, pose.fadeFrames = 8;
+    CHECK(splash::skinPose(clips, bind, editor::skinPlay(pose, clips), out) && out[0] == clips[0].frames[0]);
+    pose.frames = 8;
+    CHECK(splash::skinPose(clips, bind, editor::skinPlay(pose, clips), out) && out[0] == clips[1].frames[0]);
+    // 8 frames at 30 fps is 4 baked frames at 15.
+    CHECK(editor::skinPlay(pose, clips).frame == 4 && editor::skinPlay(pose, clips).subFrame == 0);
+
+    // Midway, k = 4 of 8, against the nlerp by hand: A's (1, 0, 0, 0) and
+    // B's quaternion on A's side, (cos -80, 0, 0, sin -80), averaged and
+    // normalised, as a matrix (-80 degrees about Z).
+    p.fadePos = 4u << 12;
+    CHECK(splash::skinPose(clips, bind, p, out));
+    const splash::BoneMatrix& m = out[0];
+    double qw = (1 + std::cos(-80 * kPi / 180)) / 2, qz = std::sin(-80 * kPi / 180) / 2;
+    const double qn = std::sqrt(qw * qw + qz * qz);
+    qw /= qn, qz /= qn;
+    const double c = (1 - 2 * qz * qz) * 4096, sn = 2 * qw * qz * 4096;
+    const double want[9] = {c, -sn, 0, sn, c, 0, 0, 0, 4096};
+    bool near = true;
+    for (size_t i = 0; i < 9; i++) near = near && std::fabs(double(m[i]) - want[i]) <= 3;
+    CHECK(near);
+    if (!near)
+        std::fprintf(stderr, "skin fade midpoint r = %d %d %d / %d %d %d / %d %d %d, want %.0f %.0f 0 / %.0f %.0f 0 / 0 0 4096\n", m[0], m[1],
+                     m[2], m[3], m[4], m[5], m[6], m[7], m[8], want[0], want[1], want[3], want[4]);
+    // The joint moves on the straight line between its two posed positions
+    // (2048, 0, 0) and (2048, -4096, 0): halfway it is at y -2048.
+    int32_t posed[3];
+    for (int i = 0; i < 3; i++)
+        posed[i] = int32_t(std::lround((double(m[size_t(i * 3)]) * bind[0][0] + double(m[size_t(i * 3 + 1)]) * bind[0][1] +
+                                        double(m[size_t(i * 3 + 2)]) * bind[0][2]) / 4096.0)) + m[size_t(9 + i)];
+    CHECK(std::abs(posed[0] - 2048) <= 1 && std::abs(posed[1] + 2048) <= 1 && std::abs(posed[2]) <= 1);
+
+    // At a rest-pose frame a skinned vertex is where the rest mesh has it,
+    // within one 4.12 GTE unit, under a non-uniform scale and a jointed rest.
+    splash::MeshSkin rest;
+    const float hx = float(15 * kPi / 180);
+    rest.joints.push_back({"hip", -1, {0.2f, 0.3f, -0.1f}, {std::sin(hx), 0, 0, std::cos(hx)}, {1, 1, 1}});
+    rest.joints.push_back({"knee", 0, {0, -0.4f, 0.05f}, {0, std::sin(hx), 0, std::cos(hx)}, {1, 1, 1}});
+    rest.vertexJoints = {{1, 0, 0, 0}};
+    rest.vertexWeights = {{1, 0, 0, 0}};
+    const splash::Vec3 scale{2, 1, 1.5f};
+    const float gte = 4;
+    errs.clear();
+    std::vector<splash::BakedClip> still{splash::bakeClip(rest, splash::AnimClip{"still", 1, false, {}}, 15, scale, gte, errs, clamped)};
+    const auto restBind = splash::bindPositions(rest, scale, gte, errs, clamped);
+    CHECK(errs.empty() && splash::dominantJoints(rest) == std::vector<int>{1});
+    splash::SkinPlay sp;
+    CHECK(splash::skinPose(still, restBind, sp, out) && out.size() == 2);
+    const splash::Vec3 v{0.31f, -0.2f, 0.47f};
+    const splash::Vec3 got = splash::skinVertex(out[1], v, scale, gte);
+    const double d[3] = {(got.x - v.x) * scale.x / gte * 4096, (got.y - v.y) * scale.y / gte * 4096, (got.z - v.z) * scale.z / gte * 4096};
+    CHECK(std::fabs(d[0]) <= 1 && std::fabs(d[1]) <= 1 && std::fabs(d[2]) <= 1);
+}
+
 static void testTvPreview() {
     namespace tv = editor::tv;
     auto eq = [](tv::Rect r, float x0, float y0, float x1, float y1) { return r.x0 == x0 && r.y0 == y0 && r.x1 == x1 && r.y1 == y1; };
@@ -21968,6 +22061,7 @@ int main(int argc, char** argv) {
     testPaletteGroup();
     testMeterFixSimplify();
     testTvPreview();
+    testSkinCrossfade();
     if (g_failures) {
         std::fprintf(stderr, "editor_tests: %d of %d checks failed\n", g_failures, g_checks);
         return 1;
