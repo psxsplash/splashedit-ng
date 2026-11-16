@@ -284,7 +284,7 @@ const Ps1View::SkinBake& Ps1View::skinBake(const splash::FlatObject& fo, const s
     auto stamp = [&](const std::string& p) {
         std::error_code ec;
         auto t = std::filesystem::last_write_time(m_doc->resolve(p), ec);
-        return ec ? std::string("-") : std::to_string(t.time_since_epoch().count());
+        return ec ? std::string("-") : std::to_string(static_cast<long long>(t.time_since_epoch().count()));
     };
     char nums[96];
     std::snprintf(nums, sizeof nums, "%d %.9g %.9g %.9g %.9g", sc.fps, fo.lossyScale.x, fo.lossyScale.y, fo.lossyScale.z, gte);
