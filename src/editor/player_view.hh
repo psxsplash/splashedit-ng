@@ -4,9 +4,13 @@
 
 #include "scene.hh"
 
+#include <array>
+#include <cstdint>
 #include <filesystem>
 #include <optional>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace editor {
 
@@ -66,6 +70,22 @@ std::optional<splash::Vec3> markerArrow(const splash::FlatObject& fo);
 constexpr unsigned kArrowBright = 255;
 constexpr unsigned kArrowDim = 110;
 unsigned markerArrowAlpha(bool selected);
+
+// A light's scene marker is tinted with the light's colour (0..1 per
+// channel, clamped), lifted so its brightest channel is at least kTintFloor:
+// a black or very dark light still reads on the marker's dark disc.
+constexpr float kTintFloor = 0.4f;
+std::array<uint8_t, 3> lightMarkerTint(const std::array<float, 3>& color);
+
+// The player drawn as a stick figure (Unity space) standing at its position,
+// as tall as its PSXPlayer height (the Player view's eye height), facing its
+// yaw: line segments for the body, arms and legs, and a head circle.
+struct StickFigure {
+    std::vector<std::pair<splash::Vec3, splash::Vec3>> lines;
+    splash::Vec3 head;
+    float headRadius = 0;
+};
+StickFigure playerStickFigure(const splash::FlatObject& fo);
 
 // The Player view's H is a preview setting, not part of the scene: stored per
 // project in the editor's own preferences, `file` holding lines of

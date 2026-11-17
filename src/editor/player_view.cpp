@@ -91,6 +91,41 @@ std::optional<splash::Vec3> markerArrow(const splash::FlatObject& fo) {
 
 unsigned markerArrowAlpha(bool selected) { return selected ? kArrowBright : kArrowDim; }
 
+std::array<uint8_t, 3> lightMarkerTint(const std::array<float, 3>& color) {
+    float c[3];
+    for (int i = 0; i < 3; i++) c[i] = std::isfinite(color[size_t(i)]) ? std::clamp(color[size_t(i)], 0.f, 1.f) : 0.f;
+    const float top = std::max({c[0], c[1], c[2]});
+    if (top < kTintFloor) {
+        if (top <= 0) c[0] = c[1] = c[2] = kTintFloor;
+        else
+            for (float& v : c) v *= kTintFloor / top;
+    }
+    std::array<uint8_t, 3> out{};
+    for (int i = 0; i < 3; i++) out[size_t(i)] = uint8_t(std::lround(c[i] * 255.f));
+    return out;
+}
+
+StickFigure playerStickFigure(const splash::FlatObject& fo) {
+    StickFigure f;
+    const float h = fo.object->player ? std::max(fo.object->player->playerHeight, 0.01f) : 1.8f;
+    const PlayerEye e = playerEye(fo);
+    const splash::Vec3 base = fo.worldPosition;
+    const splash::Vec3 up{0, 1, 0};
+    const splash::Vec3 right{e.forward.z, 0, -e.forward.x};  // up x forward, Unity's right
+    auto at = [&](float side, float height) { return base + right * (side * h) + up * (height * h); };
+    f.headRadius = 0.1f * h;
+    f.head = at(0, 0.9f);
+    const splash::Vec3 neck = at(0, 0.8f), shoulders = at(0, 0.74f), hips = at(0, 0.48f);
+    f.lines = {
+        {neck, hips},                     // body
+        {shoulders, at(-0.2f, 0.46f)},    // arms
+        {shoulders, at(0.2f, 0.46f)},
+        {hips, at(-0.12f, 0)},            // legs, the feet on the floor
+        {hips, at(0.12f, 0)},
+    };
+    return f;
+}
+
 namespace {
 std::vector<std::pair<int, std::string>> readLines(const std::filesystem::path& file) {
     std::vector<std::pair<int, std::string>> out;

@@ -990,6 +990,51 @@ void testPlayerViewCamera() {
     CHECK(editor::markerArrowAlpha(false) == editor::kArrowDim && editor::kArrowDim < editor::kArrowBright / 2);
 }
 
+// #355 follow-up: light markers tinted with the light's colour (dark ones
+// lifted so they still read), the player drawn as a stick figure as tall as
+// its player height, standing at its position and facing its yaw.
+void testPlayerMarkers() {
+    using T = std::array<uint8_t, 3>;
+    CHECK((editor::lightMarkerTint({1, 1, 1}) == T{255, 255, 255}));
+    CHECK((editor::lightMarkerTint({1, 0.5f, 0}) == T{255, 128, 0}));
+    CHECK((editor::lightMarkerTint({0.2f, 0.4f, 1}) == T{51, 102, 255}));
+    CHECK((editor::lightMarkerTint({0, 0, 0}) == T{102, 102, 102}));        // black: grey at the floor
+    CHECK((editor::lightMarkerTint({0.1f, 0, 0.2f}) == T{51, 0, 102}));      // dark: hue kept, lifted
+    CHECK((editor::lightMarkerTint({4, -1, 0.5f}) == T{255, 0, 128}));       // out of range: clamped
+
+    auto figureOf = [](float height, splash::Vec3 pos, float yaw) {
+        splash::Scene sc;
+        splash::Object o;
+        o.name = "Player";
+        o.player = splash::PlayerComponent{};
+        o.player->playerHeight = height;
+        o.transform.position = pos;
+        o.transform.rotation = editor::quatEuler({0, yaw, 0});
+        sc.objects = {o};
+        const std::vector<splash::FlatObject> flats = splash::flatten(sc);
+        return editor::playerStickFigure(flats[0]);
+    };
+    for (float height : {1.8f, 1.2f, 3.0f}) {
+        const splash::Vec3 pos{2, 1, -3};
+        const editor::StickFigure fig = figureOf(height, pos, 0);
+        CHECK(fig.lines.size() == 5);
+        float lo = 1e9f, hi = -1e9f;
+        for (const auto& [a, b] : fig.lines) {
+            lo = std::min({lo, a.y, b.y});
+            hi = std::max({hi, a.y, b.y});
+        }
+        hi = std::max(hi, fig.head.y + fig.headRadius);
+        CHECK(std::fabs(lo - pos.y) < 1e-4f);                // feet on its position
+        CHECK(std::fabs(hi - (pos.y + height)) < 1e-4f);     // top of the head at the player height
+        CHECK(std::fabs(fig.head.x - pos.x) < 1e-4f && std::fabs(fig.head.z - pos.z) < 1e-4f);
+    }
+    // Facing its yaw: at yaw 0 the feet spread along X, at yaw 90 along Z.
+    auto feetSpread = [](const editor::StickFigure& fig) { return fig.lines[4].second - fig.lines[3].second; };
+    const splash::Vec3 s0 = feetSpread(figureOf(1.8f, {0, 0, 0}, 0)), s90 = feetSpread(figureOf(1.8f, {0, 0, 0}, 90));
+    CHECK(std::fabs(s0.x) > 0.3f && std::fabs(s0.z) < 1e-4f);
+    CHECK(std::fabs(s90.z) > 0.3f && std::fabs(s90.x) < 1e-4f);
+}
+
 // #356: the Player view's H is kept per project in the editor's preferences.
 void testPlayerViewHStore() {
     namespace fs = std::filesystem;
@@ -22038,6 +22083,7 @@ int main(int argc, char** argv) {
     testPlayerViewFov();
     testPlayerViewCamera();
     testPlayerViewHStore();
+    testPlayerMarkers();
     testScaleClamp();
     testScalePlane();
     testLockedScale();

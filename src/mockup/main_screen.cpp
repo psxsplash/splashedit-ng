@@ -7884,12 +7884,37 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
     // on the rest. Drawn under the markers; the player's own is left out of
     // the Player view, which looks along it.
     std::string arrowReport;
+    // The player as a stick figure as tall as its player height, standing on
+    // its marker and facing its yaw (#355); bright when selected as its arrow is.
+    for (size_t i = 0; i < shown.size() && i < flats.size(); ++i) {
+        if (!flats[i].object->player || (viewPlayer && flats[i].object == viewPlayer->object)) continue;
+        const bool chosen = flats[i].object == sel || (multi && i < paths.size() && doc.isSelected(paths[i]));
+        const ImU32 col = (kind::player & 0x00ffffffu) | (editor::markerArrowAlpha(chosen) << IM_COL32_A_SHIFT);
+        const ImU32 edge = rgb(0x0e1014, int(editor::markerArrowAlpha(chosen) * 0.55f));
+        const editor::StickFigure fig = editor::playerStickFigure(shown[i]);
+        const float thick = chosen ? 2.5f : 1.75f;
+        for (const auto& [a, b] : fig.lines) {
+            ImVec2 sa, sb;
+            if (!view.project(toGl(a), mn, sz, &sa) || !view.project(toGl(b), mn, sz, &sb)) continue;
+            dl->AddLine(sa, sb, edge, thick + 2.0f);
+            dl->AddLine(sa, sb, col, thick);
+        }
+        ImVec2 hc, ht;
+        if (view.project(toGl(fig.head), mn, sz, &hc) && view.project(toGl(fig.head + splash::Vec3{0, fig.headRadius, 0}), mn, sz, &ht)) {
+            const float hr = std::max(2.0f, std::fabs(hc.y - ht.y));
+            dl->AddCircle(hc, hr, edge, 20, thick + 2.0f);
+            dl->AddCircle(hc, hr, col, 20, thick);
+            if (namedRectsOn()) nameRect("vp.figure." + flats[i].object->name, ImRect(hc - ImVec2(hr, hr), hc + ImVec2(hr, hr)));
+        }
+    }
     for (size_t i = 0; i < shown.size() && i < flats.size(); ++i) {
         const std::optional<splash::Vec3> dir = editor::markerArrow(shown[i]);
         if (!dir || (viewPlayer && flats[i].object == viewPlayer->object)) continue;
         const bool chosen = flats[i].object == sel || (multi && i < paths.size() && doc.isSelected(paths[i]));
         const unsigned a = editor::markerArrowAlpha(chosen);
-        const ImU32 base = flats[i].object->light ? kind::light : kind::player;
+        std::array<uint8_t, 3> tint{};
+        if (flats[i].object->light) tint = editor::lightMarkerTint(flats[i].object->light->color);
+        const ImU32 base = flats[i].object->light ? IM_COL32(tint[0], tint[1], tint[2], 255) : kind::player;
         const ImU32 col = (base & 0x00ffffffu) | (a << IM_COL32_A_SHIFT);
         const splash::Vec3 from = shown[i].localToWorld.position();
         const float len = flats[i].object->player ? std::max(1.5f, flats[i].object->player->playerRadius * 3.0f) : 2.0f;
@@ -7926,7 +7951,11 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
         viewport::Vec3 pos = toGl(shown[i].localToWorld.position());
         const char* ic = nullptr;
         ImU32 col = 0;
-        if (fo.object->light) ic = icon::lightbulb, col = kind::light;
+        if (fo.object->light) {
+            // Tinted with the light's own colour (#355).
+            const std::array<uint8_t, 3> t = editor::lightMarkerTint(fo.object->light->color);
+            ic = icon::lightbulb, col = IM_COL32(t[0], t[1], t[2], 255);
+        }
         else if (!fo.object->mesh && fo.object->children.empty() && !fo.object->script) ic = icon::square, col = kind::folder;
         if (!ic) continue;
         ImGui::PushID((int)i);
