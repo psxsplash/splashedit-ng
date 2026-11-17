@@ -95,6 +95,10 @@ class Ps1View {
     void lookAlong(Vec3 forward);
     void setOrtho(bool on) { m_ortho = on; }
     bool ortho() const { return m_ortho; }
+    // Vertical field of view in radians (kFovY unless the Player view sets
+    // the engine's, #356). Clamped to [0.05, 3.0].
+    void setFovY(float radians) { m_fovY = radians < 0.05f ? 0.05f : radians > 3.0f ? 3.0f : radians; }
+    float fovY() const { return m_fovY; }
     // World units covered by one panel pixel at `depth` in front of the eye.
     float worldPerPixel(float depth, float panelH) const;
     // Index (in splash::flatten order) of the object whose drawn triangles the
@@ -118,9 +122,10 @@ class Ps1View {
     struct Pose {
         Vec3 eye, target;
         bool ortho = false;
+        float fovY = kFovY;
     };
-    Pose pose() const { return {m_eye, m_target, m_ortho}; }
-    void setPose(const Pose& p) { m_eye = p.eye, m_target = p.target, m_ortho = p.ortho; }
+    Pose pose() const { return {m_eye, m_target, m_ortho, m_fovY}; }
+    void setPose(const Pose& p) { m_eye = p.eye, m_target = p.target, m_ortho = p.ortho, m_fovY = p.fovY; }
     static constexpr float kFovY = 0.95f;
     static constexpr float kOrthoBack = 150.0f;  // orthographic: render eye's distance behind the pivot
 
@@ -182,6 +187,7 @@ class Ps1View {
     int m_fboW = 0, m_fboH = 0;
     Vec3 m_eye{7.6f, 5.2f, 9.2f}, m_target{-0.9f, 0.9f, -2.0f};
     bool m_ortho = false;
+    float m_fovY = kFovY;
     Mat4 m_viewProj;
 };
 

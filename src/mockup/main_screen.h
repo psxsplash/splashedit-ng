@@ -61,6 +61,15 @@ struct State {
         int viewMode = 0;
     };
     std::vector<PrefabView> prefabViews;
+    // The scene view's Player view (#356): looking through the player's start
+    // camera with the engine's projection H. `playerViewBack` is the camera to
+    // put back on leaving it. `projH` is a preview setting, kept per project in
+    // the preferences (editor::loadProjectionH), loaded for `projHProject`.
+    bool playerView = false;
+    std::optional<viewport::Ps1View::Pose> playerViewBack;
+    int projH = 120;
+    std::filesystem::path projHProject;
+    bool projHLoaded = false;
     bool framePrefab = false;  // frame the whole prefab once it is drawn
     bool maximized = false;  // set by the main loop each frame; picks the maximize or restore button
     bool quit = false;   // the close button was pressed
