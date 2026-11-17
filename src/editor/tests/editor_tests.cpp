@@ -74,6 +74,7 @@
 #include "strings.hh"
 #include "simplify.hh"
 #include "editor/pivot.hh"
+#include "editor/player_view.hh"
 #include "editor/ui_canvas.hh"
 #include "ui/dialog_gate.hh"
 #include "ui/window_chrome.hh"
@@ -897,6 +898,116 @@ void testGizmoMath() {
     CHECK(nearF(editor::scaleAxis(1, 1.234f, true), 1.2f));
     CHECK(nearF(editor::scaleAxis(1, 1.234f, false), 1.234f));
     CHECK(nearF(editor::scaleAxis(2, 0.5f, false), 1));
+}
+
+// #356: the Player view's field of view from the engine's projection H.
+// H is authored for 320x240, so the horizontal FOV is 2 * atan(160 / H).
+void testPlayerViewFov() {
+    auto nearF = [](float a, float b, float eps = 0.01f) { return std::fabs(a - b) < eps; };
+    CHECK(editor::kDefaultProjectionH == 120);  // psxsplash camera.hh m_projH
+    CHECK(nearF(editor::horizontalFovDegrees(120), 106.26f));
+    CHECK(nearF(editor::horizontalFovDegrees(120, 320), 106.26f));
+    CHECK(nearF(editor::verticalFovDegrees(120), 90.0f));
+    CHECK(nearF(editor::horizontalFovDegrees(160), 90.0f));  // H = half width: 90 degrees across
+    CHECK(nearF(editor::horizontalFovDegrees(240), 67.38f));
+    CHECK(editor::horizontalFovDegrees(60) > editor::horizontalFovDegrees(120));  // smaller H, wider view
+    CHECK(editor::projectionHLabel(120) == "H 120  \xc2\xb7  106.3\xc2\xb0");
+    CHECK(editor::projectionHLabel(240) == "H 240  \xc2\xb7  67.4\xc2\xb0");
+    // The slider round-trips and clamps to its span.
+    CHECK(editor::sliderToProjectionH(editor::projectionHToSlider(120)) == 120);
+    CHECK(editor::sliderToProjectionH(0) == editor::kSliderMinH && editor::sliderToProjectionH(1) == editor::kSliderMaxH);
+    CHECK(editor::sliderToProjectionH(-3) == editor::kSliderMinH && editor::projectionHToSlider(5000) == 1.f);
+    // A 4:3 panel shows the game's frame exactly; the view's vertical FOV is
+    // the engine's (90 degrees at H 120).
+    editor::PlayerFrame f = editor::playerFrame(120, 4.f / 3.f);
+    CHECK(nearF(f.fovY * 180 / editor::kPi, 90.f) && nearF(f.fracW, 1) && nearF(f.fracH, 1));
+    // Wider: the same vertical FOV, the frame a centred part of the width.
+    f = editor::playerFrame(120, 16.f / 9.f);
+    CHECK(nearF(f.fovY * 180 / editor::kPi, 90.f) && nearF(f.fracH, 1) && nearF(f.fracW, 0.75f));
+    // Taller: widened until the game's whole width fits.
+    f = editor::playerFrame(120, 1.f);
+    CHECK(nearF(std::tan(f.fovY / 2), 160.f / 120.f, 1e-4f) && nearF(f.fracW, 1) && nearF(f.fracH, 0.75f));
+}
+
+// #356: the Player view looks from the player's position raised by its
+// height, along its yaw; #355: lights with a direction and the player get an
+// arrow, bright when selected.
+void testPlayerViewCamera() {
+    auto nearF = [](float a, float b) { return std::fabs(a - b) < 1e-3f; };
+    splash::Scene sc;
+    splash::Object ground;
+    ground.name = "Ground";
+    splash::Object player;
+    player.name = "Player";
+    player.player = splash::PlayerComponent{};
+    player.player->playerHeight = 1.5f;
+    player.transform.position = {2, 1, -3};
+    player.transform.rotation = editor::quatEuler({0, 90, 0});
+    splash::Object off = player;  // an inactive player first: the export skips it
+    off.name = "Off";
+    off.active = false;
+    off.transform.position = {50, 0, 50};
+    splash::Object sun;
+    sun.name = "Sun";
+    sun.light = splash::LightComponent{};
+    sun.light->kind = splash::LightKind::Directional;
+    sun.transform.rotation = editor::quatEuler({90, 0, 0});  // pointing straight down
+    splash::Object spot = sun;
+    spot.name = "Spot";
+    spot.light->kind = splash::LightKind::Spot;
+    spot.transform.rotation = editor::quatEuler({0, 0, 0});
+    splash::Object lamp = sun;
+    lamp.name = "Lamp";
+    lamp.light->kind = splash::LightKind::Point;
+    sc.objects = {ground, off, player, sun, spot, lamp};
+    const std::vector<splash::FlatObject> flats = splash::flatten(sc);
+    const splash::FlatObject* pl = editor::scenePlayer(flats);
+    CHECK(pl && pl->object->name == "Player");
+    if (pl) {
+        const editor::PlayerEye e = editor::playerEye(*pl);
+        CHECK(nearV(e.eye, {2, 2.5f, -3}, 1e-4f));      // position + eye height
+        CHECK(nearF(e.yawDegrees, 90));
+        CHECK(nearV(e.forward, {1, 0, 0}, 1e-4f));      // yaw 90 faces +X, as Unity's forward
+        // Pitch and roll do not tilt the start camera's look on the plane.
+        splash::FlatObject tilted = *pl;
+        tilted.worldRotation = editor::quatEuler({30, 180, 0});
+        CHECK(nearV(editor::playerEye(tilted).forward, {0, 0, -1}, 1e-4f));
+        CHECK(editor::markerArrow(*pl).has_value() && nearV(*editor::markerArrow(*pl), {1, 0, 0}, 1e-4f));
+    }
+    CHECK(!editor::scenePlayer(splash::flatten(splash::Scene{})));
+    // Directional and spot lights point along +Z of their rotation; point lights have no arrow.
+    auto arrowOf = [&](const char* name) -> std::optional<splash::Vec3> {
+        for (const splash::FlatObject& fo : flats)
+            if (fo.object->name == name) return editor::markerArrow(fo);
+        return std::nullopt;
+    };
+    CHECK(arrowOf("Sun") && nearV(*arrowOf("Sun"), {0, -1, 0}, 1e-4f));
+    CHECK(arrowOf("Spot") && nearV(*arrowOf("Spot"), {0, 0, 1}, 1e-4f));
+    CHECK(!arrowOf("Lamp"));
+    CHECK(!arrowOf("Ground"));
+    // Bright when selected, dimmed otherwise.
+    CHECK(editor::markerArrowAlpha(true) == editor::kArrowBright && editor::kArrowBright == 255);
+    CHECK(editor::markerArrowAlpha(false) == editor::kArrowDim && editor::kArrowDim < editor::kArrowBright / 2);
+}
+
+// #356: the Player view's H is kept per project in the editor's preferences.
+void testPlayerViewHStore() {
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / ("splashedit-pvh-" + std::to_string(std::rand()));
+    fs::create_directories(dir);
+    const fs::path file = dir / "player-view.cfg";
+    const fs::path a = dir / "projA", b = dir / "projB";
+    CHECK(editor::loadProjectionH(file, a) == editor::kDefaultProjectionH);  // no file yet
+    CHECK(editor::saveProjectionH(file, a, 200));
+    CHECK(editor::saveProjectionH(file, b, 64));
+    CHECK(editor::loadProjectionH(file, a) == 200 && editor::loadProjectionH(file, b) == 64);
+    CHECK(editor::loadProjectionH(file, a / "") == 200);  // a trailing separator is the same project
+    CHECK(editor::saveProjectionH(file, a, 5000));        // clamped to Camera.SetH's 1..1024
+    CHECK(editor::loadProjectionH(file, a) == 1024 && editor::loadProjectionH(file, b) == 64);
+    CHECK(editor::loadProjectionH(file, dir / "projC") == editor::kDefaultProjectionH);
+    CHECK(!editor::saveProjectionH(dir / "missing" / "x.cfg", a, 100));
+    std::error_code ec;
+    fs::remove_all(dir, ec);
 }
 
 // A scale gizmo can never reach zero or flip an object.
@@ -21924,6 +22035,9 @@ int main(int argc, char** argv) {
     testPick();
     testTriggerWorldBox();
     testGizmoMath();
+    testPlayerViewFov();
+    testPlayerViewCamera();
+    testPlayerViewHStore();
     testScaleClamp();
     testScalePlane();
     testLockedScale();

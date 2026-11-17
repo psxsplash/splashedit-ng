@@ -34,6 +34,7 @@
 #include "editor/catalog.hh"
 #include "editor/document.hh"
 #include "editor/gizmo.hh"
+#include "editor/player_view.hh"
 #include "editor/lua_editor.hh"
 #include "editor/memcard.hh"
 #include "editor/pivot.hh"
@@ -7262,8 +7263,41 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
         }
         view.setBlobs(std::move(drawnBlobs));
     }
+    // The Player view (#356): each frame the camera is put at the player's
+    // start eye with the engine's field of view, so what drags and the wheel
+    // did to it last frame do not stick. The axis widget's orthographic views
+    // leave it. Its H is the project's (loaded once per project).
+    if (!st.projHLoaded || st.projHProject != doc.projectRoot()) {
+        st.projHProject = doc.projectRoot();
+        st.projHLoaded = true;
+        st.projH = st.play.prefDir.empty() ? editor::kDefaultProjectionH
+                                           : editor::loadProjectionH(st.play.prefDir / "player-view.cfg", st.projHProject);
+    }
+    if (st.playerView && view.ortho()) {
+        st.playerView = false;
+        st.playerViewBack.reset();
+        view.setFovY(viewport::Ps1View::kFovY);
+    }
+    const splash::FlatObject* viewPlayer = st.playerView ? editor::scenePlayer(flats) : nullptr;
+    const editor::PlayerFrame playerFrame = editor::playerFrame(st.projH, r.GetWidth() / std::max(r.GetHeight(), 1.0f));
+    if (viewPlayer) {
+        const editor::PlayerEye pe = editor::playerEye(*viewPlayer);
+        view.setPose({toGl(pe.eye), toGl(pe.eye + pe.forward * 5.0f), false, playerFrame.fovY});
+    }
     unsigned tex = view.render((int)(r.GetWidth() * fb.x), (int)(r.GetHeight() * fb.y), 240);
     ui::addTextureImageRounded(dl, (ImTextureID)(intptr_t)tex, r.Min, r.Max, ImVec2(0, 1), ImVec2(1, 0), IM_COL32_WHITE, radius::window);
+    if (viewPlayer && (playerFrame.fracW < 0.999f || playerFrame.fracH < 0.999f)) {
+        // Outside the engine's 4:3 frame the game shows nothing: shade it.
+        const ImVec2 c = r.GetCenter(), half(r.GetWidth() * playerFrame.fracW * 0.5f, r.GetHeight() * playerFrame.fracH * 0.5f);
+        const ImRect game(c - half, c + half);
+        const ImU32 shade = rgb(0x0e1014, 200);
+        if (game.Min.x > r.Min.x) dl->AddRectFilled(r.Min, ImVec2(game.Min.x, r.Max.y), shade);
+        if (game.Max.x < r.Max.x) dl->AddRectFilled(ImVec2(game.Max.x, r.Min.y), r.Max, shade);
+        if (game.Min.y > r.Min.y) dl->AddRectFilled(ImVec2(game.Min.x, r.Min.y), ImVec2(game.Max.x, game.Min.y), shade);
+        if (game.Max.y < r.Max.y) dl->AddRectFilled(ImVec2(game.Min.x, game.Max.y), ImVec2(game.Max.x, r.Max.y), shade);
+        dl->AddRect(game.Min, game.Max, rgb(0xffffff, 40));
+        nameRect("vp.playerframe", game);
+    }
 
     ImVec2 mn = r.Min, sz = r.GetSize();
     nameRect("vp.view", r);
@@ -7319,14 +7353,81 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
     }
     float camW = 128;
     ImVec2 rp(r.Max.x - space::md - segW - space::sm - camW, p.y + 2);
-    int cam = dropdownMenu("camera", ImRect(rp, rp + ImVec2(camW, 28)), icon::camera, view.ortho() ? "Orthographic" : "Perspective",
-                           {"Perspective", "Orthographic"}, view.ortho() ? 1 : 0);
-    if (cam >= 0) view.setOrtho(cam == 1);
+    const int camNow = st.playerView ? 2 : view.ortho() ? 1 : 0;
+    const char* const camNames[3] = {"Perspective", "Orthographic", "Player"};
+    nameRect("vp.camera", ImRect(rp, rp + ImVec2(camW, 28)));
+    int cam = dropdownMenu("camera", ImRect(rp, rp + ImVec2(camW, 28)), icon::camera, camNames[camNow],
+                           {"Perspective", "Orthographic", "Player"}, camNow);
+    if (cam >= 0 && cam != camNow) {
+        // Out of the Player view, the camera it replaced comes back.
+        if (st.playerView) {
+            st.playerView = false;
+            if (st.playerViewBack) view.setPose(*st.playerViewBack);
+            st.playerViewBack.reset();
+            view.setFovY(viewport::Ps1View::kFovY);
+        }
+        if (cam == 2) {
+            st.playerViewBack = view.pose();
+            st.playerView = true;
+            view.setOrtho(false);
+        } else {
+            view.setOrtho(cam == 1);
+        }
+    }
+    if (st.playerView) {
+        // The projection H the view uses (Camera.SetH), with the horizontal
+        // field of view it gives on the 320-wide screen.
+        const std::string hl = editor::projectionHLabel(st.projH);
+        const float lw = measure(f.medium, type::label, "H 1024  \xc2\xb7  000.0\xc2\xb0").x;
+        const float pw = 150 + space::md + lw + space::md * 2;
+        // Bottom right, clear of the axis widget and the bottom-left chip.
+        const ImRect pill(ImVec2(r.Max.x - space::md - pw, r.Max.y - space::md - 30), ImVec2(r.Max.x - space::md, r.Max.y - space::md));
+        dl->AddRectFilled(pill.Min, pill.Max, rgb(0x0e1014, 210), radius::button + 2);
+        dl->AddRect(pill.Min, pill.Max, rgb(0xffffff, 14), radius::button + 2);
+        const ImRect track(ImVec2(pill.Min.x + space::md, pill.Min.y + 4), ImVec2(pill.Min.x + space::md + 150, pill.Max.y - 4));
+        nameRect("vp.projh", track);
+        Hit hh = interact("vp.projh", track);
+        const float ty = track.GetCenter().y;
+        const float t = editor::projectionHToSlider(st.projH);
+        const float hx = track.Min.x + t * track.GetWidth();
+        dl->AddRectFilled(ImVec2(track.Min.x, ty - 2), ImVec2(track.Max.x, ty + 2), color::field, 2);
+        dl->AddRectFilled(ImVec2(track.Min.x, ty - 2), ImVec2(hx, ty + 2), color::accent, 2);
+        dl->AddCircleFilled(ImVec2(hx, ty), hh.hover > 0 || hh.held ? 7.f : 6.f, color::text);
+        if (hh.held) {
+            const float u = (ImGui::GetIO().MousePos.x - track.Min.x) / std::max(track.GetWidth(), 1.0f);
+            st.projH = editor::sliderToProjectionH(u);
+        }
+        if (hh.hovered && !hh.held)
+            ImGui::SetTooltip("Projection H (Camera.SetH): the distance to the screen in pixels. "
+                              "The engine starts at %d. Kept for this project in the editor, not in the scene.",
+                              editor::kDefaultProjectionH);
+        if (ImGui::IsItemDeactivated() && !st.play.prefDir.empty() && !doc.projectRoot().empty())
+            editor::saveProjectionH(st.play.prefDir / "player-view.cfg", doc.projectRoot(), st.projH);
+        text(dl, ImVec2(track.Max.x + space::md, centerY(f.medium, type::label, pill.Min.y, pill.Max.y)), f.medium, type::label,
+             color::text, hl.c_str());
+        nameRect("vp.projh.label", ImRect(ImVec2(track.Max.x + space::md, pill.Min.y), pill.Max));
+        if (namedRectsOn()) {
+            static std::string reported;
+            const std::string now2 = "playerview: H " + std::to_string(st.projH) + " label \"" + hl + "\"" +
+                                     (viewPlayer ? " player " + viewPlayer->object->name : std::string(" no player"));
+            if (now2 != reported) {
+                reported = now2;
+                std::printf("%s\n", now2.c_str());
+                std::fflush(stdout);
+            }
+        }
+    }
     st.viewMode = segmented("viewmode", ImVec2(rp.x + camW + space::sm, p.y + 2), {"PS1", "Clean"}, st.viewMode, &w);
     axisWidget(dl, ImVec2(r.Max.x - 52, r.Min.y + 96), view);
 
     // Bottom-left chip describing what the edit view is showing.
     const char* info = st.viewMode == 0 ? "320 x 240  ·  15-bit dither  ·  affine" : "Clean view";
+    std::string playerInfo;
+    if (st.playerView) {
+        playerInfo = viewPlayer ? "Player view  ·  " + viewPlayer->object->name + "  ·  " + editor::projectionHLabel(st.projH)
+                                : std::string("Player view  ·  no active PSXPlayer in the scene");
+        info = playerInfo.c_str();
+    }
     ImVec2 is = measure(f.regular, type::caption, info);
     ImRect chip(ImVec2(r.Min.x + space::md, r.Max.y - space::md - 24), ImVec2(r.Min.x + space::md + is.x + 20, r.Max.y - space::md));
     dl->AddRectFilled(chip.Min, chip.Max, rgb(0x0e1014, 190), radius::pill);
@@ -7778,6 +7879,48 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
     // script-only objects get none. Clicking one selects its object.
     dl->ChannelsSetCurrent(kScene);
     std::vector<editor::ObjectPath> paths = doc.flatPaths();
+    // Direction arrows (#355): directional and spot lights along their
+    // forward, the player along its yaw. Bright on a selected object, dimmed
+    // on the rest. Drawn under the markers; the player's own is left out of
+    // the Player view, which looks along it.
+    std::string arrowReport;
+    for (size_t i = 0; i < shown.size() && i < flats.size(); ++i) {
+        const std::optional<splash::Vec3> dir = editor::markerArrow(shown[i]);
+        if (!dir || (viewPlayer && flats[i].object == viewPlayer->object)) continue;
+        const bool chosen = flats[i].object == sel || (multi && i < paths.size() && doc.isSelected(paths[i]));
+        const unsigned a = editor::markerArrowAlpha(chosen);
+        const ImU32 base = flats[i].object->light ? kind::light : kind::player;
+        const ImU32 col = (base & 0x00ffffffu) | (a << IM_COL32_A_SHIFT);
+        const splash::Vec3 from = shown[i].localToWorld.position();
+        const float len = flats[i].object->player ? std::max(1.5f, flats[i].object->player->playerRadius * 3.0f) : 2.0f;
+        ImVec2 s0, s1;
+        if (!view.project(toGl(from), mn, sz, &s0) || !view.project(toGl(from + *dir * len), mn, sz, &s1)) continue;
+        ImVec2 d = s1 - s0;
+        const float dl2 = std::sqrt(d.x * d.x + d.y * d.y);
+        const float thick = chosen ? 3.0f : 2.0f;
+        if (dl2 > 2.0f) {
+            d = d / dl2;
+            const ImVec2 n(-d.y, d.x);
+            const float head = std::min(12.0f, dl2 * 0.5f);
+            // A dark edge under it keeps a dimmed arrow readable on a bright floor.
+            const ImU32 edge = rgb(0x0e1014, int(a * 0.55f));
+            dl->AddLine(s0, s1 - d * head * 0.8f, edge, thick + 2.0f);
+            dl->AddLine(s0, s1 - d * head * 0.8f, col, thick);
+            dl->AddTriangleFilled(s1 + d * 1.5f, s1 - d * (head + 1.5f) + n * (head * 0.5f + 1.5f), s1 - d * (head + 1.5f) - n * (head * 0.5f + 1.5f), edge);
+            dl->AddTriangleFilled(s1, s1 - d * head + n * head * 0.5f, s1 - d * head - n * head * 0.5f, col);
+        } else {
+            dl->AddCircleFilled(s1, thick * 2, col, 12);  // seen end-on
+        }
+        if (namedRectsOn()) arrowReport += " " + flats[i].object->name + (chosen ? "=bright" : "=dim");
+    }
+    if (namedRectsOn()) {
+        static std::string reported;
+        if (arrowReport != reported) {
+            reported = arrowReport;
+            if (!arrowReport.empty()) std::printf("arrows:%s\n", arrowReport.c_str());
+            std::fflush(stdout);
+        }
+    }
     for (size_t i = 0; i < shown.size() && i < flats.size(); ++i) {
         const splash::FlatObject& fo = flats[i];
         viewport::Vec3 pos = toGl(shown[i].localToWorld.position());
