@@ -747,6 +747,15 @@ second run and reads `settings.memCard.icons` back from the saved scene. Needs a
 
     python3 memcardiconcheck.py <splashedit>
 
+`spritesheetdropcheck.py` drags a PNG from the Project panel onto a sprite sheet's Texture in the
+scene inspector (#160), as onto a UI image's Texture: the sheet takes the dropped image (saved
+`spriteSheets[0].texture` and the `scene: sprite 0 ...` line), and a scene dropped there is refused
+("That field does not take ..."). It scrolls with `--scroll-to @scene.spritetex`, reads where the
+field is drawn and drags there in a second run. A second argument saves the screenshot after the
+drop. Needs a display.
+
+    python3 spritesheetdropcheck.py <splashedit> [screenshot.png]
+
 `spritesheetcheck.py` drives the scene inspector's Sprite sheets section (its last) on copies of the
 courtyard example with `sprite/hero.png` added to its textures: Add sheet picks the image and makes
 sheet `hero` (4 bpp, 16x16 cells, one `idle` animation); a typed cell width, an added animation and

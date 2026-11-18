@@ -53,6 +53,7 @@ inline constexpr const char* gamepad = "\xee\x83\x9f";         // e0df
 inline constexpr const char* wand = "\xee\x8d\x97";            // e357
 inline constexpr const char* help = "\xee\x82\x82";            // e082
 inline constexpr const char* link = "\xee\x84\x82";            // e102
+inline constexpr const char* unlink = "\xee\x86\x9c";          // e19c
 inline constexpr const char* type = "\xee\x86\x98";            // e198
 inline constexpr const char* image = "\xee\x83\xb6";           // e0f6
 inline constexpr const char* slash = "\xee\x94\x9d";           // e51d
@@ -73,4 +74,8 @@ inline constexpr const char* imageDown = "\xee\x94\xbc";       // e53c
 inline constexpr const char* panelTop = "\xee\x90\xb5";        // e435
 inline constexpr const char* appWindow = "\xee\x90\xa6";       // e426
 inline constexpr const char* memoryStick = "\xee\x91\x85";     // e445
+
+// The Scale row's lock (#264): one chain in two states, whole while the
+// proportions are kept (on), broken while each axis scales alone (off).
+inline constexpr const char* scaleLock(bool on) { return on ? link : unlink; }
 }  // namespace icon
