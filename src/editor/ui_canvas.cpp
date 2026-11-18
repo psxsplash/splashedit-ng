@@ -475,6 +475,32 @@ bool editElements(Document& doc, int c, const std::vector<int>& idx, const std::
     return true;
 }
 
+SharedFields sharedFields(const UICanvas& cv, const std::vector<int>& idx) {
+    SharedFields f;
+    bool any = false, known = true, noLine = true, blend = true, text = true, image = true, bar = true;
+    for (int i : idx) {
+        if (i < 0 || size_t(i) >= cv.elements.size()) return {};
+        const UIElement& e = cv.elements[size_t(i)];
+        any = true;
+        known &= e.unknown.empty();
+        noLine &= e.type != UIElementType::Line;
+        blend &= splash::blendable(e.type);
+        text &= e.type == UIElementType::Text;
+        image &= e.type == UIElementType::Image && e.sheet.empty();
+        bar &= e.type == UIElementType::Progress;
+    }
+    if (!any) return {};
+    f.look = known;
+    f.size = noLine;
+    f.blend = known && blend;
+    f.text = known && text;
+    f.image = known && image;
+    f.progress = known && bar;
+    const bool images = known && sharedValue(cv, idx, [](const UIElement& e) { return e.type; }) == UIElementType::Image;
+    f.colourLabel = images ? "Tint" : f.progress ? "Fill" : "Colour";
+    return f;
+}
+
 std::vector<int> selectedElements(const Document& doc) {
     const Document::UiSelection& sel = doc.uiSelection();
     std::vector<int> out;
