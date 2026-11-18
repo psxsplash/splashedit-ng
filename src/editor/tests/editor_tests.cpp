@@ -84,6 +84,7 @@
 #include "ui/popup_place.hh"
 #include "ui/scrub.hh"
 #include "ui/colour_hex.hh"
+#include "ui/icons.h"
 #include "budget.hh"
 #include "disc.hh"
 #include "player.hh"
@@ -1125,6 +1126,14 @@ void testLockedScale() {
     s = editor::lockedScale(start, 0, -0.5f);
     s = editor::lockedScale(start, 0, 2);
     CHECK(s == (splash::Vec3{2, 4, 6}));
+}
+
+// The Scale lock's icon (#264 feedback): one chain in two states, whole
+// while the proportions are kept, broken while the axes are free.
+void testScaleLockIcon() {
+    CHECK(std::strcmp(icon::scaleLock(true), icon::scaleLock(false)) != 0);
+    CHECK(std::strcmp(icon::scaleLock(true), icon::link) == 0);
+    CHECK(std::strcmp(icon::scaleLock(false), icon::unlink) == 0);
 }
 
 // One gizmo drag (many merged edits) undoes to the exact transform before it
@@ -22087,6 +22096,7 @@ int main(int argc, char** argv) {
     testScaleClamp();
     testScalePlane();
     testLockedScale();
+    testScaleLockIcon();
     testGizmoUndo();
     testCatalog();
     testExportStats();

@@ -11844,7 +11844,7 @@ static void multiInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
         nameRect("obj.scllock", lr);
         bool& on = st.play.tools.scaleLock;
         ImGui::PushItemFlag(ImGuiItemFlags_NoTabStop, true);
-        const bool flip = iconButton("scllock", lr, on ? icon::lock : icon::link, on,
+        const bool flip = iconButton("scllock", lr, icon::scaleLock(on), on,
                                      on ? "Scale locked: editing one axis scales all three by the same factor, each object from its own scale"
                                         : "Lock the scale's proportions: editing one axis scales all three by the same factor");
         ImGui::PopItemFlag();
@@ -12538,7 +12538,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
         // Tab goes from Rotation Z straight to Scale X past it (#158).
         bool& on = st.play.tools.scaleLock;
         ImGui::PushItemFlag(ImGuiItemFlags_NoTabStop, true);
-        const bool flip = iconButton("scllock", lr, on ? icon::lock : icon::link, on,
+        const bool flip = iconButton("scllock", lr, icon::scaleLock(on), on,
                                      on ? "Scale locked: editing one axis scales all three by the same factor"
                                         : "Lock the scale's proportions: editing one axis scales all three by the same factor");
         ImGui::PopItemFlag();
