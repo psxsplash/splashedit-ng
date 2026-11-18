@@ -12504,10 +12504,50 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
     // Start active: the object is in the game either way; off loads it hidden,
     // with no collision, until a script or cutscene switches it on.
     if (o->active) {
+        // A spawn pool's copies always load inactive, so its switch shows off
+        // and takes no clicks; the object's own startActive is kept.
+        const bool pooled = o->spawnPool > 0;
         ImRect v = row("lstartactive", "Start active",
-                       "Off loads the object hidden and without collision. Scripts (Entity.SetActive) and cutscenes can switch it on.");
-        if (toggle("startactive", ImRect(ImVec2(v.Min.x, v.GetCenter().y - 8), ImVec2(v.Min.x + 30, v.GetCenter().y + 8)), o->startActive))
+                       pooled ? "A spawn pool's copies always load inactive: Scene.Spawn switches one on. Set Pool to Off to choose here."
+                              : "Off loads the object hidden and without collision. Scripts (Entity.SetActive) and cutscenes can switch it on.");
+        const ImRect sw(ImVec2(v.Min.x, v.GetCenter().y - 8), ImVec2(v.Min.x + 30, v.GetCenter().y + 8));
+        nameRect("obj.startactive", sw);
+        ImGui::BeginDisabled(pooled);
+        if (toggle("startactive", sw, pooled ? false : o->startActive) && !pooled)
             doc.edit(path, [](splash::Object& ob) { ob.startActive = !ob.startActive; });
+        ImGui::EndDisabled();
+        // Spawn pool, on the same row at its right: the pack holds that many
+        // inactive copies, which Scene.Spawn hands out by the pool's name.
+        // Off (0) costs no height; the Pool name row shows only for a pool.
+        {
+            const float fw = 72;
+            const ImRect pr(ImVec2(v.Max.x - fw, v.Min.y), v.Max);
+            const char* pl = "Pool";
+            const ImVec2 ls = measure(f.regular, type::label, pl);
+            const ImRect lr(ImVec2(pr.Min.x - space::sm - ls.x, v.Min.y), ImVec2(pr.Min.x - space::sm, v.Max.y));
+            const Hit lh = interact("lspawnpool", lr, ImGuiItemFlags_NoTabStop | ImGuiItemFlags_NoNav);
+            tooltip("Spawn pool: how many copies of this object the pack holds for Lua's Scene.Spawn(name, x, y, z) to hand out "
+                    "and Scene.Despawn to take back. They all load inactive. Off (0) = not a pool; at most 255.");
+            text(dl, ImVec2(lr.Min.x, centerY(f.regular, type::label, lr.Min.y, lr.Max.y)), f.regular, type::label,
+                 lerpColor(color::textDim, color::text, lh.hover), pl);
+            nameRect("obj.spawnpool", pr);
+            float pv = float(o->spawnPool);
+            const std::string shown = pooled ? std::to_string(o->spawnPool) : std::string("Off");
+            const FieldEdit pe = numberField("spawnpool", pr, shown.c_str(), nullptr, 0, nullptr, &pv, true);
+            if (pe.changed)
+                doc.edit(path, [pv](splash::Object& ob) {
+                    ob.spawnPool = splash::clampv(int(std::lround(pv)), 0, splash::kMaxSpawnPoolCopies);
+                }, "spawnpool");
+            if (pe.done) doc.endMerge();
+        }
+        if (pooled) {
+            std::string typed;
+            const ImRect nr = row("lspawnpoolname", "Pool name", "What scripts spawn it by, as in Scene.Spawn(\"name\", x, y, z). "
+                                                                  "Empty uses the object's name.");
+            nameRect("obj.spawnpoolname", nr);
+            if (textField("spawnpoolname", nr, o->spawnPoolName, &typed, o->name.c_str(), 255))
+                doc.edit(path, [typed](splash::Object& ob) { ob.spawnPoolName = typed; });
+        }
         y += space::md;
     }
 

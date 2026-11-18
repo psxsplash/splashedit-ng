@@ -38,6 +38,12 @@ struct StreamWarning {
 // Ordering table size limits. The low end is Renderer::WORLD_DEPTH_MIN: the
 // table must reach past the 2D bands. The exporter clamps overrides to these.
 constexpr uint32_t kOtMin = 256, kOtMax = 65536;
+// Spawn pools (psxsplash spawnpool.hh MAX_SPAWN_POOLS) and the copies the
+// editor lets one object ask for.
+constexpr int kMaxSpawnPools = 64;
+constexpr int kMaxSpawnPoolCopies = 255;
+// Objects one pack holds: the header counts them in a u16.
+constexpr int kMaxObjects = 65535;
 // Splashpack header byte after the fog density (psxsplash renderFlags).
 constexpr uint8_t kRenderFlagEdgeFade = 1;
 
@@ -168,6 +174,8 @@ struct ExportStats {
     };
     std::vector<NavRegionInfo> navInfo;
     int shadows = 0;  // blob shadow records written (v28 when not 0)
+    int spawnPools = 0;               // spawn pool records written (v33 when not 0)
+    uint32_t spawnPoolTableBytes = 0;  // the table and its names
     bool navIslands = false;
     // Nav walk-off zones on active objects, in flatten order: the boundary
     // edges each one opened (an edge inside two counts for the first).

@@ -56,6 +56,11 @@ version as it is.
   is exported only when it and every ancestor are active (Unity's `activeInHierarchy`), and the
   canonical order above skips the rest. `startActive: false` (written only when false) keeps the
   object in the pack but loads it hidden and without collision (object flag bit 0).
+- `spawnPool: {"count": N, "name": "crates"}` (written only when set) makes the object a spawn pool:
+  the pack holds N copies of it, back to back in the object table, all loaded inactive, which
+  Lua's `Scene.Spawn("crates", x, y, z)` hands out and `Scene.Despawn` takes back (splashpack v33,
+  spawn pool table). Without `name` the pool is called by the object's name. A prefab instance
+  keeps its own `spawnPool`, like its active flags.
 - Floats are written with the shortest representation that round-trips a 32-bit float.
 
 Components so far (more are added feature by feature, matching the splashpack sections):

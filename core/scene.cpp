@@ -303,6 +303,11 @@ Object readObject(const json& j) {
     o.name = j.at("name").get<std::string>();
     o.active = j.value("active", true);
     o.startActive = j.value("startActive", true);
+    if (j.contains("spawnPool") && j["spawnPool"].is_object()) {
+        const json& sp = j["spawnPool"];
+        o.spawnPool = std::max(0, sp.value("count", 0));
+        o.spawnPoolName = sp.value("name", std::string());
+    }
     if (j.contains("transform")) {
         const json& t = j["transform"];
         if (t.contains("position")) o.transform.position = vec3(t["position"]);
@@ -527,7 +532,7 @@ Object readObject(const json& j) {
     }
     for (const json& cj : j.value("children", json::array())) o.children.push_back(readObject(cj));
     if (j.contains("prefab") && !j["prefab"].is_null()) o.prefab = j["prefab"].get<std::string>();
-    o.extra = extrasOf(j, json{{"name", 0}, {"active", 0}, {"startActive", 0}, {"transform", 0}, {"prefab", 0}, {"components", 0},
+    o.extra = extrasOf(j, json{{"name", 0}, {"active", 0}, {"startActive", 0}, {"spawnPool", 0}, {"transform", 0}, {"prefab", 0}, {"components", 0},
                                {"children", 0}});
     return o;
 }
@@ -537,6 +542,11 @@ json writeObject(const Object& o) {
     j["name"] = o.name;
     j["active"] = o.active;
     if (!o.startActive) j["startActive"] = false;
+    if (o.spawnPool > 0 || !o.spawnPoolName.empty()) {
+        json sp = {{"count", o.spawnPool}};
+        if (!o.spawnPoolName.empty()) sp["name"] = o.spawnPoolName;
+        j["spawnPool"] = sp;
+    }
     j["transform"] = {{"position", vec3(o.transform.position)},
                       {"rotation", json::array({o.transform.rotation.x, o.transform.rotation.y,
                                                 o.transform.rotation.z, o.transform.rotation.w})},
@@ -1421,6 +1431,8 @@ struct Resolver {
         empty.name = std::move(o.name);
         empty.active = o.active;
         empty.startActive = o.startActive;
+        empty.spawnPool = o.spawnPool;
+        empty.spawnPoolName = std::move(o.spawnPoolName);
         empty.transform = o.transform;
         empty.extra = std::move(o.extra);
         empty.prefab = std::move(o.prefab);
@@ -1469,6 +1481,8 @@ struct Resolver {
         content.name = std::move(o.name);
         content.active = o.active;
         content.startActive = o.startActive;
+        content.spawnPool = o.spawnPool;
+        content.spawnPoolName = std::move(o.spawnPoolName);
         content.transform = o.transform;
         content.extra = std::move(o.extra);
         content.prefab = std::move(o.prefab);

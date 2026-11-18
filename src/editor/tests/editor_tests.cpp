@@ -19321,6 +19321,180 @@ void testShadows() {
     }
 }
 
+// ---- Spawn pools: the object fields round-trip through the scene file (no
+// key when off, old scenes load with none); a scene without a pool exports
+// as before; one with a pool of N exports v33, the object as N contiguous
+// copies (inactive, identical but for their triangle offsets) and the
+// header's word at 172 pointing at {u16 count, u16 0, {u16 first, u16 count,
+// u32 nameOffset}} with the name NUL-terminated in the pack.
+void testSpawnPools() {
+    namespace fs = std::filesystem;
+    const fs::path project = fs::path(SPLASHEDIT_SOURCE_DIR) / "examples" / "courtyard";
+    const fs::path dir = g_outDir / "spawnpools";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    const splash::Scene base = splash::loadScene(project / "courtyard.scene");
+    auto find = [](splash::Scene& sc, const std::string& name) -> splash::Object* {
+        std::function<splash::Object*(std::vector<splash::Object>&)> walk = [&](std::vector<splash::Object>& v) -> splash::Object* {
+            for (splash::Object& o : v) {
+                if (o.name == name) return &o;
+                if (splash::Object* c = walk(o.children)) return c;
+            }
+            return nullptr;
+        };
+        return walk(sc.objects);
+    };
+    auto slurp = [](const fs::path& p) {
+        std::ifstream in(p, std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(in), {});
+    };
+    using roomtest::rd16;
+    using roomtest::rd32;
+
+    // JSON: an old scene has no pool and saving it writes no key.
+    {
+        splash::Scene sc = base;
+        splash::Object* crate = find(sc, "Crate");
+        CHECK(crate && crate->spawnPool == 0 && crate->spawnPoolName.empty());
+        splash::saveScene(sc, dir / "plain.scene");
+        CHECK(slurp(dir / "plain.scene").find("spawnPool") == std::string::npos);
+        crate->spawnPool = 6;
+        crate->spawnPoolName = "crates";
+        find(sc, "Crate (2)")->spawnPool = 2;  // named by the object
+        splash::saveScene(sc, dir / "pool.scene");
+        const std::string text = slurp(dir / "pool.scene");
+        CHECK(text.find("\"spawnPool\": {") != std::string::npos && text.find("\"name\": \"crates\"") != std::string::npos);
+        splash::Scene back = splash::loadScene(dir / "pool.scene");
+        splash::Object* bc = find(back, "Crate");
+        splash::Object* b2 = find(back, "Crate (2)");
+        CHECK(bc && bc->spawnPool == 6 && bc->spawnPoolName == "crates");
+        CHECK(b2 && b2->spawnPool == 2 && b2->spawnPoolName.empty());
+        CHECK(find(back, "Crate (3)") && find(back, "Crate (3)")->spawnPool == 0);
+        // A field, not an extra: saving again gives the same text.
+        splash::saveScene(back, dir / "pool2.scene");
+        CHECK(slurp(dir / "pool2.scene") == text);
+        // A prefab instance keeps its own pool, like its active flags.
+        splash::Object inst;
+        inst.name = "Pooled";
+        inst.prefab = "prefabs/crate.prefab";
+        inst.spawnPool = 3;
+        const std::string it = splash::writeObjectsText({inst});
+        CHECK(it.find("\"spawnPool\"") != std::string::npos && it.find("\"count\": 3") != std::string::npos);
+    }
+
+    // Export: a name without a count changes nothing; the pack stays v27.
+    CHECK(splash::exportSplashpack(base, project, dir / "plain.splashpack").ok());
+    const std::string a = slurp(dir / "plain.splashpack");
+    CHECK(a.size() > 176 && rd16(a, 2) == 27);
+    {
+        splash::Scene sc = base;
+        find(sc, "Crate")->spawnPoolName = "crates";
+        CHECK(splash::exportSplashpack(sc, project, dir / "named.splashpack").ok());
+        CHECK(slurp(dir / "named.splashpack") == a);
+    }
+    // A pool of 4: v33, three more objects.
+    constexpr int kCopies = 4;
+    splash::Scene sc = base;
+    find(sc, "Crate")->spawnPool = kCopies;
+    find(sc, "Crate")->spawnPoolName = "crates";
+    splash::ExportResult r = splash::exportSplashpack(sc, project, dir / "pool.splashpack");
+    for (const std::string& e : r.errors) std::fprintf(stderr, "spawnpools export: %s\n", e.c_str());
+    CHECK(r.ok() && r.stats.spawnPools == 1);
+    const std::string b = slurp(dir / "pool.splashpack");
+    CHECK(b.size() > 176 && rd16(b, 2) == 33);
+    const size_t nlua = rd16(b, 4), ngo = rd16(b, 6);
+    CHECK(rd16(a, 4) == nlua && ngo == size_t(rd16(a, 6)) + kCopies - 1 && r.stats.gameObjects == int(ngo));
+    // v28 shadow word, v29 background, v30 shine, v32 particles: all 0.
+    CHECK(rd32(b, 156) == 0 && rd32(b, 160) == 0 && rd32(b, 164) == 0 && rd32(b, 168) == 0);
+    const uint32_t table = uint32_t(rd32(b, 172));
+    CHECK(table != 0 && table % 4 == 0 && table + 12 <= b.size());
+    if (table == 0 || table + 12 > b.size()) return;
+    CHECK(rd16(b, table) == 1 && rd16(b, table + 2) == 0);
+    const size_t first = rd16(b, table + 4), count = rd16(b, table + 6);
+    const uint32_t nameAt = uint32_t(rd32(b, table + 8));
+    CHECK(count == size_t(kCopies) && first + count <= ngo);
+    CHECK(nameAt == table + 12 && nameAt + 7 <= b.size() && b.compare(nameAt, 7, std::string("crates\0", 7)) == 0);
+    CHECK(table + 12 + 7 == b.size() && r.stats.spawnPoolTableBytes == 19);  // the last chunk of the pack
+    if (count != size_t(kCopies) || first + count > ngo) return;
+    // The copies: one record, bar the triangle offset, inactive, each with
+    // its own triangles, and named the object's name in the name table.
+    const size_t objs = 176 + 8 * nlua;
+    auto obj = [&](size_t i) { return objs + 92 * i; };
+    std::vector<std::string> names;
+    for (size_t i = 0, p = size_t(rd32(b, 60)); i < ngo && p < b.size(); i++) {
+        names.push_back(b.substr(p + 1, uint8_t(b[p])));
+        p += uint8_t(b[p]) + 2;
+    }
+    CHECK(names.size() == ngo);
+    const size_t tris = rd16(b, obj(first) + 52);
+    CHECK(tris > 0);
+    for (size_t c = 0; c < count; c++) {
+        CHECK(b.compare(obj(first + c) + 4, 88, b, obj(first) + 4, 88) == 0);
+        CHECK((uint32_t(rd32(b, obj(first + c) + 56)) & 1u) == 0);
+        CHECK(names.size() == ngo && names[first + c] == "Crate");
+        const uint32_t t0 = uint32_t(rd32(b, obj(first))), tc = uint32_t(rd32(b, obj(first + c)));
+        CHECK(tc != 0 && (c == 0 || tc != t0) && b.compare(tc, 52 * tris, b, t0, 52 * tris) == 0);
+    }
+    // The objects around the run are the plain pack's, in order.
+    CHECK(names.size() == ngo && (first == 0 || names[first - 1] != "Crate") &&
+          (first + count == ngo || names[first + count] == "Crate (2)"));
+    CHECK((uint32_t(rd32(b, obj(first + count) + 56)) & 1u) == 1u);  // Crate (2) starts active
+
+    // What the exporter refuses: a component the copies would share, and two
+    // pools with one name.
+    {
+        splash::Scene bad = sc;
+        find(bad, "Crate")->interactable = splash::InteractableComponent{};
+        splash::ExportResult br = splash::exportSplashpack(bad, project, dir / "bad.splashpack");
+        CHECK(!br.ok() && !br.errors.empty() && br.errors[0].find("Interactable") != std::string::npos);
+        splash::Scene twice = sc;
+        find(twice, "Crate (2)")->spawnPool = 2;
+        find(twice, "Crate (2)")->spawnPoolName = "crates";
+        splash::ExportResult tr = splash::exportSplashpack(twice, project, dir / "twice.splashpack");
+        CHECK(!tr.ok() && !tr.errors.empty() && tr.errors[0].find("already called") != std::string::npos);
+        find(twice, "Crate (2)")->spawnPoolName.clear();  // its own name: two pools
+        splash::ExportResult two = splash::exportSplashpack(twice, project, dir / "two.splashpack");
+        CHECK(two.ok() && two.stats.spawnPools == 2 && two.stats.gameObjects == int(ngo) + 1);
+    }
+    // The limits: a Trigger is refused like an Interactable; 255 copies and
+    // 64 pools export, one more of either does not.
+    {
+        auto says = [](const splash::ExportResult& er, const std::string& what) {
+            return std::any_of(er.errors.begin(), er.errors.end(), [&](const std::string& e) { return e.find(what) != std::string::npos; });
+        };
+        splash::Scene trig = sc;
+        find(trig, "Crate")->trigger = splash::TriggerComponent{};
+        const splash::ExportResult tg = splash::exportSplashpack(trig, project, dir / "trigger.splashpack");
+        CHECK(!tg.ok() && says(tg, "cannot have a Trigger component"));
+
+        splash::Scene big = base;
+        find(big, "Crate")->spawnPool = splash::kMaxSpawnPoolCopies;
+        const splash::ExportResult most = splash::exportSplashpack(big, project, dir / "most.splashpack");
+        CHECK(most.ok() && most.stats.spawnPools == 1 && most.stats.gameObjects == int(rd16(a, 6)) + splash::kMaxSpawnPoolCopies - 1);
+        find(big, "Crate")->spawnPool = splash::kMaxSpawnPoolCopies + 1;
+        const splash::ExportResult over = splash::exportSplashpack(big, project, dir / "over.splashpack");
+        CHECK(!over.ok() && says(over, "holds at most 255 copies, this one asks for 256"));
+
+        // 64 pools of one copy each, then a 65th.
+        splash::Scene many = base;
+        const splash::Object proto = *find(many, "Crate");
+        for (int k = 0; k < splash::kMaxSpawnPools; k++) {
+            splash::Object p = proto;
+            p.name = "Pooled " + std::to_string(k);
+            p.spawnPool = 1;
+            many.objects.push_back(p);
+        }
+        const splash::ExportResult full = splash::exportSplashpack(many, project, dir / "pools64.splashpack");
+        for (const std::string& e : full.errors) std::fprintf(stderr, "spawnpools 64: %s\n", e.c_str());
+        CHECK(full.ok() && full.stats.spawnPools == splash::kMaxSpawnPools);
+        many.objects.push_back(proto);
+        many.objects.back().name = "Pooled 64";
+        many.objects.back().spawnPool = 1;
+        const splash::ExportResult more = splash::exportSplashpack(many, project, dir / "pools65.splashpack");
+        CHECK(!more.ok() && says(more, "65 spawn pools and psxsplash holds 64"));
+    }
+}
+
 void testGpuRaster() {
     using gpuraster::Gpu;
     auto px = [](const Gpu& g, int x, int y) { return g.at(x, y); };
@@ -22422,6 +22596,7 @@ int main(int argc, char** argv) {
     testGpuTags();
     testGpuRaster();
     testShadows();
+    testSpawnPools();
     testListScroll();
     testPopupPlace();
     testTerrain();
