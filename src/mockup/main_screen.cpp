@@ -11783,6 +11783,30 @@ static void multiInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
     auto fmtF = [](float v) { return fmtFixed(v); };
     auto fmtS = [](float v) { return fmtShort(v); };
 
+    // A switch over every object: on when all are on; a click sets all to the other.
+    auto toggleAll = [&](const char* id, const char* label, const char* tip, const std::function<bool(const splash::Object&)>& get,
+                         const std::function<void(splash::Object&, bool)>& set) {
+        const bool allOn = all(get);
+        const bool mixed = !allOn && !all([&](const splash::Object& o) { return !get(o); });
+        reportField(id, mixed ? "mixed" : allOn ? "on" : "off");
+        const std::string lid = std::string("l") + id;
+        ImRect fr = row(lid.c_str(), label, tip);
+        ImRect sw(ImVec2(fr.Min.x, fr.GetCenter().y - 8), ImVec2(fr.Min.x + 30, fr.GetCenter().y + 8));
+        nameRect(std::string("obj.") + id, sw);
+        if (toggle(id, sw, allOn, mixed)) editAll([&](splash::Object& ob) { set(ob, !allOn); });
+        if (mixed) text(dl, ImVec2(sw.Max.x + space::sm, centerY(f.regular, type::caption, fr.Min.y, fr.Max.y)), f.regular, type::caption,
+                        color::textFaint, "mixed");
+    };
+    // Start active, as with one object (shown while all of them are on):
+    // off loads them hidden, with no collision, until a script or cutscene switches them on.
+    if (all([](const splash::Object& o) { return o.active; })) {
+        toggleAll("startactive", "Start active",
+                  "Off loads these objects hidden and without collision. Scripts (Entity.SetActive) and cutscenes can switch them on. "
+                  "When they differ, a click turns it on for all.",
+                  [](const splash::Object& o) { return o.startActive; }, [](splash::Object& ob, bool v) { ob.startActive = v; });
+        y += space::md;
+    }
+
     // Transform.
     float top = y;
     fold(section("s_transform", ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), icon::move, color::textDim, "Transform", true, true, false));
@@ -11934,20 +11958,6 @@ static void multiInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
             scrubEnd();
             doc.endMerge();
         }
-    };
-    // A switch over every object: on when all are on; a click sets all to the other.
-    auto toggleAll = [&](const char* id, const char* label, const char* tip, const std::function<bool(const splash::Object&)>& get,
-                         const std::function<void(splash::Object&, bool)>& set) {
-        const bool allOn = all(get);
-        const bool mixed = !allOn && !all([&](const splash::Object& o) { return !get(o); });
-        reportField(id, mixed ? "mixed" : allOn ? "on" : "off");
-        const std::string lid = std::string("l") + id;
-        ImRect fr = row(lid.c_str(), label, tip);
-        ImRect sw(ImVec2(fr.Min.x, fr.GetCenter().y - 8), ImVec2(fr.Min.x + 30, fr.GetCenter().y + 8));
-        nameRect(std::string("obj.") + id, sw);
-        if (toggle(id, sw, allOn, mixed)) editAll([&](splash::Object& ob) { set(ob, !allOn); });
-        if (mixed) text(dl, ImVec2(sw.Max.x + space::sm, centerY(f.regular, type::caption, fr.Min.y, fr.Max.y)), f.regular, type::caption,
-                        color::textFaint, "mixed");
     };
     auto compSection = [&](const char* id, editor::ComponentKind k) {
         ObjectLook lk = lookOf(k);

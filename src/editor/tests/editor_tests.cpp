@@ -12917,6 +12917,88 @@ void testUiMultiSelect() {
     CHECK(pasteElements(full, 0, -1, one, s) >= 0);  // another canvas still takes it
 }
 
+// What several selected elements share (#364): a value when all agree, else
+// mixed; the fields of one type only when all are of it; an edit through the
+// multi inspector sets it on all of them as one undo step.
+void testUiMultiEdit() {
+    using namespace editor::uic;
+    using splash::UIElement;
+    using splash::UIElementType;
+    splash::Scene sc;
+    splash::UICanvas cv;
+    cv.name = "hud";
+    auto add = [&](UIElementType t, const char* name, std::array<float, 3> col) {
+        UIElement e = uiBox(name, 0, 0, 10, 10);
+        e.type = t;
+        e.color = col;
+        cv.elements.push_back(e);
+    };
+    add(UIElementType::Text, "t0", {1, 1, 1});    // 0
+    add(UIElementType::Text, "t1", {1, 0, 0});    // 1
+    add(UIElementType::Text, "t2", {1, 1, 1});    // 2
+    add(UIElementType::Box, "box", {1, 1, 1});    // 3
+    add(UIElementType::Progress, "bar", {0, 1, 0});  // 4
+    add(UIElementType::Image, "img", {.5f, .5f, .5f});  // 5
+    add(UIElementType::Image, "img2", {.5f, .5f, .5f});  // 6
+    add(UIElementType::Line, "line", {1, 1, 0});  // 7
+    cv.elements[1].font = "big";
+    cv.elements[2].visible = false;
+    cv.elements[6].sheet = "walk";
+    sc.canvases.push_back(cv);
+    auto colourOf = [](const UIElement& e) { return e.color; };
+    auto visibleOf = [](const UIElement& e) { return e.visible; };
+    auto fontOf = [](const UIElement& e) { return e.font; };
+
+    // Shared or mixed.
+    CHECK((sharedValue(cv, {0, 2}, colourOf) == std::array<float, 3>{1, 1, 1}));
+    CHECK(!sharedValue(cv, {0, 1, 2}, colourOf));  // t1 is red: mixed
+    CHECK(sharedValue(cv, {0, 1}, visibleOf) == true && !sharedValue(cv, {0, 1, 2}, visibleOf));
+    CHECK(!sharedValue(cv, {0, 1}, fontOf) && sharedValue(cv, {0, 2}, fontOf) == std::string());
+    CHECK(sharedValue(cv, {1}, fontOf) == std::string("big"));
+    CHECK(!sharedValue(cv, {}, colourOf) && !sharedValue(cv, {0, 99}, colourOf) && !sharedValue(cv, {-1}, visibleOf));
+
+    // Which fields show, by the types selected.
+    const SharedFields texts = sharedFields(cv, {0, 1, 2});
+    CHECK(texts.look && texts.text && texts.size && !texts.blend && !texts.image && !texts.progress);
+    CHECK(std::string(texts.colourLabel) == "Colour");
+    const SharedFields mixedTypes = sharedFields(cv, {0, 3});  // a text and a box
+    CHECK(mixedTypes.look && mixedTypes.size && !mixedTypes.text && !mixedTypes.blend && std::string(mixedTypes.colourLabel) == "Colour");
+    const SharedFields blends = sharedFields(cv, {3, 4, 7});  // box, bar, line: all blend; the line has no size
+    CHECK(blends.blend && !blends.size && !blends.progress);
+    const SharedFields bars = sharedFields(cv, {4});
+    CHECK(bars.progress && bars.blend && std::string(bars.colourLabel) == "Fill");
+    CHECK(sharedFields(cv, {5}).image && std::string(sharedFields(cv, {5}).colourLabel) == "Tint");
+    const SharedFields images = sharedFields(cv, {5, 6});  // one shows a sheet: no bit depth or cutout
+    CHECK(!images.image && std::string(images.colourLabel) == "Tint");
+    CHECK(!sharedFields(cv, {}).look && !sharedFields(cv, {0, 42}).look);
+    sc.canvases[0].elements[3].unknown = "{}";
+    CHECK(!sharedFields(sc.canvases[0], {0, 3}).look && !sharedFields(sc.canvases[0], {3, 4}).blend);
+    sc.canvases[0].elements[3].unknown.clear();
+
+    // One colour edit on three texts: all of them, one step; undo puts each back.
+    editor::Document d;
+    d.reset(sc);
+    d.selectUi(selectionOf(0, {0, 1, 2}));
+    const std::vector<int> sel = selectedElements(d);
+    CHECK(editElements(d, 0, sel, [](UIElement& e, size_t) { e.color = {0, 0, 1}; }));
+    const splash::UICanvas& now = d.scene().canvases[0];
+    CHECK((sharedValue(now, sel, colourOf) == std::array<float, 3>{0, 0, 1}));
+    CHECK(now.elements[3].color == (std::array<float, 3>{1, 1, 1}) && d.historySize() == 1 && selectedElements(d) == sel);
+    CHECK(d.undo() && !sharedValue(d.scene().canvases[0], sel, colourOf));
+    CHECK(d.scene().canvases[0].elements[1].color == (std::array<float, 3>{1, 0, 0}) && !d.canUndo());
+    // A mixed switch: one click shows all; a font pick sets every one.
+    CHECK(editElements(d, 0, sel, [](UIElement& e, size_t) { e.visible = true; }) && d.historySize() == 1);
+    CHECK(sharedValue(d.scene().canvases[0], sel, visibleOf) == true);
+    CHECK(editElements(d, 0, sel, [](UIElement& e, size_t) { e.font = "big"; }) && d.historySize() == 2);
+    CHECK(sharedValue(d.scene().canvases[0], sel, fontOf) == std::string("big"));
+    // A picker drag over many frames merges into one step.
+    for (int i = 1; i <= 4; i++)
+        editElements(d, 0, sel, [i](UIElement& e, size_t) { e.color = {i / 4.0f, 0, 0}; }, "uicolcol");
+    d.endMerge();
+    CHECK(d.historySize() == 3 && (sharedValue(d.scene().canvases[0], sel, colourOf) == std::array<float, 3>{1, 0, 0}));
+    CHECK(d.undo() && !sharedValue(d.scene().canvases[0], sel, colourOf));
+}
+
 void testUiProblems() {
     using namespace editor::uic;
     const Screen s;
@@ -22256,6 +22338,7 @@ int main(int argc, char** argv) {
     testUiFontSpacing();
     testUiClipboard();
     testUiMultiSelect();
+    testUiMultiEdit();
     testUiProblems();
     testUiRender();
     testUiBlendSaveLoad();

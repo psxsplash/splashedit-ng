@@ -13,6 +13,8 @@
 #include <optional>
 #include <string>
 #include <tuple>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 #include "editor/document.hh"
@@ -117,6 +119,36 @@ bool editElement(Document& doc, int c, int e, const std::function<void(splash::U
 // Runs `fn` on each element of `idx` (and its place in `idx`) as ONE edit.
 bool editElements(Document& doc, int c, const std::vector<int>& idx,
                   const std::function<void(splash::UIElement&, size_t)>& fn, const std::string& mergeKey = {});
+
+// ---- What several selected elements share (#364), for the inspector: a
+// field shows its value when every one has it, else "mixed"; an edit sets it
+// on all of them through editElements.
+// `get`'s value when it is the same for each element `idx` of `cv`, else
+// nullopt (mixed); nullopt too for none or an index that is not there.
+template <class Get>
+auto sharedValue(const splash::UICanvas& cv, const std::vector<int>& idx, Get get)
+    -> std::optional<std::decay_t<decltype(get(std::declval<const splash::UIElement&>()))>> {
+    std::optional<std::decay_t<decltype(get(std::declval<const splash::UIElement&>()))>> out;
+    for (int i : idx) {
+        if (i < 0 || size_t(i) >= cv.elements.size()) return std::nullopt;
+        auto v = get(cv.elements[size_t(i)]);
+        if (!out) out = std::move(v);
+        else if (!(*out == v)) return std::nullopt;
+    }
+    return out;
+}
+// Which fields the elements `idx` of `cv` all have, beyond position, visible
+// and colour. Type-specific ones only when every element is of that type.
+struct SharedFields {
+    bool look = false;      // none is of an unknown type: the appearance section
+    bool size = false;      // none is a line: size and anchor
+    bool blend = false;     // all can blend (boxes, bars, lines)
+    bool text = false;      // all are text: font
+    bool image = false;     // all are images without a sheet: bit depth and cutout
+    bool progress = false;  // all are progress bars: value and background
+    const char* colourLabel = "Colour";  // Tint when all are images, Fill when all are bars
+};
+SharedFields sharedFields(const splash::UICanvas& cv, const std::vector<int>& idx);
 // ---- Sheet-backed images: a UI Image showing one cell of a scene sprite sheet.
 // The sheet an Image names, or nullptr (a plain image, or no sheet of that name).
 const splash::SpriteSheet* imageSheet(const splash::Scene& scene, const splash::UIElement& e);

@@ -13,7 +13,8 @@
 # Ctrl+D and Ctrl+C/Ctrl+V act on the whole selection, each one undo step:
 # the copies become the selection, and undoing a delete restores it.
 # A switch whose values differ (Runtime) draws its knob in the middle, and
-# a click turns it on for all of them.
+# a click turns it on for all of them. Start active is one of them (#364):
+# LampB starts off, so with all three it reads "mixed".
 # usage: python3 multiselectcheck.py <splashedit> [keep-dir]   (needs a display: xvfb-run -a)
 # keep-dir, when given, receives inspector-mixed.png and gizmo-centre.png.
 import json, os, re, shutil, struct, subprocess, sys, tempfile, zlib
@@ -26,7 +27,7 @@ fails = 0
 ENV = dict(os.environ, SPLASHEDIT_REDUX='/nonexistent/pcsx-redux', SPLASHEDIT_PSXSPLASH='/nonexistent/psxsplash.ps-exe')
 LAMPS = {
     'LampA': {'pos': [0.0, 1.0, 2.0], 'scale': [1.0, 2.0, 1.0], 'intensity': 1.0, 'range': 5.0},
-    'LampB': {'pos': [2.0, 3.0, 2.0], 'scale': [2.0, 1.0, 3.0], 'intensity': 2.0, 'range': 5.0, 'runtime': True},
+    'LampB': {'pos': [2.0, 3.0, 2.0], 'scale': [2.0, 1.0, 3.0], 'intensity': 2.0, 'range': 5.0, 'runtime': True, 'startActive': False},
     'LampC': {'pos': [-2.0, 0.5, 3.0], 'scale': [1.0, 1.0, 1.0], 'intensity': 1.0, 'range': 6.0},
 }
 
@@ -80,6 +81,7 @@ def project_copy():
                                              'range': l['range'], 'spotAngle': 30.0, 'innerSpotAngle': 0.0, 'enabled': True,
                                              'runtime': l.get('runtime', False)}],
                              'children': []})
+        if 'startActive' in l: s['objects'][-1]['startActive'] = l['startActive']
     json.dump(s, open(scene, 'w', encoding='utf-8'), indent=2)
     return project
 
@@ -89,6 +91,7 @@ mid = None  # with SAVE_MID in the script: the lamps as saved at that point
 mid_rot = None  # and their rotations
 mid_names = None  # and the top-level object names
 saved_names = None  # the top-level object names as saved at the end
+saved_start = None  # name -> Start active of each lamp as saved at the end
 
 
 def lamps(s):
@@ -107,7 +110,7 @@ def run(name, args, save=True, select='LampA'):
     """A fresh copy with `select` selected, then `args` (and Ctrl+S); returns
     the saved lamps, the output lines, the named controls' rects and the
     screenshot."""
-    global mid, mid_rot, mid_names, saved_names
+    global mid, mid_rot, mid_names, saved_names, saved_start
     project = project_copy()
     scene = os.path.join(project, 'courtyard.scene')
     snap = os.path.join(os.path.dirname(project), 'mid.scene')
@@ -119,6 +122,7 @@ def run(name, args, save=True, select='LampA'):
     mid = lamps(json.load(open(snap, encoding='utf-8'))) if os.path.exists(snap) else None
     mid_names = [o['name'] for o in json.load(open(snap, encoding='utf-8'))['objects']] if os.path.exists(snap) else None
     saved_names = [o['name'] for o in json.load(open(scene, encoding='utf-8'))['objects']]
+    saved_start = {o['name']: o.get('startActive', True) for o in json.load(open(scene, encoding='utf-8'))['objects'] if o['name'] in LAMPS}
     mid_rot = {o['name']: [float(v) for v in o['transform']['rotation']] for o in json.load(open(snap, encoding='utf-8'))['objects']
                if o['name'] in LAMPS} if os.path.exists(snap) else None
     lines = (r.stdout + r.stderr).strip().splitlines()
@@ -245,6 +249,11 @@ rings = {n: ringed(n) for n in LAMPS}
 print('marker ring pixels:', rings, 'Torch Light (not selected):', ringed('Torch Light'))
 check('the Scene view rings every selected lamp', all(v >= 20 for v in rings.values()), rings)
 check('an unselected light is not ringed', ringed('Torch Light') < 5, ringed('Torch Light'))
+# Start active (#364): only LampB starts off, so the switch reads "mixed".
+check('differing Start active switches show "mixed"', shown(lines, 'startactive') == 'mixed', shown(lines, 'startactive'))
+k = centre('obj.startactive')
+knob = k and px[int(k[1]) + 3][3 * int(k[0]):3 * int(k[0]) + 3]
+check('the mixed Start active switch draws its knob in the middle', knob is not None and min(knob) > 215, (k, knob))
 if keep:
     shutil.copy(shot, os.path.join(keep, 'inspector-mixed.png'))
     shutil.copy(shot, os.path.join(keep, 'gizmo-centre.png'))
@@ -315,6 +324,14 @@ check('one Ctrl+Z undoes the turn for both', s == ORIG, s)
 
 _, lines, _, _ = run('mixedswitch', ALL3 + ['--click', '@obj.lruntime'] + W(5), save=False)
 check('a click on a mixed switch turns it on for all', shown(lines, 'lruntime') == 'on', shown(lines, 'lruntime'))
+START = {n: l.get('startActive', True) for n, l in LAMPS.items()}
+_, lines, _, _ = run('startactive', ALL3 + ['--click', '@obj.startactive'] + W(5))
+check('a click on the mixed Start active switch turns it on for all three',
+      shown(lines, 'startactive') == 'on' and all(saved_start.values()), (shown(lines, 'startactive'), saved_start))
+_, lines, _, _ = run('startactiveoff', ALL3 + ['--click', '@obj.startactive'] + W(5) + ['--click', '@obj.startactive'] + W(5))
+check('a second click turns it off for all three', shown(lines, 'startactive') == 'off' and not any(saved_start.values()), saved_start)
+_, lines, _, _ = run('startactiveundo', ALL3 + ['--click', '@obj.startactive'] + W(5) + UNDO)
+check('one Ctrl+Z puts every Start active back', saved_start == START, saved_start)
 
 # Scale lock with two selected: LampA 1/2/1 and LampB 2/1/3 each keep their proportions.
 TWO = ctrl('LampB')

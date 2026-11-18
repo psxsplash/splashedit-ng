@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdio>
 #include <functional>
+#include <map>
 
 #include <SDL3/SDL_clipboard.h>
 #include <SDL3/SDL_dialog.h>
@@ -21,9 +22,11 @@
 #include "font.hh"
 #include "gl.h"
 #include "ui/file_dialog.h"
+#include "ui/colour_hex.hh"
 #include "ui/icons.h"
 #include "ui/texture_image.h"
 #include "ui/theme.h"
+#include "ui/scrub.hh"
 #include "ui/widgets.h"
 
 namespace ui {
@@ -1309,18 +1312,21 @@ Commit forElement(editor::Document& doc, int c, int e, std::function<void(editor
     };
 }
 
-// A colour well with a picker under it. Edits merge under `key` until the picker lets go.
+// A colour well with a picker under it, for the elements `idx` of canvas `c`
+// (one, or a multi-selection: `mixed` when their colours differ, and an edit
+// sets it on all). Edits merge under `key` until the picker lets go.
 // Returns whether the picker is open. Scripted tests: the well is ui.<id>, the picker ui.<id>pick,
 // its right-click menu's rows ui.<id>.menu/Copy and ui.<id>.menu/Paste.
 bool colourRow(editor::Document& doc, Rows& rows, const char* id, const char* label, const char* tip, std::array<float, 3> value,
-               const std::function<void(UIElement&, const std::array<float, 3>&)>& set, int c, int e) {
+               const std::function<void(UIElement&, const std::array<float, 3>&)>& set, int c, const std::vector<int>& idx,
+               bool mixed = false) {
     ImRect field = rows.row((std::string("l") + id).c_str(), label, tip);
     nameRect(std::string("ui.") + id, field);
     std::string popup = std::string("##pick") + id;
-    const ColorFieldHit hit = colorField(id, field, value, (std::string("ui.") + id).c_str());
+    const ColorFieldHit hit = colorField(id, field, value, (std::string("ui.") + id).c_str(), mixed);
     if (hit.clicked) ImGui::OpenPopup(popup.c_str());
     // Paste from the field's right-click menu: one undo step.
-    if (hit.pasted) uic::editElement(doc, c, e, [&](UIElement& el) { set(el, *hit.pasted); });
+    if (hit.pasted) uic::editElements(doc, c, idx, [&](UIElement& el, size_t) { set(el, *hit.pasted); });
     placePopupBelow(popup.c_str(), field, ImVec2(1, 0));
     pushMenuStyle();
     bool open = false;
@@ -1329,7 +1335,7 @@ bool colourRow(editor::Document& doc, Rows& rows, const char* id, const char* la
         float v[3] = {value[0], value[1], value[2]};
         ImGui::SetNextItemWidth(220);
         if (ImGui::ColorPicker3("##wheel", v, ImGuiColorEditFlags_NoSidePreview | ImGuiColorEditFlags_DisplayHex | ImGuiColorEditFlags_NoAlpha))
-            uic::editElement(doc, c, e, [&](UIElement& el) { set(el, {v[0], v[1], v[2]}); }, std::string("uicol") + id);
+            uic::editElements(doc, c, idx, [&](UIElement& el, size_t) { set(el, {v[0], v[1], v[2]}); }, std::string("uicol") + id);
         if (ImGui::IsItemDeactivated()) doc.endMerge();
         nameRect(std::string("ui.") + id + "pick", ImGui::GetCurrentWindow()->Rect());
         ImGui::EndPopup();
@@ -1340,11 +1346,11 @@ bool colourRow(editor::Document& doc, Rows& rows, const char* id, const char* la
 
 // The Blend row: opaque or one of the PS1's four semi-transparency modes, one
 // undo step per pick. Images and text cannot blend (their texels are opaque),
-// so for them it shows Opaque, greyed, and says why. Scripted tests: the field
-// is ui.blend, its menu rows ui.blend/<label>.
-void blendRow(Rows& rows, editor::Document& doc, int c, int ei, const UIElement& e) {
+// so for them it shows Opaque, greyed, and says why. For the elements `idx` of
+// canvas `c` (`can`: they can blend), showing `blend` or, `mixed`, "mixed".
+// Scripted tests: the field is ui.blend, its menu rows ui.blend/<label>.
+void blendRow(Rows& rows, editor::Document& doc, int c, const std::vector<int>& idx, bool can, splash::UIBlend blend, bool mixed = false) {
     static const char* const kLabels[] = {"Opaque", "50% (half)", "Add", "Subtract", "Add 25%"};
-    const bool can = splash::blendable(e.type);
     const char* tip = can ? "How it mixes with what is behind it. Opaque covers it. 50% (half) averages the two. "
                             "Add brightens what is behind it by the colour. Subtract darkens what is behind it by the colour. "
                             "Add 25% brightens what is behind it by a quarter of the colour."
@@ -1362,10 +1368,12 @@ void blendRow(Rows& rows, editor::Document& doc, int c, int ei, const UIElement&
              color::textFaint, kLabels[0]);
         return;
     }
-    const int cur = int(e.blend) <= 4 ? int(e.blend) : 0;
-    const int picked = dropdownMenu("ui.blend", field, nullptr, kLabels[cur], {kLabels[0], kLabels[1], kLabels[2], kLabels[3], kLabels[4]}, cur);
+    const int cur = int(blend) <= 4 ? int(blend) : 0;
+    const int picked = dropdownMenu("ui.blend", field, nullptr, mixed ? "mixed" : kLabels[cur],
+                                    {kLabels[0], kLabels[1], kLabels[2], kLabels[3], kLabels[4]}, mixed ? -1 : cur);
     if (ImGui::IsItemHovered()) tooltip(tip);
-    if (picked >= 0 && picked != cur) uic::editElement(doc, c, ei, [picked](UIElement& el) { el.blend = splash::UIBlend(picked); });
+    if (picked >= 0 && (mixed || picked != cur))
+        uic::editElements(doc, c, idx, [picked](UIElement& el, size_t) { el.blend = splash::UIBlend(picked); });
 }
 
 }  // namespace
@@ -1767,24 +1775,46 @@ void CanvasView::elementInspector(ImDrawList* dl, ImRect r, float y, editor::Doc
             ImRect vf = rows.row("lval", "Value", "How full the bar is, 0 to 100. Lua's UI.SetProgress changes it while playing.");
             number("val", vf, e.value, "%", 0, nullptr, [](UIElement& el, int v) { el.value = v; });
             m_colourOpen |= colourRow(doc, rows, "bg", "Background", "The empty part of the bar.", e.background,
-                                      [](UIElement& el, const std::array<float, 3>& v) { el.background = v; }, c, ei);
+                                      [](UIElement& el, const std::array<float, 3>& v) { el.background = v; }, c, {ei});
         }
         m_colourOpen |= colourRow(doc, rows, "col", e.type == UIElementType::Image ? "Tint" : e.type == UIElementType::Progress ? "Fill" : "Colour",
                                   e.type == UIElementType::Image ? "Multiplies the texture by colour/128: #808080 shows it as it is."
                                                                  : "Cut to 15-bit colour on the PS1, as the preview shows.",
-                                  e.color, [](UIElement& el, const std::array<float, 3>& v) { el.color = v; }, c, ei);
-        blendRow(rows, doc, c, ei, e);
+                                  e.color, [](UIElement& el, const std::array<float, 3>& v) { el.color = v; }, c, {ei});
+        blendRow(rows, doc, c, {ei}, splash::blendable(e.type), e.blend);
         rows.gap();
     }
 }
 
-// Several elements selected: only what they share. Position is the top-left of
-// the box around them; editing it moves them all together.
+// Several elements selected: what they share (#364). A field shows its value
+// when every one of them has it, else "mixed"; an edit sets it on all of them
+// as one undo step (a scrub or a picker drag merges into one until released).
+// Position is the top-left of the box around them; editing it moves them all
+// together. Fields of one type show only when every one is of that type.
+// Their names, texts, text keys, textures and sheets stay one at a time.
 void CanvasView::multiInspector(ImDrawList* dl, ImRect r, float y, editor::Document& doc) {
     Fonts& f = fonts();
     const int c = doc.uiSelection().canvas;
     const std::vector<int> sels = uic::selectedElements(doc);
-    const UICanvas& cv = doc.scene().canvases[size_t(c)];
+    const UICanvas cv = doc.scene().canvases[size_t(c)];  // a copy: an edit below replaces the canvases
+    const int pi = std::binary_search(sels.begin(), sels.end(), doc.uiSelection().element) ? doc.uiSelection().element : sels.back();
+    const UIElement& prim = cv.elements[size_t(pi)];  // what a mixed field starts from
+    const uic::SharedFields sf = uic::sharedFields(cv, sels);
+    // Scripted tests: what each field shows, once per change.
+    static std::map<std::string, std::string> reported;
+    auto report = [&](const std::string& id, const std::string& shown) {
+        if (!reportLayout) return;
+        std::string& last = reported[id];
+        if (last == shown) return;
+        last = shown;
+        std::printf("uicanvas: multi %s %s\n", id.c_str(), shown.c_str());
+        std::fflush(stdout);
+    };
+    auto editAll = [&](const std::function<void(UIElement&)>& fn, const std::string& key = {}) {
+        uic::editElements(doc, c, sels, [&](UIElement& el, size_t) { fn(el); }, key);
+    };
+    auto onOff = [](const std::optional<bool>& v) { return !v ? "mixed" : *v ? "on" : "off"; };
+
     Rows rows{dl, r.Min.x + space::md, r.Max.x - space::md, y};
     const float x0 = rows.x0, x1 = rows.x1;
     ImRect ic(ImVec2(x0, rows.y), ImVec2(x0 + 40, rows.y + 40));
@@ -1794,7 +1824,54 @@ void CanvasView::multiInspector(ImDrawList* dl, ImRect r, float y, editor::Docum
     std::snprintf(head, sizeof head, "%d elements", int(sels.size()));
     text(dl, ImVec2(ic.Max.x + space::md, rows.y + 2), f.medium, type::body, color::text, head);
     text(dl, ImVec2(ic.Max.x + space::md, rows.y + 25), f.regular, type::caption, color::textFaint, ("in " + cv.name).c_str());
+    {
+        // Visible: on when all are; mixed, a click shows them all.
+        const std::optional<bool> vis = uic::sharedValue(cv, sels, [](const UIElement& e) { return e.visible; });
+        report("visible", onOff(vis));
+        const ImRect tr(ImVec2(x1 - 30, rows.y + 12), ImVec2(x1, rows.y + 28));
+        nameRect("ui.visible", tr);
+        const bool allOn = vis.value_or(false);
+        if (toggle("uivisible", tr, allOn, !vis)) editAll([allOn](UIElement& el) { el.visible = !allOn; });
+        tooltip("Visible when the scene starts. When some are hidden, a click shows them all.");
+    }
     rows.y += 40 + space::lg;
+
+    // A whole number over every element. Typed, it sets that value on all; a
+    // scrub on a mixed field moves each by the drag from its own value when
+    // the drag began (ui::scrubOffset), so each keeps its offset.
+    struct MixedScrub {
+        std::string key;
+        std::vector<int> sels;
+        std::vector<int> from;  // per element, as `sels`
+    };
+    static MixedScrub scrub;
+    auto number = [&](const char* id, ImRect fr, const std::function<int(const UIElement&)>& get, const char* unit, ImU32 axis,
+                      const char* axisLabel, int lo, int hi, const std::function<void(UIElement&, int)>& set) {
+        const std::optional<int> shared = uic::sharedValue(cv, sels, get);
+        const std::string shown = shared ? std::to_string(*shared) : std::string("mixed");
+        report(id, shown);
+        nameRect(std::string("ui.") + id, fr);
+        float v = float(get(prim));
+        const std::string key = std::string("uinum") + id;
+        FieldEdit fe = numberField(id, fr, shown.c_str(), unit, axis, axisLabel, &v, true, !shared);
+        const bool scrubbing = scrub.key == key && scrub.sels == sels;
+        if (fe.changed && fe.scrubbed && (!shared || scrubbing)) {
+            if (!scrubbing) {
+                scrub = {key, sels, {}};
+                for (int i : sels) scrub.from.push_back(get(cv.elements[size_t(i)]));
+            }
+            uic::editElements(doc, c, sels, [&](UIElement& el, size_t k) {
+                set(el, int(ui::scrubOffset(float(scrub.from[k]), fe.scrubFrom, v, float(lo), float(hi), true)));
+            }, key);
+        } else if (fe.changed) {
+            const int nv = std::clamp(int(std::lround(v)), lo, hi);
+            editAll([&](UIElement& el) { set(el, nv); }, key);
+        }
+        if (fe.done) {
+            scrub = {};
+            doc.endMerge();
+        }
+    };
 
     int x = INT_MAX, yy = INT_MAX;
     for (int i : sels) {
@@ -1804,7 +1881,7 @@ void CanvasView::multiInspector(ImDrawList* dl, ImRect r, float y, editor::Docum
     if (rows.sectionHead("uilayout", icon::move, color::textDim, "Layout")) {
         ImRect field = rows.row("lpos", "Position", "Top-left corner of the box around all of them, in pixels. Changing it moves them together.");
         const float half = (field.GetWidth() - space::xs) * 0.5f;
-        auto number = [&](const char* id, ImRect fr, int value, ImU32 axis, const char* axisLabel, bool isX) {
+        auto moveBy = [&](const char* id, ImRect fr, int value, ImU32 axis, const char* axisLabel, bool isX) {
             float v = float(value);
             FieldEdit fe = numberField(id, fr, std::to_string(value).c_str(), nullptr, axis, axisLabel, &v, true);
             if (fe.changed) {
@@ -1818,8 +1895,129 @@ void CanvasView::multiInspector(ImDrawList* dl, ImRect r, float y, editor::Docum
             }
             if (fe.done) doc.endMerge();
         };
-        number("mposa", ImRect(field.Min, ImVec2(field.Min.x + half, field.Max.y)), x, color::axisX, "X", true);
-        number("mposb", ImRect(ImVec2(field.Max.x - half, field.Min.y), field.Max), yy, color::axisY, "Y", false);
+        moveBy("mposa", ImRect(field.Min, ImVec2(field.Min.x + half, field.Max.y)), x, color::axisX, "X", true);
+        moveBy("mposb", ImRect(ImVec2(field.Max.x - half, field.Min.y), field.Max), yy, color::axisY, "Y", false);
+        if (sf.size) {
+            // Size and anchor: lines have neither (their ends are their layout).
+            ImRect sz = rows.row("lsize", "Size", "Width and height in pixels. Typed, every one gets it; dragging a mixed one grows each by the drag.");
+            auto setSize = [this](bool w) {
+                return [this, w](UIElement& el, int v) {
+                    uic::Rect q = uic::layout(el, m_screen);
+                    (w ? q.w : q.h) = std::max(1, v);
+                    uic::place(el, q, m_screen);
+                };
+            };
+            number("sizea", ImRect(sz.Min, ImVec2(sz.Min.x + half, sz.Max.y)), [this](const UIElement& e) { return uic::layout(e, m_screen).w; },
+                   nullptr, color::axisX, "W", 1, 100000, setSize(true));
+            number("sizeb", ImRect(ImVec2(sz.Max.x - half, sz.Min.y), sz.Max), [this](const UIElement& e) { return uic::layout(e, m_screen).h; },
+                   nullptr, color::axisY, "H", 1, 100000, setSize(false));
+            ImRect af = rows.row("lanchor", "Anchor",
+                                 "What the positions are kept relative to if the screen size changes. Each stays where it is on screen.");
+            nameRect("ui.anchor", af);
+            const std::optional<std::string> al = uic::sharedValue(cv, sels, [](const UIElement& e) { return anchorLabel(e); });
+            report("anchor", al.value_or("mixed"));
+            if (pickField("anchor", af, nullptr, 0, al ? al->c_str() : "mixed")) ImGui::OpenPopup("##anchormenu");
+            ImGui::SetNextWindowPos(ImVec2(af.Min.x, af.Max.y + space::xs));
+            pushMenuStyle();
+            if (ImGui::BeginPopup("##anchormenu")) {
+                for (const AnchorPreset& a : kAnchors) {
+                    const bool picked = menuItem(al && *al == a.label ? icon::chevronRight : nullptr, color::accent, a.label);
+                    nameRect(std::string("ui.anchor/") + a.label, ImRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax()));
+                    if (picked)
+                        editAll([&](UIElement& el) {
+                            const uic::Rect keep = uic::layout(el, m_screen);
+                            el.anchorMin = {a.minX, a.minY};
+                            el.anchorMax = {a.maxX, a.maxY};
+                            uic::place(el, keep, m_screen);
+                        });
+                }
+                ImGui::EndPopup();
+            }
+            popMenuStyle();
+        }
+        rows.gap();
+    }
+    if (!sf.look) return;
+
+    // Appearance: the colour and blend all have, and the fields of their one type.
+    const std::optional<UIElementType> one = uic::sharedValue(cv, sels, [](const UIElement& e) { return e.type; });
+    const char* title = !one ? "Appearance" : *one == UIElementType::Text ? "Text" : *one == UIElementType::Image ? "Image"
+                      : *one == UIElementType::Progress ? "Progress bar" : *one == UIElementType::Line ? "Line" : "Box";
+    if (rows.sectionHead("uilook", one ? typeIcon(*one) : icon::layers, one ? typeColor(*one) : color::textDim, title)) {
+        if (sf.text) {
+            const UICanvas& ecv = cv;
+            const std::string own = ecv.defaultFont.empty() ? std::string("System (8 x 16)") : "Canvas default (" + ecv.defaultFont + ")";
+            const std::optional<std::string> font = uic::sharedValue(cv, sels, [](const UIElement& e) { return e.font; });
+            const std::string fl = !font ? std::string("mixed") : font->empty() ? own : *font;
+            report("font", fl);
+            ImRect ff = rows.row("lfont", "Font", "The system font or one of the scene's fonts, for all of them.");
+            nameRect("ui.font", ff);
+            if (pickField("font", ff, icon::type, rgb(0xf2c25c), fl.c_str())) ImGui::OpenPopup("##fontmenu");
+            ImGui::SetNextWindowPos(ImVec2(ff.Min.x, ff.Max.y + space::xs));
+            pushMenuStyle();
+            if (ImGui::BeginPopup("##fontmenu")) {
+                const bool pickOwn = menuItem(font && font->empty() ? icon::chevronRight : nullptr, color::accent, own.c_str());
+                nameRect("ui.font/" + own, ImRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax()));
+                if (pickOwn) editAll([](UIElement& el) { el.font.clear(); });
+                for (const splash::UIFont& uf : doc.scene().fonts) {
+                    std::string meta = uf.bitmap.empty() ? std::to_string(uf.size) + " px" : "bitmap";
+                    const bool picked = menuItem(font && *font == uf.name ? icon::chevronRight : nullptr, color::accent, uf.name.c_str(), meta.c_str());
+                    nameRect("ui.font/" + uf.name, ImRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax()));
+                    if (picked) {
+                        const std::string name = uf.name;  // a copy: the edit replaces the scene
+                        editAll([&](UIElement& el) { el.font = name; });
+                        break;
+                    }
+                }
+                ImGui::EndPopup();
+            }
+            popMenuStyle();
+        }
+        if (sf.image) {
+            ImRect bf = rows.row("lbpp", "Bit depth", "4 and 8 bpp use a palette (16 and 256 colours) and less VRAM.");
+            nameRect("ui.bpp", bf);
+            const std::optional<splash::BitDepth> bd = uic::sharedValue(cv, sels, [](const UIElement& e) { return e.bitDepth; });
+            const int cur = !bd ? -1 : *bd == splash::BitDepth::Bpp4 ? 0 : *bd == splash::BitDepth::Bpp8 ? 1 : 2;
+            const char* bl = cur < 0 ? "mixed" : cur == 0 ? "4 bpp" : cur == 1 ? "8 bpp" : "16 bpp";
+            report("bpp", bl);
+            const int picked = dropdownMenu("bpp", bf, nullptr, bl, {"4 bpp", "8 bpp", "16 bpp"}, cur);
+            if (picked >= 0 && picked != cur)
+                editAll([&](UIElement& el) {
+                    el.bitDepth = picked == 0 ? splash::BitDepth::Bpp4 : picked == 1 ? splash::BitDepth::Bpp8 : splash::BitDepth::Bpp16;
+                });
+            ImRect cf = rows.row("lcut", "Cutout", "Transparent texels (alpha under half) are left out instead of drawn black.");
+            const std::optional<bool> cut = uic::sharedValue(cv, sels, [](const UIElement& e) { return e.cutout; });
+            report("cutout", onOff(cut));
+            const ImRect sw(ImVec2(cf.Min.x, cf.GetCenter().y - 8), ImVec2(cf.Min.x + 30, cf.GetCenter().y + 8));
+            nameRect("ui.cut", sw);
+            const bool allCut = cut.value_or(false);
+            if (toggle("cut", sw, allCut, !cut)) editAll([allCut](UIElement& el) { el.cutout = !allCut; });
+            if (!cut)
+                text(dl, ImVec2(sw.Max.x + space::sm, centerY(f.regular, type::caption, cf.Min.y, cf.Max.y)), f.regular, type::caption,
+                     color::textFaint, "mixed");
+        }
+        auto colour = [&](const char* id, const char* label, const char* tip, std::array<float, 3> UIElement::*field) {
+            const std::optional<std::string> hex = uic::sharedValue(cv, sels, [field](const UIElement& e) { return ui::colourHex(e.*field); });
+            report(id, hex.value_or("mixed"));
+            colourRow(doc, rows, id, label, tip, prim.*field, [field](UIElement& el, const std::array<float, 3>& v) { el.*field = v; }, c, sels,
+                      !hex);
+        };
+        if (sf.progress) {
+            ImRect vf = rows.row("lval", "Value", "How full the bars are, 0 to 100. Lua's UI.SetProgress changes it while playing.");
+            number("val", vf, [](const UIElement& e) { return e.value; }, "%", 0, nullptr, -1000000, 1000000,
+                   [](UIElement& el, int v) { el.value = v; });
+            colour("bg", "Background", "The empty part of the bars.", &UIElement::background);
+        }
+        colour("col", sf.colourLabel,
+               one && *one == UIElementType::Image ? "Multiplies the texture by colour/128: #808080 shows it as it is."
+                                                    : "Cut to 15-bit colour on the PS1, as the preview shows.",
+               &UIElement::color);
+        if (sf.blend) {
+            const std::optional<splash::UIBlend> b = uic::sharedValue(cv, sels, [](const UIElement& e) { return e.blend; });
+            static const char* const kBlend[] = {"Opaque", "50% (half)", "Add", "Subtract", "Add 25%"};
+            report("blend", !b ? "mixed" : kBlend[int(*b) <= 4 ? int(*b) : 0]);
+            blendRow(rows, doc, c, sels, true, b.value_or(splash::UIBlend::Opaque), !b);
+        }
         rows.gap();
     }
 }
