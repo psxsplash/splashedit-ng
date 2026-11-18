@@ -1871,7 +1871,8 @@ static void pasteClipboard(State& st, editor::Document& doc, const std::optional
 // `index`, or with index -1 adds the picked files as new frames.
 // UiTexture: a UI image's Texture; the target is {canvas, element}.
 // UiFont: a Scene fonts Source; `index` is the font.
-enum class AssetSlot { Texture, Lua, TriggerLua, Clip, SkinClips, SceneLua, MemCardIcon, UiTexture, ClipModels, UiFont };
+// SpriteTexture: a sprite sheet's Texture; the sheet is the index.
+enum class AssetSlot { Texture, Lua, TriggerLua, Clip, SkinClips, SceneLua, MemCardIcon, UiTexture, ClipModels, UiFont, SpriteTexture };
 static AssetSlot g_assetSlot = AssetSlot::Texture;
 static editor::ObjectPath g_assetTarget;
 // Lua and Clip from the multi-object inspector: every selected object.
@@ -1944,13 +1945,16 @@ static void applyAssetFiles(State& st, editor::Document& doc, AssetSlot slot, co
                             const std::vector<std::string>& files, bool append = false, int index = -1,
                             const std::vector<editor::ObjectPath>& many = {}) {
     const bool sceneWide =
-        slot == AssetSlot::SceneLua || slot == AssetSlot::MemCardIcon || slot == AssetSlot::UiTexture || slot == AssetSlot::UiFont;
+        slot == AssetSlot::SceneLua || slot == AssetSlot::MemCardIcon || slot == AssetSlot::UiTexture || slot == AssetSlot::UiFont ||
+        slot == AssetSlot::SpriteTexture;
     if (files.empty() || (!sceneWide && !doc.object(target))) return;
     if (slot == AssetSlot::ClipModels) {
         addClipModels(st, doc, target, files);
         return;
     }
-    const char* folder = slot == AssetSlot::Texture || slot == AssetSlot::MemCardIcon || slot == AssetSlot::UiTexture ? "textures"
+    const char* folder = slot == AssetSlot::Texture || slot == AssetSlot::MemCardIcon || slot == AssetSlot::UiTexture ||
+                                 slot == AssetSlot::SpriteTexture
+                             ? "textures"
                          : slot == AssetSlot::Clip      ? "audio"
                          : slot == AssetSlot::SkinClips ? "anims"
                          : slot == AssetSlot::UiFont    ? "fonts"
@@ -1978,6 +1982,12 @@ static void applyAssetFiles(State& st, editor::Document& doc, AssetSlot slot, co
     if (slot == AssetSlot::UiTexture) {
         if (target.size() == 2)
             editor::uic::editElement(doc, target[0], target[1], [&](splash::UIElement& el) { el.texture = first; });
+        doc.refreshAssets(paths);
+        return;
+    }
+    if (slot == AssetSlot::SpriteTexture) {
+        if (index >= 0 && size_t(index) < doc.scene().spriteSheets.size())
+            editor::editSpriteSheet(doc, index, [&](splash::SpriteSheet& e) { e.texture = first; });
         doc.refreshAssets(paths);
         return;
     }
@@ -2045,6 +2055,7 @@ static void applyAssetFiles(State& st, editor::Document& doc, AssetSlot slot, co
             case AssetSlot::UiTexture:
             case AssetSlot::ClipModels:
             case AssetSlot::UiFont:
+            case AssetSlot::SpriteTexture:
                 break;
         }
     });
@@ -2085,7 +2096,8 @@ static bool slotTakes(int slot, editor::AssetType t, const std::string& path = {
         case AssetSlot::SkinClips: return t == T::Animation;
         case AssetSlot::ClipModels: return t == T::Model;
         case AssetSlot::MemCardIcon:
-        case AssetSlot::UiTexture: return t == T::Texture;
+        case AssetSlot::UiTexture:
+        case AssetSlot::SpriteTexture: return t == T::Texture;
         case AssetSlot::UiFont: return t == T::Font || (t == T::Texture && editor::uic::isBitmapFontFile(path));
     }
     return false;
@@ -2122,7 +2134,8 @@ static std::optional<editor::AssetField> slotAssetField(int slot) {
         case AssetSlot::MemCardIcon: return F::MemCardIcon;
         case AssetSlot::UiTexture:
         case AssetSlot::ClipModels:
-        case AssetSlot::UiFont: break;
+        case AssetSlot::UiFont:
+        case AssetSlot::SpriteTexture: break;
     }
     return std::nullopt;
 }
@@ -8180,7 +8193,7 @@ static constexpr const char* kFacingHint =
     "n: back to the camera, s: facing it; pass the object's yaw minus Camera.GetRotation().y";
 
 template <typename Row, typename Caption>
-static void spriteSheetsSection(ImDrawList* dl, editor::Document& doc, float x0, float x1, float& y, float lw, Row& row,
+static void spriteSheetsSection(State& st, ImDrawList* dl, editor::Document& doc, float x0, float x1, float& y, float lw, Row& row,
                                 Caption& caption) {
     namespace fs = std::filesystem;
     Fonts& f = fonts();
@@ -8338,6 +8351,10 @@ static void spriteSheetsSection(ImDrawList* dl, editor::Document& doc, float x0,
         const ImRect texRow = row("lspritetex", "Texture", "The image cut into cells, row by row from the top left. Transparent below half alpha.");
         nameRect("scene.spritetex", texRow);
         const int tp = dropdownMenu("scene.spritetex", texRow, icon::image, s.texture.empty() ? "None" : s.texture.c_str(), items, curTex);
+        // An image dragged from the Project panel lands on it, as on a UI image's Texture (#160).
+        ImRect shownTex = texRow;
+        shownTex.ClipWith(ImRect(dl->GetClipRectMin(), dl->GetClipRectMax()));
+        slotTarget(st, static_cast<int>(AssetSlot::SpriteTexture), {}, texRow, shownTex, sel);
         if (tp >= 0 && size_t(tp) < images.size()) {
             const std::string picked = images[size_t(tp)];
             edit([&](splash::SpriteSheet& e) { e.texture = picked; });
@@ -11529,7 +11546,7 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
         }
     }
 
-    spriteSheetsSection(dl, doc, x0, x1, y, lw, row, caption);
+    spriteSheetsSection(st, dl, doc, x0, x1, y, lw, row, caption);
     tilemapSection(st, dl, doc, x0, x1, y, lw, row, caption);
 
     const char* hint = "Pick an object in the Scene panel to edit it.";
