@@ -37,6 +37,7 @@
 #include "editor/asset_fields.hh"
 #include "editor/catalog.hh"
 #include "editor/document.hh"
+#include "editor/file_cache.hh"
 #include "editor/hardware.hh"
 #include "editor/gizmo.hh"
 #include "editor/live_export.hh"
@@ -931,6 +932,36 @@ void testTriggerIndexMatchesExport() {
         const int i = shown(p);
         CHECK(i >= 0 && size_t(i) < written.size() && written[size_t(i)] == name);
     }
+}
+
+// #369: the Project settings tab reads a music track or movie again only
+// when the file changes (appears, goes, is written), not every second.
+void testFileCache() {
+    namespace fs = std::filesystem;
+    const fs::path dir = g_outDir / "filecache";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    const fs::path f = dir / "track.wav";
+    auto write = [&](const std::string& bytes) { std::ofstream(f, std::ios::binary) << bytes; };
+    editor::FileCache<std::string> cache;
+    auto read = [](const fs::path& p) {
+        std::ifstream in(p, std::ios::binary);
+        return in ? std::string((std::istreambuf_iterator<char>(in)), {}) : std::string("missing");
+    };
+    CHECK(cache.get(f, read) == "missing" && cache.reads() == 1);
+    CHECK(cache.get(f, read) == "missing" && cache.reads() == 1);  // still not there: not read again
+    write("abc");
+    CHECK(cache.get(f, read) == "abc" && cache.reads() == 2);      // it appeared
+    for (int i = 0; i < 5; i++) CHECK(cache.get(f, read) == "abc");
+    CHECK(cache.reads() == 2);                                       // unchanged: kept
+    write("abcdef");
+    CHECK(cache.get(f, read) == "abcdef" && cache.reads() == 3);   // written: read again
+    write("ABCDEF");                                                 // same size: the time tells
+    fs::last_write_time(f, fs::last_write_time(f) + std::chrono::seconds(2));
+    CHECK(cache.get(f, read) == "ABCDEF" && cache.reads() == 4);
+    fs::remove(f);
+    CHECK(cache.get(f, read) == "missing" && cache.reads() == 5);  // gone
+    CHECK(editor::fileStamp(f) == editor::FileStamp{});
 }
 
 // The pure maths behind the rotate and scale gizmos.
@@ -22249,6 +22280,7 @@ int main(int argc, char** argv) {
     testPick();
     testTriggerWorldBox();
     testTriggerIndexMatchesExport();
+    testFileCache();
     testGizmoMath();
     testPlayerViewFov();
     testPlayerViewCamera();
