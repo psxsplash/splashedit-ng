@@ -1942,6 +1942,22 @@ std::vector<uint8_t> memCardTable(const MemCardSettings& mc, ImageFor& imageFor,
 
 }  // namespace
 
+std::vector<const FlatObject*> exportedTriggers(const std::vector<FlatObject>& flat) {
+    std::vector<const FlatObject*> out;
+    for (const FlatObject& fo : flat)
+        if (fo.activeInHierarchy && fo.object->active && fo.object->trigger) out.push_back(&fo);
+    return out;
+}
+
+int exportedTriggerIndex(const Scene& scene, const Object* object) {
+    if (!object || !object->trigger) return -1;
+    const std::vector<FlatObject> flat = flatten(scene);
+    const std::vector<const FlatObject*> triggers = exportedTriggers(flat);
+    for (size_t i = 0; i < triggers.size(); i++)
+        if (triggers[i]->object == object) return int(i);
+    return -1;
+}
+
 // Paths (core/path.hh): Lua files the export makes, by their virtual paths.
 // Strings (core/strings.hh): the strings library, loaded first so every script
 // sees _G.Strings when it runs.
@@ -2439,11 +2455,12 @@ static ExportResult exportSplashpackBaked(const Scene& scene, const fs::path& ro
     };
     if (gen && !gen->strings.empty()) addLua(gen->strings);
     // Trigger boxes and interactables: active objects only (FindObjectsByType
-    // skips inactive ones), in canonical order.
-    std::vector<const FlatObject*> triggers, interactables, audioSources, agents;
+    // skips inactive ones), in canonical order. The trigger order is the
+    // index the scripts get, which the inspector shows: exportedTriggers.
+    const std::vector<const FlatObject*> triggers = exportedTriggers(flat);
+    std::vector<const FlatObject*> interactables, audioSources, agents;
     for (const FlatObject& fo : flat) {
         if (!fo.activeInHierarchy || !fo.object->active) continue;
-        if (fo.object->trigger) triggers.push_back(&fo);
         if (fo.object->interactable) interactables.push_back(&fo);
         if (fo.object->agent) {
             agents.push_back(&fo);

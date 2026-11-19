@@ -393,6 +393,19 @@ inline size_t agentBytes(const AgentComponent& a) {
 // correction to every key, so this is that position less the correction.
 std::array<int, 2> uiPositionTrackStart(const UIElement& e, const VramSettings& vs = {});
 
+// The Trigger boxes the splashpack writes, in record order: the objects with
+// a Trigger that are exported (on, under parents that are on), depth-first
+// pre-order as flatten walks them. A box's position in this list is the index
+// psxsplash passes to onTriggerEnter(index) and onTriggerExit(index); the
+// inspector shows it under the Trigger.
+std::vector<const FlatObject*> exportedTriggers(const std::vector<FlatObject>& flat);
+// `object`'s index in exportedTriggers(flatten(scene)), or -1 when it has no
+// Trigger or is not exported.
+int exportedTriggerIndex(const Scene& scene, const Object* object);
+// psxsplash's CollisionSystem::MAX_TRIGGER_BOXES: boxes past it are not
+// registered and never fire.
+constexpr int kEngineTriggerBoxes = 32;
+
 // `projectRoot` resolves the project-relative asset paths in the scene.
 // `out` is the .splashpack path; .vram and .spu are written next to it.
 ExportResult exportSplashpack(const Scene& scene, const std::filesystem::path& projectRoot,

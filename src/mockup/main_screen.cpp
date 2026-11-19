@@ -13834,6 +13834,33 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                 newScript(st, doc, &path, *lang, true);
         }
         y += size::field + space::sm;
+        {
+            // The index the scripts get: this box's place in the splashpack's
+            // trigger records (splash::exportedTriggers, the export's order).
+            // Looked up again: a new script above may have edited the scene.
+            const splash::Object* self = doc.object(path);
+            const int ti = doc.inPrefabMode() ? -1 : splash::exportedTriggerIndex(doc.scene(), self);
+            std::string shown;
+            ImU32 col = color::textDim;
+            if (doc.inPrefabMode()) {
+                shown = "Per instance: open the scene to see it", col = color::textFaint;
+            } else if (ti < 0) {
+                shown = !self || !self->active ? "None: off, not exported"
+                        : offVia.empty()           ? "None: not exported"
+                                                   : "None: not exported, '" + offVia + "' is off";
+                col = color::textFaint;
+            } else {
+                shown = std::to_string(ti);
+                if (ti >= splash::kEngineTriggerBoxes)
+                    shown += ": past psxsplash's " + std::to_string(splash::kEngineTriggerBoxes) + " trigger boxes, it never fires", col = color::warn;
+            }
+            const ImRect fr = row("ltindex", "Index", "The index psxsplash passes to onTriggerEnter(index) and onTriggerExit(index) for this box: "
+                                                      "its place among the scene's exported Trigger boxes, in hierarchy order. Adding, moving or "
+                                                      "turning off a Trigger above it changes it.");
+            nameRect("obj.tindex", fr);
+            text(dl, ImVec2(fr.Min.x, centerY(f.regular, type::body, fr.Min.y, fr.Max.y)), f.regular, type::body, col, shown.c_str());
+            report("tindex", "trigger: " + (self ? self->name : std::string()) + " index " + (ti < 0 ? std::string("none") : std::to_string(ti)));
+        }
         sectionEnd(top);
     }
     // Scripted checks name each axis of a vec3Field: <name>.x/.y/.z.
