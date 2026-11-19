@@ -855,6 +855,84 @@ void testTriggerWorldBox() {
     CHECK(near(mn, {-2, -2, -1.5f}) && near(mx, {2, 2, 1.5f}));  // scale stretches the box
 }
 
+// #370: the Trigger inspector's Index is the box's record in the pack, the
+// index onTriggerEnter/onTriggerExit get: exported triggers in hierarchy
+// (pre-)order, an off object or one under an off parent left out.
+void testTriggerIndexMatchesExport() {
+    auto trig = [](const char* name, float x) {
+        splash::Object o;
+        o.name = name;
+        o.transform.position = {x, 0, 0};
+        o.trigger = splash::TriggerComponent{};
+        return o;
+    };
+    splash::Scene sc;
+    splash::Object hall;
+    hall.name = "Hall";
+    hall.children.push_back(trig("Door", 40));
+    sc.objects.push_back(hall);
+    splash::Object off = trig("Off", 20);
+    off.active = false;
+    sc.objects.push_back(off);
+    splash::Object group;
+    group.name = "Group";
+    group.active = false;
+    group.children.push_back(trig("Hidden", -20));
+    sc.objects.push_back(group);
+    splash::Object gate = trig("Gate", -40);
+    gate.startActive = false;  // still exported: its box is there from the start
+    sc.objects.push_back(gate);
+    sc.objects.push_back(trig("Pit", 0));
+
+    // What the inspector shows, as it asks for it.
+    editor::Document d;
+    d.reset(sc);
+    auto shown = [&](const editor::ObjectPath& p) { return splash::exportedTriggerIndex(d.scene(), d.object(p)); };
+    CHECK(shown({0, 0}) == 0);  // Door
+    CHECK(shown({3}) == 1);     // Gate
+    CHECK(shown({4}) == 2);     // Pit
+    CHECK(shown({1}) == -1);    // Off: not exported
+    CHECK(shown({2, 0}) == -1); // Hidden: its parent is off
+    CHECK(shown({0}) == -1);    // Hall: no Trigger
+
+    // What the export writes: the trigger records after the header, the Lua
+    // table, the game objects and the colliders (tests/splashdiff.py's walk).
+    const std::filesystem::path project = g_outDir / "trigindex";
+    std::filesystem::remove_all(project);
+    std::filesystem::create_directories(project);
+    const splash::ExportResult r = splash::exportSplashpack(d.scene(), project, project / "scene.splashpack");
+    CHECK(r.ok());
+    std::ifstream in(project / "scene.splashpack", std::ios::binary);
+    const std::string b((std::istreambuf_iterator<char>(in)), {});
+    auto u16 = [&](size_t at) { return unsigned(uint8_t(b[at])) | unsigned(uint8_t(b[at + 1])) << 8; };
+    auto i32 = [&](size_t at) { return int32_t(uint32_t(u16(at)) | uint32_t(u16(at + 2)) << 16); };
+    // The header is 156 bytes in v25-v27, 160 from v28 (shadows).
+    CHECK(b.size() > 160 && u16(2) >= 25);
+    if (b.size() <= 160 || u16(2) < 25) return;
+    const unsigned count = u16(38);
+    const size_t start = (u16(2) >= 28 ? 160 : 156) + size_t(u16(4)) * 8 + size_t(u16(6)) * 92 + size_t(u16(12)) * 32;
+    CHECK(count == 3 && b.size() >= start + count * 32);
+    if (count != 3 || b.size() < start + count * 32) return;
+    // Each record's box centre on X tells its object: Gate -40, Pit 0, Door +40.
+    std::vector<std::string> written;
+    int64_t far = 0;
+    for (unsigned i = 0; i < count; i++) far = std::max<int64_t>(far, std::abs(int64_t(i32(start + i * 32)) + i32(start + i * 32 + 12)));
+    for (unsigned i = 0; i < count; i++) {
+        const size_t at = start + i * 32;
+        CHECK(int16_t(u16(at + 24)) == -1 && u16(at + 26) == 0 && i32(at + 28) == 0);  // no script, the pad
+        const int64_t cx = int64_t(i32(at)) + i32(at + 12);
+        written.push_back(cx < -far / 4 ? "Gate" : cx > far / 4 ? "Door" : "Pit");
+    }
+    CHECK((written == std::vector<std::string>{"Door", "Gate", "Pit"}));
+    for (const char* name : {"Door", "Gate", "Pit"}) {
+        const editor::ObjectPath p = std::string(name) == "Door" ? editor::ObjectPath{0, 0}
+                                     : std::string(name) == "Gate" ? editor::ObjectPath{3}
+                                                                    : editor::ObjectPath{4};
+        const int i = shown(p);
+        CHECK(i >= 0 && size_t(i) < written.size() && written[size_t(i)] == name);
+    }
+}
+
 // The pure maths behind the rotate and scale gizmos.
 void testGizmoMath() {
     const float pi = editor::kPi;
@@ -22170,6 +22248,7 @@ int main(int argc, char** argv) {
     testMove();
     testPick();
     testTriggerWorldBox();
+    testTriggerIndexMatchesExport();
     testGizmoMath();
     testPlayerViewFov();
     testPlayerViewCamera();
