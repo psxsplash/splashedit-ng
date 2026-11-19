@@ -33,6 +33,7 @@
 #include "editor/asset_fields.hh"
 #include "editor/catalog.hh"
 #include "editor/document.hh"
+#include "editor/file_cache.hh"
 #include "editor/gizmo.hh"
 #include "editor/player_view.hh"
 #include "editor/lua_editor.hh"
@@ -9207,6 +9208,63 @@ static void tilemapSection(State& st, ImDrawList* dl, editor::Document& doc, flo
     }
 }
 
+// The files the Project settings tab offers: the project's scenes, audio
+// files and movies, from one walk of its folder. The first walk for a
+// project is made at once; after that the folder is walked again every
+// second off the frame, and the lists are swapped in when it is done: three
+// walks of a big project folder on the frame stalled the editor every second,
+// and with it the pad input Play gets (#369).
+struct ProjectFileLists {
+    std::vector<std::filesystem::path> scenes;
+    std::vector<std::string> audio, movies;  // project-relative, '/' separators
+};
+
+static ProjectFileLists walkProjectFiles(const std::filesystem::path& root) {
+    namespace fs = std::filesystem;
+    ProjectFileLists l;
+    std::error_code ec;
+    if (!root.empty())
+        for (fs::recursive_directory_iterator it(root, fs::directory_options::skip_permission_denied, ec), end; !ec && it != end;
+             it.increment(ec)) {
+            if (!it->is_regular_file(ec)) continue;
+            const fs::path& p = it->path();
+            if (p.extension() == ".scene") l.scenes.push_back(p.lexically_relative(root));
+            if (splash::isAudioFile(p)) l.audio.push_back(utf8(p.lexically_relative(root).generic_u8string()));
+            if (splash::isMovieFile(p)) l.movies.push_back(utf8(p.lexically_relative(root).generic_u8string()));
+        }
+    std::sort(l.scenes.begin(), l.scenes.end());
+    std::sort(l.audio.begin(), l.audio.end());
+    std::sort(l.movies.begin(), l.movies.end());
+    return l;
+}
+
+static const ProjectFileLists& projectFileLists(const std::filesystem::path& root, double now) {
+    static std::filesystem::path listed, walking;
+    static ProjectFileLists lists;
+    static double walkedAt = -1;
+    static std::future<ProjectFileLists> walk;
+    // Taken in at most once a frame, so the lists the tab holds stay put
+    // through its frame.
+    static int polled = -1;
+    if (ImGui::GetFrameCount() != polled) {
+        polled = ImGui::GetFrameCount();
+        if (walk.valid() && walk.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+            ProjectFileLists done = walk.get();
+            if (walking == listed) lists = std::move(done);
+        }
+    }
+    if (root != listed) {
+        listed = root;
+        walkedAt = now;
+        lists = walkProjectFiles(root);
+    } else if (now - walkedAt > 1.0 && !walk.valid()) {
+        walkedAt = now;
+        walking = root;
+        walk = std::async(std::launch::async, walkProjectFiles, root);
+    }
+    return lists;
+}
+
 // The Project settings tab of the inspector (#343): what the whole project
 // shares, kept in files at its root, not in any scene: the build list
 // (scenes.list), the VRAM layout (vram.json) and the disc (disc.json). The
@@ -9254,7 +9312,7 @@ static void projectSettings(State& st, ImDrawList* dl, ImRect r, float y, editor
         namespace fs = std::filesystem;
         const fs::path root = doc.projectRoot();
         static fs::path cachedRoot;
-        static std::vector<fs::path> list, scenes;
+        static std::vector<fs::path> list;
         static double readAt = -1;
         const double now = ImGui::GetTime();
         // Read again now and then, so files added or a list edited outside show up.
@@ -9262,15 +9320,8 @@ static void projectSettings(State& st, ImDrawList* dl, ImRect r, float y, editor
             cachedRoot = root;
             readAt = now;
             list = editor::loadBuildList(root);
-            scenes.clear();
-            std::error_code ec;
-            if (!root.empty())
-                for (fs::recursive_directory_iterator it(root, fs::directory_options::skip_permission_denied, ec), end;
-                     !ec && it != end; it.increment(ec))
-                    if (it->path().extension() == ".scene" && it->is_regular_file(ec))
-                        scenes.push_back(it->path().lexically_relative(root));
-            std::sort(scenes.begin(), scenes.end());
         }
+        const std::vector<fs::path>& scenes = projectFileLists(root, now).scenes;
         auto save = [&](std::vector<fs::path> next) {
             if (editor::saveBuildList(root, next)) list = std::move(next);
             else notify(st, "Cannot write " + utf8(root / "scenes.list"), true);
@@ -10130,10 +10181,12 @@ static void projectSettings(State& st, ImDrawList* dl, ImRect r, float y, editor
                 save(std::move(next));
             }
         }
-        // Each track's duration, recomputed when the list changes or now and
-        // then (a file that appears or changes). "missing"/"unreadable" else.
+        // Each track's duration, looked at when the list changes or now and
+        // then (a file that appears or changes) but read again only when the
+        // file has changed (#369). "missing"/"unreadable" else.
         static std::vector<std::string> durFor, durList;
         static double durAt = -1;
+        static editor::FileCache<std::string> durCache;
         if (durFor != tracks || now - durAt > 1.0) {
             durFor = tracks;
             durAt = now;
@@ -10141,22 +10194,19 @@ static void projectSettings(State& st, ImDrawList* dl, ImRect r, float y, editor
             for (const std::string& rel : tracks) {
                 const fs::path p = root.empty() ? fs::path(std::u8string(rel.begin(), rel.end()))
                                                 : root / fs::path(std::u8string(rel.begin(), rel.end()));
-                std::error_code fe;
-                std::string d;
-                if (!fs::is_regular_file(p, fe)) {
-                    d = "missing";
-                } else {
+                durList.push_back(durCache.get(p, [](const fs::path& file) {
+                    std::error_code fe;
+                    if (!fs::is_regular_file(file, fe)) return std::string("missing");
                     try {
-                        const splash::AudioFileInfo info = splash::audioFileInfo(p);
+                        const splash::AudioFileInfo info = splash::audioFileInfo(file);
                         const long secs = info.rate > 0 ? long(info.frames / uint64_t(info.rate)) : 0;
                         char b[32];
                         std::snprintf(b, sizeof b, "%ld:%02ld", secs / 60, secs % 60);
-                        d = b;
+                        return std::string(b);
                     } catch (const std::exception&) {
-                        d = "unreadable";
+                        return std::string("unreadable");
                     }
-                }
-                durList.push_back(d);
+                }));
             }
         }
 
@@ -10213,21 +10263,7 @@ static void projectSettings(State& st, ImDrawList* dl, ImRect r, float y, editor
             save(std::move(next));
         }
         // Add: the project's audio files, then "Choose file...".
-        static std::vector<std::string> audioFiles;
-        static fs::path audioRoot;
-        static double audioAt = -1;
-        if (root != audioRoot || now - audioAt > 1.0) {
-            audioRoot = root;
-            audioAt = now;
-            audioFiles.clear();
-            std::error_code ec;
-            if (!root.empty())
-                for (fs::recursive_directory_iterator it(root, fs::directory_options::skip_permission_denied, ec), end;
-                     !ec && it != end; it.increment(ec))
-                    if (it->is_regular_file(ec) && splash::isAudioFile(it->path()))
-                        audioFiles.push_back(utf8(it->path().lexically_relative(root).generic_u8string()));
-            std::sort(audioFiles.begin(), audioFiles.end());
-        }
+        const std::vector<std::string>& audioFiles = projectFileLists(root, now).audio;
         std::vector<const char*> addItems;
         for (const std::string& a : audioFiles) addItems.push_back(a.c_str());
         addItems.push_back("Choose file...");
@@ -10275,13 +10311,23 @@ static void projectSettings(State& st, ImDrawList* dl, ImRect r, float y, editor
                 save(std::move(next));
             }
         }
-        // A row's words, recomputed when the list changes or now and then.
+        // A row's words, recomputed when the list changes or, looked at now
+        // and then, one of its files has (#369: not read again every second).
         static std::vector<std::string> mvFor, mvInfo;
+        static std::vector<editor::FileStamp> mvStamps;
         static std::vector<char> mvBad;
         static double mvAt = -1;
-        if (mvFor != movies || now - mvAt > 1.0) {
-            mvFor = movies;
+        std::vector<editor::FileStamp> stampsNow;
+        const bool mvLook = mvFor != movies || now - mvAt > 1.0;
+        if (mvLook) {
             mvAt = now;
+            for (const std::string& rel : movies)
+                stampsNow.push_back(editor::fileStamp(root.empty() ? fs::path(std::u8string(rel.begin(), rel.end()))
+                                                                   : root / fs::path(std::u8string(rel.begin(), rel.end()))));
+        }
+        if (mvLook && (mvFor != movies || stampsNow != mvStamps)) {
+            mvFor = movies;
+            mvStamps = std::move(stampsNow);
             mvInfo.clear();
             mvBad.clear();
             for (const std::string& rel : movies) {
@@ -10372,21 +10418,7 @@ static void projectSettings(State& st, ImDrawList* dl, ImRect r, float y, editor
             save(std::move(next));
         }
         // Add: the project's movie files, then "Choose file...".
-        static std::vector<std::string> movieFiles;
-        static fs::path movieRoot;
-        static double movieAt = -1;
-        if (root != movieRoot || now - movieAt > 1.0) {
-            movieRoot = root;
-            movieAt = now;
-            movieFiles.clear();
-            std::error_code ec;
-            if (!root.empty())
-                for (fs::recursive_directory_iterator it(root, fs::directory_options::skip_permission_denied, ec), end;
-                     !ec && it != end; it.increment(ec))
-                    if (it->is_regular_file(ec) && splash::isMovieFile(it->path()))
-                        movieFiles.push_back(utf8(it->path().lexically_relative(root).generic_u8string()));
-            std::sort(movieFiles.begin(), movieFiles.end());
-        }
+        const std::vector<std::string>& movieFiles = projectFileLists(root, now).movies;
         std::vector<const char*> addMovies;
         for (const std::string& a : movieFiles) addMovies.push_back(a.c_str());
         addMovies.push_back("Choose file...");
