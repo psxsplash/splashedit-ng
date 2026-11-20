@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "editor/document.hh"
+#include "editor/panel_window.hh"
 #include "splashpack.hh"
 
 namespace editor {
@@ -54,6 +55,9 @@ struct PlayTools {
     // Scene tab only); consoleDocked shows the output in a Console tab of
     // the bottom dock instead of a popup off the status bar.
     bool gameEveryTab = true, consoleDocked = false;
+    // The Game view and the output in OS windows of their own (#345,
+    // editor/panel_window.hh): out or not, and where each window was.
+    PanelWindow gameWindow, consoleWindow;
     // The inspector's Scale lock (#264): one axis edited scales all three.
     bool scaleLock = false;
 };
@@ -67,7 +71,9 @@ inline bool usesRelay(const PlayTools& t) { return t.players >= 3 || (t.players 
 // square, saved before integer scaling, reads as integer), game_dither= (1 or 0),
 // game_look= (rgb, svideo or composite), game_overlay= (over, strip or hover),
 // game_crop= (none, action or title), game_fps= (1 or 0), ui_safe_area= (1 or 0),
-// scale_lock= (1 or 0), game_every_tab= (1 or 0), console_docked= (1 or 0). A missing
+// scale_lock= (1 or 0), game_every_tab= (1 or 0), console_docked= (1 or 0),
+// game_detached= and console_detached= (1 or 0), game_window= and console_window=
+// (x,y,w,h in screen coordinates; written only once placed). A missing
 // file or key reads as empty or off, but boot_logo, game_dither and game_every_tab as on,
 // players as 1 (also for a value that is not a number) and game_aspect as 4:3;
 // an unknown game_overlay or game_crop as over and none.

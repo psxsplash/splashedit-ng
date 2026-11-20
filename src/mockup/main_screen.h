@@ -590,10 +590,23 @@ struct State {
         std::vector<std::vector<int>> many;  // the multi-object inspector's: every selected object
     };
     std::vector<AssetSlotTarget> assetSlots;
+    // Panels in OS windows of their own (#345): the shell raises a panel's
+    // window when this asks (the status bar's Play entry with the output out).
+    std::array<bool, editor::kDetachPanels> raisePanel{};
 };
 
 // Draws the main screen for `doc` filling `size`. Returns the title-bar
 // rect so the platform layer can make it draggable.
 ImRect drawMainScreen(State& state, editor::Document& doc, viewport::Ps1View& view, ImVec2 size);
+
+// The Game view and Play's output out of the main window (#345). The saved
+// part (out or not, where) is Play's tools' (editor::PlayTools::gameWindow,
+// consoleWindow); the shell opens a window for each panel while
+// panelWindowWanted says, draws it with drawPanelWindow in an ImGui context of
+// its own filling `size`, and closing the window calls setPanelDetached(false).
+editor::PanelWindow& panelWindow(State& state, editor::DetachPanel panel);
+bool panelWindowWanted(const State& state, editor::DetachPanel panel);
+void setPanelDetached(State& state, editor::DetachPanel panel, bool detached);
+void drawPanelWindow(State& state, editor::Document& doc, editor::DetachPanel panel, ImVec2 size);
 
 }  // namespace mockup

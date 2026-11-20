@@ -6,6 +6,7 @@
 #include <imgui_impl_sdl3.h>
 
 #include <algorithm>
+#include <array>
 #include <cfloat>
 #include <chrono>
 #include <cmath>
@@ -15,6 +16,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <map>
 #include <string>
 #include <system_error>
 #include <vector>
@@ -28,6 +30,7 @@
 
 #include "editor/document.hh"
 #include "editor/jumplist.hh"
+#include "editor/panel_window.hh"
 #include "editor/texture_preview.hh"
 #include "emulator.h"
 #include "gl.h"
@@ -57,15 +60,69 @@ ImU32 g_mouseUnscaledFrom = 0;
 
 // Brings the mouse positions queued since the last call (SDL events, the
 // backend's global mouse and scripted input alike) from window to UI
-// coordinates. Called just before ImGui::NewFrame.
-void scaleQueuedMouse(float c) {
+// coordinates, in the current ImGui context. Called just before ImGui::NewFrame.
+void scaleQueuedMouse(float c, ImU32& unscaledFrom = g_mouseUnscaledFrom) {
     ImGuiContext& g = *ImGui::GetCurrentContext();
     for (ImGuiInputEvent& e : g.InputEventsQueue) {
-        if (e.EventId < g_mouseUnscaledFrom || e.Type != ImGuiInputEventType_MousePos) continue;
+        if (e.EventId < unscaledFrom || e.Type != ImGuiInputEventType_MousePos) continue;
         if (e.MousePos.PosX > -FLT_MAX) e.MousePos.PosX = ui::toUi(e.MousePos.PosX, c);
         if (e.MousePos.PosY > -FLT_MAX) e.MousePos.PosY = ui::toUi(e.MousePos.PosY, c);
     }
-    g_mouseUnscaledFrom = g.InputEventsNextEventId;
+    unscaledFrom = g.InputEventsNextEventId;
+}
+
+// A panel out of the main window (#345, mockup::panelWindowWanted): its OS
+// window with a GL context sharing the main one's objects (the game's
+// texture), and an ImGui context of its own sharing the main one's fonts. Its
+// draw data goes through the main context's renderer, as ImGui's own
+// multi-viewport windows do. `named`: its controls as last drawn, for
+// scripted input (--in).
+struct PanelOs {
+    SDL_Window* win = nullptr;
+    SDL_GLContext gl = nullptr;
+    ImGuiContext* ctx = nullptr;
+    ImU32 unscaledFrom = 0;
+    std::map<std::string, ImRect> named;
+};
+std::array<PanelOs, editor::kDetachPanels> g_panels;
+// The window --focus-window last focused (screenshot runs; null: none yet).
+SDL_Window* g_scriptFocus = nullptr;
+
+// The panel `name` names ("game", "console"), or -1.
+int panelByName(const std::string& name) {
+    for (int k = 0; k < editor::kDetachPanels; ++k)
+        if (name == editor::detachPanelName(editor::DetachPanel(k))) return k;
+    return -1;
+}
+int panelOfWindow(SDL_WindowID id) {
+    for (int k = 0; k < editor::kDetachPanels; ++k)
+        if (g_panels[size_t(k)].win && SDL_GetWindowID(g_panels[size_t(k)].win) == id) return k;
+    return -1;
+}
+
+// Every display's usable bounds, the primary first.
+std::vector<editor::WindowRect> displayRects() {
+    std::vector<editor::WindowRect> out;
+    const SDL_DisplayID primary = SDL_GetPrimaryDisplay();
+    int n = 0;
+    SDL_DisplayID* ids = SDL_GetDisplays(&n);
+    for (int i = 0; i < n; ++i) {
+        SDL_Rect r{};
+        if (!SDL_GetDisplayUsableBounds(ids[i], &r) && !SDL_GetDisplayBounds(ids[i], &r)) continue;
+        const editor::WindowRect w{r.x, r.y, r.w, r.h};
+        if (ids[i] == primary) out.insert(out.begin(), w);
+        else out.push_back(w);
+    }
+    SDL_free(ids);
+    return out;
+}
+
+// Where a panel's window is now, in screen coordinates.
+editor::WindowRect windowRectOf(SDL_Window* win) {
+    editor::WindowRect r;
+    SDL_GetWindowPosition(win, &r.x, &r.y);
+    SDL_GetWindowSize(win, &r.w, &r.h);
+    return r;
 }
 
 // The backend's IME hook, handed the text cursor in window coordinates.
@@ -101,7 +158,7 @@ SDL_HitTestResult hitTest(SDL_Window* win, const SDL_Point* p, void*) {
 // Scripted input for screenshot mode, so interactions can be checked headless.
 // Actions run one after another from frame 5, in command-line order.
 struct Action {
-    enum Kind { Click, DoubleClick, Drag, Key, Wheel, Text, Wait, KeyDown, KeyUp, MouseDown, MouseUp, Move, Drop, Shot, WaitImport, WaitExport, WaitPlay, ScrollTo, CopyFile, DeleteFile, Maximize, Restore, HitTest } kind;
+    enum Kind { Click, DoubleClick, Drag, Key, Wheel, Text, Wait, KeyDown, KeyUp, MouseDown, MouseUp, Move, Drop, Shot, WaitImport, WaitExport, WaitPlay, ScrollTo, CopyFile, DeleteFile, Maximize, Restore, HitTest, CloseWindow, FocusWindow } kind;
     explicit Action(Kind k) : kind(k) {}
     float x0 = 0, y0 = 0, x1 = 0, y1 = 0;
     int button = 0;
@@ -117,6 +174,9 @@ struct Action {
     float dx = 0, dy = 0, dx1 = 0, dy1 = 0;
     std::string text, text2;  // Text: the characters; Drop: the file; Shot: the PNG to write; CopyFile: from, to
     int waitFrames = 0;
+    // --in <panel>: the input goes to that panel's own window (#345) and an
+    // @name is one of its controls; -1 the main window.
+    int panel = -1;
 };
 
 struct Args {
@@ -231,7 +291,7 @@ void postMousePos(ImGuiIO& io, float x, float y) {
         // ImGui drops a position equal to the last one it has, comparing the
         // window coordinate with a UI one; step aside first so this one lands.
         ImVec2 last = io.MousePos;
-        const ImGuiContext& g = *ImGui::GetCurrentContext();
+        const ImGuiContext& g = *io.Ctx;
         for (int i = g.InputEventsQueue.Size - 1; i >= 0; --i)
             if (g.InputEventsQueue[i].Type == ImGuiInputEventType_MousePos) {
                 last = ImVec2(g.InputEventsQueue[i].MousePos.PosX, g.InputEventsQueue[i].MousePos.PosY);
@@ -318,6 +378,41 @@ void playAction(ImGuiIO& io, const Action& a, int f) {
         case Action::Maximize:
             if (f == 0) SDL_MaximizeWindow(SDL_GL_GetCurrentWindow());
             break;
+        case Action::CloseWindow:
+            // As the window's close button: the OS asks, the loop below answers.
+            if (f == 0) {
+                if (SDL_Window* w = g_panels[size_t(a.panel)].win) {
+                    SDL_Event e{};
+                    e.type = SDL_EVENT_WINDOW_CLOSE_REQUESTED;
+                    e.window.windowID = SDL_GetWindowID(w);
+                    e.window.timestamp = SDL_GetTicksNS();
+                    SDL_PushEvent(&e);
+                } else {
+                    std::fprintf(stderr, "--close-window %s: no such window open\n", a.text.c_str());
+                }
+            }
+            break;
+        case Action::FocusWindow:
+            if (f == 0) {
+                SDL_Window* w = a.panel < 0 ? SDL_GL_GetCurrentWindow() : g_panels[size_t(a.panel)].win;
+                if (!w) std::fprintf(stderr, "--focus-window %s: no such window open\n", a.text.c_str());
+                else if (!SDL_RaiseWindow(w)) std::fprintf(stderr, "--focus-window %s: %s\n", a.text.c_str(), SDL_GetError());
+                else if (SDL_Window* from = g_scriptFocus ? g_scriptFocus : SDL_GetKeyboardFocus(); from != w) {
+                    // Without a window manager (xvfb) a raise moves no focus: post the events one would.
+                    SDL_Event e{};
+                    e.window.timestamp = SDL_GetTicksNS();
+                    if (from) {
+                        e.type = SDL_EVENT_WINDOW_FOCUS_LOST;
+                        e.window.windowID = SDL_GetWindowID(from);
+                        SDL_PushEvent(&e);
+                    }
+                    e.type = SDL_EVENT_WINDOW_FOCUS_GAINED;
+                    e.window.windowID = SDL_GetWindowID(w);
+                    SDL_PushEvent(&e);
+                    g_scriptFocus = w;
+                }
+            }
+            break;
         case Action::Restore:
             if (f == 0) SDL_RestoreWindow(SDL_GL_GetCurrentWindow());
             break;
@@ -364,7 +459,17 @@ void playAction(ImGuiIO& io, const Action& a, int f) {
 
 Args parse(int argc, char** argv) {
     Args a;
+    // --in: the panel for the next action, and how many actions there were then.
+    int pendingPanel = -1;
+    size_t pendingAt = 0;
+    const auto applyIn = [&] {
+        if (pendingPanel < 0 || a.actions.size() <= pendingAt) return;
+        Action& act = a.actions[pendingAt];
+        if (act.kind != Action::CloseWindow && act.kind != Action::FocusWindow) act.panel = pendingPanel;
+        pendingPanel = -1;
+    };
     for (int i = 1; i < argc; ++i) {
+        applyIn();
         auto next = [&] { return i + 1 < argc ? argv[++i] : ""; };
         if (!std::strcmp(argv[i], "--screenshot")) a.screenshot = next();
         else if (!std::strcmp(argv[i], "--size")) a.sized = std::sscanf(next(), "%dx%d", &a.width, &a.height) == 2;
@@ -544,6 +649,29 @@ Args parse(int argc, char** argv) {
             const char* spec = next();
             a.padButton = SDL_GetGamepadButtonFromString(spec);
             if (a.padButton == SDL_GAMEPAD_BUTTON_INVALID) std::fprintf(stderr, "unknown gamepad button '%s'\n", spec);
+        } else if (!std::strcmp(argv[i], "--in")) {
+            // --in <game|console>: the next action's input goes to that panel's own window.
+            const char* v = next();
+            pendingPanel = panelByName(v);
+            pendingAt = a.actions.size();
+            if (pendingPanel < 0) {
+                std::fprintf(stderr, "--in wants game or console\n");
+                std::exit(2);
+            }
+            continue;
+        } else if (!std::strcmp(argv[i], "--close-window") || !std::strcmp(argv[i], "--focus-window")) {
+            // --close-window <game|console>: the OS asks that panel's own window to close (its close button).
+            // --focus-window <game|console|main>: that window takes the keyboard, as a click on it would.
+            Action act(!std::strcmp(argv[i], "--close-window") ? Action::CloseWindow : Action::FocusWindow);
+            act.text = next();
+            if (act.text != "main" || act.kind == Action::CloseWindow) {
+                act.panel = panelByName(act.text);
+                if (act.panel < 0) {
+                    std::fprintf(stderr, "%s wants game or console%s\n", argv[i], act.kind == Action::FocusWindow ? " or main" : "");
+                    std::exit(2);
+                }
+            }
+            a.actions.push_back(act);
         } else if (!std::strcmp(argv[i], "--splash")) {
             // Screenshot runs skip the startup splash unless asked; it plays silent there.
             a.splash = true;
@@ -555,6 +683,7 @@ Args parse(int argc, char** argv) {
             a.actions.insert(a.actions.begin(), act);
         }
     }
+    applyIn();
     return a;
 }
 
@@ -854,6 +983,123 @@ int main(int argc, char** argv) {
 
     int frame = 0;
     bool running = true;
+    ImGuiContext* mainCtx = ImGui::GetCurrentContext();
+    // Opens, draws and closes the panels' own windows (#345), after the main
+    // window has rendered and before it swaps; `shot` (when not empty) also
+    // writes each open one beside it, as <shot>-<panel>.png.
+    const auto panelWindows = [&](const std::string& shot) {
+        for (int k = 0; k < editor::kDetachPanels; ++k) {
+            PanelOs& po = g_panels[size_t(k)];
+            const editor::DetachPanel panel = editor::DetachPanel(k);
+            const char* name = editor::detachPanelName(panel);
+            const bool want = mockup::panelWindowWanted(state, panel);
+            if (!want && po.win) {
+                mockup::panelWindow(state, panel).rect = windowRectOf(po.win);
+                ImGui::SetCurrentContext(po.ctx);
+                ImGui_ImplSDL3_Shutdown();
+                ImGui::DestroyContext(po.ctx);
+                ImGui::SetCurrentContext(mainCtx);
+                SDL_GL_MakeCurrent(window, ctx);
+                SDL_GL_DestroyContext(po.gl);
+                SDL_DestroyWindow(po.win);
+                if (g_scriptFocus == po.win) g_scriptFocus = nullptr;
+                po = PanelOs{};
+                SDL_RaiseWindow(window);  // the keyboard back to the editor
+                if (args.screenshot) std::printf("panel window %s: closed\n", name);
+            }
+            if (want && !po.win) {
+                const editor::WindowRect r = editor::placePanelWindow(panel, mockup::panelWindow(state, panel).rect, displayRects());
+                const std::string title = std::string(panel == editor::DetachPanel::Game ? "Game" : "Console") + " - SplashEdit";
+                po.win = SDL_CreateWindow(title.c_str(), r.w, r.h, SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY | SDL_WINDOW_HIDDEN);
+                if (po.win) {
+                    SDL_SetWindowPosition(po.win, r.x, r.y);
+                    SDL_SetWindowMinimumSize(po.win, 240, 160);
+                    brand::setWindowIcon(po.win, assetDir.c_str());
+                    SDL_GL_SetAttribute(SDL_GL_SHARE_WITH_CURRENT_CONTEXT, 1);
+                    po.gl = SDL_GL_CreateContext(po.win);
+                    SDL_GL_SetAttribute(SDL_GL_SHARE_WITH_CURRENT_CONTEXT, 0);
+                }
+                if (!po.win || !po.gl) {
+                    // Without its window the panel goes back where it was.
+                    std::fprintf(stderr, "panel window %s: %s\n", name, SDL_GetError());
+                    if (po.win) SDL_DestroyWindow(po.win);
+                    po = PanelOs{};
+                    SDL_GL_MakeCurrent(window, ctx);
+                    mockup::setPanelDetached(state, panel, false);
+                    continue;
+                }
+                SDL_GL_SetSwapInterval(0);  // the main window's swap paces the loop
+                SDL_GL_MakeCurrent(window, ctx);
+                const ImGuiStyle style = ImGui::GetStyle();
+                ImFont* font = io.FontDefault;
+                po.ctx = ImGui::CreateContext(io.Fonts);
+                ImGui::SetCurrentContext(po.ctx);
+                ImGuiIO& pio = ImGui::GetIO();
+                ImGui::GetStyle() = style;
+                pio.FontDefault = font;
+                pio.IniFilename = nullptr;
+                pio.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+                // Drawn through the main context's renderer, which takes new font textures.
+                pio.BackendFlags |= ImGuiBackendFlags_RendererHasTextures | ImGuiBackendFlags_RendererHasVtxOffset;
+                ImGui_ImplSDL3_InitForOpenGL(po.win, po.gl);
+                SDL_SetHint("SDL_BORDERLESS_WINDOWED_STYLE", "1");  // as after the main backend's init
+                ImGui::GetPlatformIO().Platform_SetImeDataFn = setImeDataScaled;
+                ImGui::SetCurrentContext(mainCtx);
+                SDL_ShowWindow(po.win);
+                SDL_RaiseWindow(po.win);
+                mockup::panelWindow(state, panel).rect = windowRectOf(po.win);
+                if (args.screenshot) {
+                    int pw, ph;
+                    SDL_GetWindowSizeInPixels(po.win, &pw, &ph);
+                    std::printf("panel window %s: opened %dx%d\n", name, pw, ph);
+                }
+            }
+            if (!po.win) continue;
+            if (state.raisePanel[size_t(k)]) SDL_RaiseWindow(po.win);
+            state.raisePanel[size_t(k)] = false;
+            ImGui::SetCurrentContext(po.ctx);
+            ImGuiIO& pio = ImGui::GetIO();
+            ImGui_ImplSDL3_NewFrame();
+            const float c = uiScaleOf(po.win);
+            pio.DisplaySize = ImVec2(pio.DisplaySize.x / c, pio.DisplaySize.y / c);
+            pio.DisplayFramebufferScale = ImVec2(pio.DisplayFramebufferScale.x * c, pio.DisplayFramebufferScale.y * c);
+            if (args.screenshot) pio.DeltaTime = 1.0f / 60.0f;
+            if (state.play.gameFocus && panel == editor::DetachPanel::Game) pio.ConfigFlags &= ~ImGuiConfigFlags_NavEnableKeyboard;
+            else pio.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+            if (ui::fileDialogOpen()) {
+                pio.ClearEventsQueue();
+                pio.ClearInputMouse();
+                pio.ClearInputKeys();
+            }
+            scaleQueuedMouse(c, po.unscaledFrom);
+            ImGui::NewFrame();
+            // Its controls apart from the main window's (scripted @names, the title bar's hit test).
+            std::map<std::string, ImRect> mainNamed = std::move(ui::namedRects());
+            std::vector<ImRect> mainInteractive = std::move(ui::interactiveRects());
+            ui::namedRects().clear();
+            ui::interactiveRects().clear();
+            mockup::drawPanelWindow(state, doc, panel, pio.DisplaySize);
+            po.named = std::move(ui::namedRects());
+            ui::namedRects() = std::move(mainNamed);
+            ui::interactiveRects() = std::move(mainInteractive);
+            ImGui::Render();
+            ImDrawData* dd = ImGui::GetDrawData();
+            ImGui::SetCurrentContext(mainCtx);
+            SDL_GL_MakeCurrent(po.win, po.gl);
+            int fw, fh;
+            SDL_GetWindowSizeInPixels(po.win, &fw, &fh);
+            glViewport(0, 0, fw, fh);
+            glClearColor(0, 0, 0, 1);
+            glClear(GL_COLOR_BUFFER_BIT);
+            ImGui_ImplOpenGL3_RenderDrawData(dd);
+            if (!shot.empty()) {
+                const std::string base = shot.size() > 4 && shot.ends_with(".png") ? shot.substr(0, shot.size() - 4) : shot;
+                writeShot(po.win, (base + "-" + name + ".png").c_str());
+            }
+            SDL_GL_SwapWindow(po.win);
+            SDL_GL_MakeCurrent(window, ctx);
+        }
+    };
     float printedScale = 0;  // the UI scale a screenshot run last reported
     // --wait-import holding the script, since when; and a --shot due after this frame renders.
     bool held = false;
@@ -893,6 +1139,30 @@ int main(int argc, char** argv) {
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
             ImGui_ImplSDL3_ProcessEvent(&e);
+            // Each panel window's context takes its own window's input (the backend
+            // drops other windows'); the Game view's keyboard follows the focus.
+            for (PanelOs& po : g_panels)
+                if (po.ctx) {
+                    ImGui::SetCurrentContext(po.ctx);
+                    ImGui_ImplSDL3_ProcessEvent(&e);
+                    ImGui::SetCurrentContext(mainCtx);
+                }
+            if (const int k = e.type >= SDL_EVENT_WINDOW_FIRST && e.type <= SDL_EVENT_WINDOW_LAST ? panelOfWindow(e.window.windowID) : -1; k >= 0) {
+                const editor::DetachPanel panel = editor::DetachPanel(k);
+                editor::PanelWindow& pw = mockup::panelWindow(state, panel);
+                if (e.type == SDL_EVENT_WINDOW_MOVED || e.type == SDL_EVENT_WINDOW_RESIZED) pw.rect = windowRectOf(g_panels[size_t(k)].win);
+                // Out, the game has the keyboard only while its window has the focus.
+                if (e.type == SDL_EVENT_WINDOW_FOCUS_GAINED && panel == editor::DetachPanel::Game) state.play.gameFocus = true;
+                else if (e.type == SDL_EVENT_WINDOW_FOCUS_GAINED && state.play.tools.gameWindow.detached) state.play.gameFocus = false;
+                // Its close button puts the panel back in the main window.
+                if (e.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED) {
+                    pw.rect = windowRectOf(g_panels[size_t(k)].win);
+                    mockup::setPanelDetached(state, panel, false);
+                }
+                continue;
+            }
+            if (e.type == SDL_EVENT_WINDOW_FOCUS_GAINED && e.window.windowID == SDL_GetWindowID(window) && state.play.tools.gameWindow.detached)
+                state.play.gameFocus = false;  // as above: the game's own window lost the focus
             // Closing the window asks about unsaved changes first; screenshot runs just stop.
             if (e.type == SDL_EVENT_QUIT || e.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED) {
                 if (args.screenshot) running = false;
@@ -951,16 +1221,24 @@ int main(int argc, char** argv) {
                     if (!aimHeld) aimSince.reset();
                     if (cancelNow.GetWidth() > 0) a.x0 = cancelNow.GetCenter().x, a.y0 = cancelNow.GetCenter().y;
                 }
+                // --in: a panel's own window takes the input, its controls the @names.
+                const bool inPanel = a.panel >= 0 && a.kind != Action::CloseWindow && a.kind != Action::FocusWindow;
+                if (inPanel && !g_panels[size_t(a.panel)].ctx) {
+                    if (frame == actionStart[i] && !held) std::fprintf(stderr, "--in %s: no such window open\n", editor::detachPanelName(editor::DetachPanel(a.panel)));
+                    continue;
+                }
+                ImGuiIO& aio = inPanel ? g_panels[size_t(a.panel)].ctx->IO : io;
+                const std::map<std::string, ImRect>& targets = inPanel ? g_panels[size_t(a.panel)].named : ui::namedRects();
                 if (!a.target.empty() && frame == actionStart[i] && !held) {
                     // Aims at the named control where the last frame drew it.
-                    const auto it = ui::namedRects().find(a.target);
-                    if (it == ui::namedRects().end()) std::fprintf(stderr, "@%s: no such control drawn\n", a.target.c_str());
-                    const ImVec2 c = it == ui::namedRects().end() ? ImVec2(-100, -100) : ImVec2(it->second.GetCenter().x + a.dx, it->second.GetCenter().y + a.dy);
+                    const auto it = targets.find(a.target);
+                    if (it == targets.end()) std::fprintf(stderr, "@%s: no such control drawn\n", a.target.c_str());
+                    const ImVec2 c = it == targets.end() ? ImVec2(-100, -100) : ImVec2(it->second.GetCenter().x + a.dx, it->second.GetCenter().y + a.dy);
                     if (a.kind == Action::Move) a.x1 = c.x, a.y1 = c.y;
                     else a.x0 = c.x, a.y0 = c.y;
                     if (a.kind == Action::Drag) a.x1 = c.x - a.dx + a.dx1, a.y1 = c.y - a.dy + a.dy1;
                 }
-                if (frame >= actionStart[i] && frame < actionStart[i] + actionFrames(a)) playAction(io, a, frame - actionStart[i]);
+                if (frame >= actionStart[i] && frame < actionStart[i] + actionFrames(a)) playAction(aio, a, frame - actionStart[i]);
                 if (frame != actionStart[i] || held) continue;
                 if (a.kind == Action::Drop) state.drop.files.push_back({a.text, ImVec2(a.x0, a.y0)});
                 if (a.kind == Action::Shot) shotDue = a.text;
@@ -1069,6 +1347,7 @@ int main(int argc, char** argv) {
         glClear(GL_COLOR_BUFFER_BIT);
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 
+        const std::string midShot = shotDue;
         if (!shotDue.empty()) {
             writeShot(window, shotDue.c_str());
             std::printf("model import: %s, %d frames drawn while it ran, %zu queued\n", state.importBusy() ? "running" : "idle",
@@ -1103,10 +1382,46 @@ int main(int argc, char** argv) {
             std::printf("project panel selected: %s\n", state.assets.selected().empty() ? "(none)" : state.assets.selected().c_str());
             for (const auto& [name, r] : ui::namedRects())
                 std::printf("control %s at %d,%d %d,%d\n", name.c_str(), int(r.Min.x), int(r.Min.y), int(r.Max.x), int(r.Max.y));
+            // The panels' own windows (#345): open or not, their size and focus, and their controls.
+            for (int k = 0; k < editor::kDetachPanels; ++k) {
+                const PanelOs& po = g_panels[size_t(k)];
+                const char* name = editor::detachPanelName(editor::DetachPanel(k));
+                const editor::PanelWindow& pw = mockup::panelWindow(state, editor::DetachPanel(k));
+                if (!po.win) {
+                    std::printf("panel window %s: %s\n", name, pw.detached ? "detached, not open" : "attached");
+                    continue;
+                }
+                int pw_, ph_;
+                SDL_GetWindowSizeInPixels(po.win, &pw_, &ph_);
+                std::printf("panel window %s: open %dx%d focus %s\n", name, pw_, ph_, SDL_GetKeyboardFocus() == po.win ? "yes" : "no");
+                for (const auto& [cname, r] : po.named)
+                    std::printf("control %s:%s at %d,%d %d,%d\n", name, cname.c_str(), int(r.Min.x), int(r.Min.y), int(r.Max.x), int(r.Max.y));
+            }
+            std::printf("keyboard focus: %s\n", SDL_GetKeyboardFocus() == window ? "main" : panelOfWindow(SDL_GetKeyboardFocus() ? SDL_GetWindowID(SDL_GetKeyboardFocus()) : 0) >= 0
+                                                       ? editor::detachPanelName(editor::DetachPanel(panelOfWindow(SDL_GetWindowID(SDL_GetKeyboardFocus()))))
+                                                       : "none");
             running = false;
         }
+        panelWindows(!running && args.screenshot ? std::string(args.screenshot) : midShot);
         SDL_GL_SwapWindow(window);
     }
+    // The panels' windows close with the editor; where they were is kept.
+    bool panelsOpen = false;
+    for (int k = 0; k < editor::kDetachPanels; ++k) {
+        PanelOs& po = g_panels[size_t(k)];
+        if (!po.win) continue;
+        panelsOpen = true;
+        mockup::panelWindow(state, editor::DetachPanel(k)).rect = windowRectOf(po.win);
+        ImGui::SetCurrentContext(po.ctx);
+        ImGui_ImplSDL3_Shutdown();
+        ImGui::DestroyContext(po.ctx);
+        ImGui::SetCurrentContext(mainCtx);
+        SDL_GL_MakeCurrent(window, ctx);
+        SDL_GL_DestroyContext(po.gl);
+        SDL_DestroyWindow(po.win);
+        po = PanelOs{};
+    }
+    if (panelsOpen && !state.play.settingsFile.empty()) editor::savePlayTools(state.play.settingsFile, state.play.tools);
 
     for (auto& c : state.play.cons) c.emu.stop();
     if (state.play.relay) state.play.relay->stop();

@@ -408,6 +408,9 @@ jobs:
       - name: Game view beside the UI and script tabs, Play's output docked as a Console tab
         if: runner.os == 'Linux'
         run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/gamedockcheck.py build/splashedit
+      - name: Game view and Console out in windows of their own and back
+        if: runner.os == 'Linux'
+        run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/detachcheck.py build/splashedit
       - name: Play with 1 console reads the editor's pcsx.json, dithering from the Game view toggle
         if: runner.os == 'Linux'
         run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/ditherplaycheck.py build/splashedit
