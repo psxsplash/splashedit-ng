@@ -50,6 +50,7 @@
 #include "editor/tilemap.hh"
 #include "editor/model_import.hh"
 #include "editor/pick.hh"
+#include "editor/panel_window.hh"
 #include "editor/play.hh"
 #include "editor/linkplay.hh"
 #include "editor/relay.hh"
@@ -21571,6 +21572,87 @@ static void testGameView() {
     }
 }
 
+// The Game view and the Console out in OS windows of their own (#345): the
+// detached state, where each window goes, and both saved with Play's tools.
+static void testPanelWindows() {
+    using editor::DetachPanel;
+    using editor::WindowRect;
+    CHECK(std::string(editor::detachPanelName(DetachPanel::Game)) == "game");
+    CHECK(std::string(editor::detachPanelName(DetachPanel::Console)) == "console");
+    // "x,y,w,h" both ways; anything else leaves the rect as it was.
+    {
+        const WindowRect r{-1200, 40, 640, 480};
+        CHECK(editor::windowRectValue(r) == "-1200,40,640,480");
+        WindowRect back;
+        CHECK(editor::parseWindowRect(editor::windowRectValue(r), back) && back == r);
+        for (const char* bad : {"", "1,2,3", "1,2,0,5", "1,2,5,-4", "a,b,c,d", "1,2,3,4x", "1,2,3,4,5"}) {
+            WindowRect keep{7, 8, 9, 10};
+            CHECK(!editor::parseWindowRect(bad, keep));
+            CHECK((keep == WindowRect{7, 8, 9, 10}));
+        }
+        CHECK(WindowRect{}.empty() && !r.empty());
+    }
+    // Open while detached; the Game view's only while a game shows.
+    {
+        editor::PanelWindow w;
+        CHECK(!editor::panelWindowOpen(DetachPanel::Game, w, true) && !editor::panelWindowOpen(DetachPanel::Console, w, true));
+        w.detached = true;
+        CHECK(editor::panelWindowOpen(DetachPanel::Game, w, true) && !editor::panelWindowOpen(DetachPanel::Game, w, false));
+        CHECK(editor::panelWindowOpen(DetachPanel::Console, w, false));
+    }
+    // Where it opens: where it was while that is on a display, else centred on the first.
+    {
+        const std::vector<WindowRect> displays{{0, 0, 1920, 1040}, {1920, 0, 1280, 1000}};
+        const WindowRect saved{2000, 100, 600, 400};
+        CHECK(editor::placePanelWindow(DetachPanel::Game, saved, displays) == saved);  // on the second display
+        const WindowRect gone{4000, 100, 600, 400};                                    // that display unplugged
+        const WindowRect g = editor::placePanelWindow(DetachPanel::Game, gone, displays);
+        const WindowRect d = editor::defaultPanelRect(DetachPanel::Game);
+        CHECK(g.w == d.w && g.h == d.h && g.x == (1920 - d.w) / 2 && g.y == (1040 - d.h) / 2);
+        CHECK(editor::placePanelWindow(DetachPanel::Console, WindowRect{}, displays).w == editor::defaultPanelRect(DetachPanel::Console).w);
+        // A quarter of it on screen is enough; less is not.
+        CHECK((editor::placePanelWindow(DetachPanel::Game, WindowRect{-300, -200, 600, 400}, displays) == WindowRect{-300, -200, 600, 400}));
+        CHECK(!(editor::placePanelWindow(DetachPanel::Game, WindowRect{-301, -201, 600, 400}, displays) == WindowRect{-301, -201, 600, 400}));
+        // Bigger than every display: the default, shrunk to the first.
+        const std::vector<WindowRect> small{{0, 0, 500, 300}};
+        const WindowRect s = editor::placePanelWindow(DetachPanel::Game, WindowRect{0, 0, 2000, 2000}, small);
+        CHECK((s == WindowRect{0, 0, 500, 300}));
+        // No displays known: where it was, or the default size.
+        CHECK(editor::placePanelWindow(DetachPanel::Game, gone, {}) == gone);
+        CHECK(editor::placePanelWindow(DetachPanel::Game, WindowRect{}, {}) == editor::defaultPanelRect(DetachPanel::Game));
+    }
+    // Saved with Play's tools: detached (off unless 1) and the window rects (written once placed).
+    {
+        const fs::path dir = g_outDir / "panelwindows";
+        fs::create_directories(dir);
+        editor::PlayTools t;
+        CHECK(!t.gameWindow.detached && !t.consoleWindow.detached && t.gameWindow.rect.empty() && t.consoleWindow.rect.empty());
+        {
+            CHECK(editor::savePlayTools(dir / "fresh.cfg", t));
+            std::ifstream in(dir / "fresh.cfg", std::ios::binary);
+            const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+            CHECK(text.find("game_detached=0\n") != std::string::npos && text.find("console_detached=0\n") != std::string::npos);
+            CHECK(text.find("game_window=") == std::string::npos && text.find("console_window=") == std::string::npos);
+        }
+        for (int k = 0; k < 4; ++k) {
+            t.gameWindow.detached = k & 1, t.consoleWindow.detached = k & 2;
+            t.gameWindow.rect = {10 * k, -20, 640 + k, 480};
+            t.consoleWindow.rect = {k, 30, 700, 300 + k};
+            const editor::PlayTools back = editor::savePlayTools(dir / "round.cfg", t) ? editor::loadPlayTools(dir / "round.cfg") : editor::PlayTools{};
+            CHECK(back.gameWindow.detached == bool(k & 1) && back.consoleWindow.detached == bool(k & 2));
+            CHECK(back.gameWindow.rect == t.gameWindow.rect && back.consoleWindow.rect == t.consoleWindow.rect);
+            CHECK(back.consoleDocked == t.consoleDocked && back.gameEveryTab == t.gameEveryTab);  // the dock's own keys untouched
+        }
+        {
+            std::ofstream odd(dir / "odd.cfg", std::ios::binary);
+            odd << "game_detached=yes\nconsole_detached=1\ngame_window=1,2,0,4\nconsole_window=5,6,700,300\n";
+        }
+        const editor::PlayTools odd = editor::loadPlayTools(dir / "odd.cfg");
+        CHECK(!odd.gameWindow.detached && odd.consoleWindow.detached);
+        CHECK(odd.gameWindow.rect.empty() && (odd.consoleWindow.rect == WindowRect{5, 6, 700, 300}));
+    }
+}
+
 // splash::writePlayer over each kind of pcsx-redux install, with stand-in
 // files: what is copied, the launcher each writes, the seeded pcsx.json, a
 // previous export written over and a folder that is neither refused.
@@ -22558,6 +22640,7 @@ int main(int argc, char** argv) {
     testMeterFixSimplify();
     testTvPreview();
     testGameView();
+    testPanelWindows();
     testSkinCrossfade();
     if (g_failures) {
         std::fprintf(stderr, "editor_tests: %d of %d checks failed\n", g_failures, g_checks);

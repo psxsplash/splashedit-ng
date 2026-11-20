@@ -686,6 +686,21 @@ bar's popup. Both choices must be saved in the play settings. Needs a display (C
 
     python3 gamedockcheck.py <splashedit> [screenshot prefix]
 
+`detachcheck.py` starts Play against the same stand-in. View > Game View in Own Window must open
+a second OS window with the game's picture in it (the stand-in's colour bars, not a blank window)
+while the Scene tab takes the split's room; the keyboard must be the controller there while that
+window has the focus and not once the main window has it; closing the window, or its Attach, must
+put the Game view back with every main-window control where it was before. Saved out
+(`game_detached=1`, `game_window=x,y,w,h`), the window must open at that size at the next Play.
+The Console's Own window must do the same for Play's output. Detached windows are written beside
+each screenshot as `<shot>-game.png` and `<shot>-console.png`; `--in game` (or `console`) sends the
+next scripted action to that window and aims its `@name` at that window's controls (listed as
+`control game:<name>`), `--close-window game` asks the window to close as its close button does,
+and `--focus-window game|console|main` raises one (with no window manager, as under xvfb, it also
+posts the focus events one would). Needs a display (CI runs it under `xvfb-run`).
+
+    python3 detachcheck.py <splashedit> [screenshot prefix]
+
 `linkplaycheck.py` plays a copy of the courtyard whose scripts call `Net.Connect()` and
 `Net.Send()` with 2 linked consoles, on a real pcsx-redux: both views must show frames, their
 status lines must reach Linked with exactly one host, slots 0 and 1 and the no-Network-id hint;

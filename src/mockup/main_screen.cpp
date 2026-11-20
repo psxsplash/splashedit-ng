@@ -1124,7 +1124,9 @@ static int g_menuIgnoreClick = -1;
 // the Console tab while the console is docked; the one in front draws.
 static bool timelineInFront(const State& st) { return st.timeline.open && st.bottomTab == State::BottomTab::Timeline; }
 static bool frameInFront(const State& st) { return st.frame.open && st.bottomTab == State::BottomTab::Frame; }
-static bool consoleInFront(const State& st) { return st.play.tools.consoleDocked && st.bottomTab == State::BottomTab::Console; }
+// The Console tab is in the bottom dock while the output is docked and not out in its own window (#345).
+static bool consoleTabShown(const State& st) { return st.play.tools.consoleDocked && !st.play.tools.consoleWindow.detached; }
+static bool consoleInFront(const State& st) { return consoleTabShown(st) && st.bottomTab == State::BottomTab::Console; }
 static bool projectInFront(const State& st) { return !timelineInFront(st) && !frameInFront(st) && !consoleInFront(st); }
 
 // Docks Play's output as the Console tab (in front) or puts it back in the
@@ -1153,7 +1155,7 @@ static void toggleProjectTab(State& st) {
 static float dockTabWidth(const char* label) { return measure(fonts().semibold, type::body, label).x + 30 + space::md * 2; }
 static float dockTabsWidth(const State& st) {
     return dockTabWidth("Project") + (st.timeline.open ? dockTabWidth("Timeline") : 0) + (st.frame.open ? dockTabWidth("Frame") : 0) +
-           (st.play.tools.consoleDocked ? dockTabWidth("Console") : 0);
+           (consoleTabShown(st) ? dockTabWidth("Console") : 0);
 }
 static void dockTabs(State& st, ImDrawList* dl, ImRect r) {
     Fonts& f = fonts();
@@ -1179,7 +1181,7 @@ static void dockTabs(State& st, ImDrawList* dl, ImRect r) {
         st.bottomTab = State::BottomTab::Timeline;
     if (st.frame.open && tab("tab_frame", "Frame", icon::image, rgb(0x5ccfe0), frameInFront(st), true))
         st.bottomTab = State::BottomTab::Frame;
-    if (st.play.tools.consoleDocked && tab("tab_console", "Console", icon::monitor, color::good, consoleInFront(st), true))
+    if (consoleTabShown(st) && tab("tab_console", "Console", icon::monitor, color::good, consoleInFront(st), true))
         st.bottomTab = State::BottomTab::Console;
 }
 
@@ -3854,8 +3856,17 @@ static std::vector<MenuEntry> menuEntries(int which, State& st, editor::Document
             m.push_back(item("Project", "", true, [&] { toggleProjectTab(st); }, st.assets.open && projectInFront(st)));
             m.push_back(item("Console", "", true, [&] {
                 if (consoleInFront(st)) setConsoleDocked(st, false);
-                else setConsoleDocked(st, true);
+                else {
+                    if (st.play.tools.consoleWindow.detached) setPanelDetached(st, editor::DetachPanel::Console, false);
+                    setConsoleDocked(st, true);
+                }
             }, consoleInFront(st)));
+            m.push_back(item("Console in Own Window", "", true, [&] {
+                setPanelDetached(st, editor::DetachPanel::Console, !st.play.tools.consoleWindow.detached);
+            }, st.play.tools.consoleWindow.detached));
+            m.push_back(item("Game View in Own Window", "", true, [&] {
+                setPanelDetached(st, editor::DetachPanel::Game, !st.play.tools.gameWindow.detached);
+            }, st.play.tools.gameWindow.detached));
             m.push_back(item("Game View on Every Tab", "", true, [&] {
                 st.play.tools.gameEveryTab = !st.play.tools.gameEveryTab;
                 if (!st.play.settingsFile.empty()) editor::savePlayTools(st.play.settingsFile, st.play.tools);
@@ -6404,7 +6415,13 @@ static void gamePanel(State& st, ImDrawList* dl, ImRect r) {
     }
     const GameLayout l = gamePicture(st, dl, r, 0, "Game", p.gameFocus, true, "Waiting for pcsx-redux...", color::textDim, "game.frame");
     // The keyboard is the controller only while the Game view has focus; a gamepad always is.
-    p.cons[0].game.setPads(hostPad(p.gameFocus), 0xffff);
+    const uint16_t pad = hostPad(p.gameFocus);
+    p.cons[0].game.setPads(pad, 0xffff);
+    {
+        char padLine[32];
+        std::snprintf(padLine, sizeof padLine, "game: pad %04x", unsigned(pad));
+        scriptLine("game.pad", padLine);
+    }
     const char* info = p.gameFocus ? "Arrows  ·  Z X A S  ·  Q W 1 2  ·  Enter Start  ·  Backspace Select"
                                    : "Click to control the game with the keyboard";
     ImVec2 is = measure(f.regular, type::caption, info);
@@ -15465,7 +15482,7 @@ static void networkView(State& st, float tableH = 340) {
 // (`docked`: the lines fill the room left above Stop and Restart). Relayed,
 // Output (the focused console's lines) or Network (the relay's packets).
 // The popup offers Dock, the Console tab Pop up: either moves it.
-static void playOutput(State& st, const editor::Document& doc, bool docked) {
+static void playOutput(State& st, const editor::Document& doc, bool docked, bool inWindow = false) {
     State::Play& p = st.play;
     const bool network = p.relay && p.outputTab == 1;
     const int shownConsole = p.players >= 2 && p.focus < p.players ? p.focus : 0;
@@ -15496,16 +15513,26 @@ static void playOutput(State& st, const editor::Document& doc, bool docked) {
                         "Stop, rebuild and run again (Ctrl+Shift+F5)"))
             restartPlay(st, doc);
     }
-    const char* moveLabel = docked ? "Pop up" : "Dock";
-    const float mw = buttonWidth(icon::panelTop, moveLabel);
-    const ImVec2 mp(c.x + ImGui::GetContentRegionAvail().x - mw, c.y);
-    if (button(docked ? "play.popup" : "play.dock", mp, icon::panelTop, moveLabel, ButtonKind::Ghost, nullptr,
-               docked ? "Show the output in a popup off the status bar again, as it was"
-                      : "Keep the output on screen in a Console tab beside the Project panel")) {
-        setConsoleDocked(st, !docked);
-        if (docked) p.openOutput = true;
+    // Out in its own window the header's Attach brings it back (drawPanelWindow).
+    if (!inWindow) {
+        const char* moveLabel = docked ? "Pop up" : "Dock";
+        const float mw = buttonWidth(icon::panelTop, moveLabel);
+        const ImVec2 mp(c.x + ImGui::GetContentRegionAvail().x - mw, c.y);
+        if (button(docked ? "play.popup" : "play.dock", mp, icon::panelTop, moveLabel, ButtonKind::Ghost, nullptr,
+                   docked ? "Show the output in a popup off the status bar again, as it was"
+                          : "Keep the output on screen in a Console tab beside the Project panel")) {
+            setConsoleDocked(st, !docked);
+            if (docked) p.openOutput = true;
+        }
+        nameRect(docked ? "play.popup" : "play.dock", ImRect(mp, mp + ImVec2(mw, size::field + 6)));
+        // Beside it: out to a window of its own (#345).
+        const float dw = buttonWidth(icon::appWindow, "Own window");
+        const ImVec2 dp(mp.x - space::sm - dw, c.y);
+        if (button("play.detach", dp, icon::appWindow, "Own window", ButtonKind::Ghost, nullptr,
+                   "Show the output in a window of its own, outside the editor's; closing that window brings it back"))
+            setPanelDetached(st, editor::DetachPanel::Console, true);
+        nameRect("play.detach", ImRect(dp, dp + ImVec2(dw, size::field + 6)));
     }
-    nameRect(docked ? "play.popup" : "play.dock", ImRect(mp, mp + ImVec2(mw, size::field + 6)));
     ImGui::Dummy(ImVec2(1, size::field + 6));
 }
 
@@ -15543,10 +15570,13 @@ static float playStatus(ImDrawList* dl, ImRect bar, float x, float maxX, State& 
     nameRect("playstatus", r);
     if (label != whole) tooltip(whole.c_str());
     scriptLine("playstatus", "playstatus: " + whole);
-    if (hasOutput || p.tools.consoleDocked) {
+    const bool ownWindow = p.tools.consoleWindow.detached;
+    if (hasOutput || p.tools.consoleDocked || ownWindow) {
         dl->AddRectFilled(r.Min, r.Max, lerpColor(color::raised, color::hover, h.hover), radius::pill);
-        // Docked, the click brings the Console tab to the front instead.
-        if (h.clicked && p.tools.consoleDocked) st.bottomTab = State::BottomTab::Console;
+        // Docked, the click brings the Console tab to the front instead; out
+        // in its own window, that window.
+        if (h.clicked && ownWindow) st.raisePanel[size_t(editor::DetachPanel::Console)] = true;
+        else if (h.clicked && p.tools.consoleDocked) st.bottomTab = State::BottomTab::Console;
         else if (h.clicked || (p.openOutput && hasOutput)) ImGui::OpenPopup("##playoutput");
     }
     p.openOutput = false;
@@ -15555,7 +15585,7 @@ static float playStatus(ImDrawList* dl, ImRect bar, float x, float maxX, State& 
 
     const bool network = p.relay && p.outputTab == 1;
     const float popupW = network ? 900.0f : 720.0f;
-    if (p.tools.consoleDocked) return r.Max.x + space::md;  // the Console tab shows it
+    if (p.tools.consoleDocked || ownWindow) return r.Max.x + space::md;  // the Console tab or its window shows it
     // Kept inside the window: the status entry sits well right of the middle.
     const float popupX = std::max(space::sm, std::min(r.Min.x, ImGui::GetIO().DisplaySize.x - popupW - space::sm));
     ImGui::SetNextWindowPos(ImVec2(popupX, r.Min.y - space::xs), ImGuiCond_Always, ImVec2(0, 1));
@@ -15566,7 +15596,7 @@ static float playStatus(ImDrawList* dl, ImRect bar, float x, float maxX, State& 
     ImGui::PopStyleColor(2);
     if (!open) return r.Max.x + space::md;
     playOutput(st, doc, false);
-    if (p.tools.consoleDocked) ImGui::CloseCurrentPopup();  // Dock was clicked
+    if (p.tools.consoleDocked || p.tools.consoleWindow.detached) ImGui::CloseCurrentPopup();  // Dock or Own window was clicked
     ImGui::EndPopup();
     return r.Max.x + space::md;
 }
@@ -15613,6 +15643,12 @@ static void consoleTab(State& st, ImDrawList* dl, const editor::Document& doc, f
                    "Show the output in a popup off the status bar again, as it was"))
             setConsoleDocked(st, false);
         nameRect("play.popup", ImRect(mp, mp + ImVec2(mw, size::field + 6)));
+        const float dw = buttonWidth(icon::appWindow, "Own window");
+        const ImVec2 dp(mp.x - space::sm - dw, mp.y);
+        if (button("play.detach", dp, icon::appWindow, "Own window", ButtonKind::Ghost, nullptr,
+                   "Show the output in a window of its own, outside the editor's; closing that window brings it back"))
+            setPanelDetached(st, editor::DetachPanel::Console, true);
+        nameRect("play.detach", ImRect(dp, dp + ImVec2(dw, size::field + 6)));
         scriptLine("console.dock", "console: docked, empty");
         return;
     }
@@ -16604,6 +16640,95 @@ static void updateImports(State& st, editor::Document& doc, const viewport::Ps1V
     }
 }
 
+editor::PanelWindow& panelWindow(State& st, editor::DetachPanel panel) {
+    return panel == editor::DetachPanel::Game ? st.play.tools.gameWindow : st.play.tools.consoleWindow;
+}
+
+bool panelWindowWanted(const State& st, editor::DetachPanel panel) {
+    const editor::PlayTools& t = st.play.tools;
+    return editor::panelWindowOpen(panel, panel == editor::DetachPanel::Game ? t.gameWindow : t.consoleWindow,
+                                   st.play.cons[0].game.attached());
+}
+
+// Out to a window of its own or back where it was (the Game view beside the
+// tab, the output docked or in its popup, as Play's tools say); saved.
+void setPanelDetached(State& st, editor::DetachPanel panel, bool detached) {
+    State::Play& p = st.play;
+    editor::PanelWindow& w = panelWindow(st, panel);
+    if (w.detached == detached) return;
+    w.detached = detached;
+    // The game's window takes the keyboard as it opens; back beside the tab
+    // it keeps it until a click elsewhere.
+    if (panel == editor::DetachPanel::Game && detached && p.cons[0].game.attached()) p.gameFocus = true;
+    if (panel == editor::DetachPanel::Console && !detached && consoleTabShown(st)) st.bottomTab = State::BottomTab::Console;
+    if (!p.settingsFile.empty()) editor::savePlayTools(p.settingsFile, p.tools);
+    scriptLine(nullptr, std::string("detach: ") + editor::detachPanelName(panel) + (detached ? " out" : " back"));
+}
+
+// A panel's own window: a header with its name and Attach, then the Game
+// view (a click in it gives the game the keyboard, and with linked consoles
+// picks the one) or Play's output.
+void drawPanelWindow(State& st, editor::Document& doc, editor::DetachPanel panel, ImVec2 size) {
+    State::Play& p = st.play;
+    Fonts& f = fonts();
+    const bool game = panel == editor::DetachPanel::Game;
+    const std::string name = editor::detachPanelName(panel);
+    ImGui::SetNextWindowPos(ImVec2(0, 0));
+    ImGui::SetNextWindowSize(size);
+    ImGui::Begin("##panelwindow", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
+                     ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoScrollWithMouse);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddRectFilled(ImVec2(0, 0), size, color::base);
+    const float g = size::gutter, headH = size::field + 12;
+    const ImRect head(ImVec2(g, g), ImVec2(size.x - g, g + headH));
+    const char* title = game ? "Game" : "Console";
+    text(dl, ImVec2(head.Min.x + space::sm, head.GetCenter().y - measure(f.semibold, type::body, title).y * 0.5f), f.semibold, type::body,
+         color::text, title);
+    const float aw = buttonWidth(icon::panelTop, "Attach");
+    const ImVec2 ap(head.Max.x - aw, head.GetCenter().y - (size::field + 6) * 0.5f);
+    const bool attach = button((name + ".attach").c_str(), ap, icon::panelTop, "Attach", ButtonKind::Ghost, nullptr,
+                               game ? "Put the Game view back beside the tab in the editor's window"
+                                    : "Put the output back in the editor's window, docked or in its popup as before");
+    nameRect(name + ".attach", ImRect(ap, ap + ImVec2(aw, size::field + 6)));
+    const ImRect body(ImVec2(g, head.Max.y + g), ImVec2(size.x - g, size.y - g));
+    if (game) {
+        if (ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem) && body.Contains(ImGui::GetMousePos()) &&
+            (ImGui::IsMouseClicked(ImGuiMouseButton_Left) || ImGui::IsMouseClicked(ImGuiMouseButton_Right) ||
+             ImGui::IsMouseClicked(ImGuiMouseButton_Middle))) {
+            p.gameFocus = true;
+            if (p.players >= 2) {
+                const std::vector<ImRect> cr = consoleRects(body, p.players);
+                for (int i = 0; i < p.players; ++i)
+                    if (cr[size_t(i)].Contains(ImGui::GetMousePos())) p.focus = i;
+            }
+        }
+        gamePanel(st, dl, body);
+    } else {
+        dl->AddRectFilled(body.Min, body.Max, color::panel, radius::window);
+        dl->AddRect(body.Min, body.Max, color::border, radius::window);
+        nameRect("console.window", body);
+        const bool hasOutput = !p.cons[0].emu.output().empty() || p.relay;
+        const float pad = 10;
+        if (!hasOutput) {
+            textCentered(dl, body, f.medium, type::label, color::textDim,
+                         p.build.valid() ? "Building for Play..." : "Nothing printed yet: Play (F5) prints here.");
+        } else {
+            ImGui::SetCursorScreenPos(body.Min + ImVec2(pad, pad));
+            ImGui::BeginChild("##consolewindow", body.GetSize() - ImVec2(pad * 2, pad * 2), ImGuiChildFlags_None,
+                              ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoBackground);
+            playOutput(st, doc, true, true);
+            ImGui::EndChild();
+        }
+    }
+    scriptLine(("window." + name).c_str(), "window: " + name + " drawn " + std::to_string(int(size.x)) + "x" + std::to_string(int(size.y)) +
+                                               (game ? std::string(p.cons[0].game.texture() ? " frames" : " waiting") +
+                                                           (p.gameFocus ? " focused" : "")
+                                                     : std::string(!p.cons[0].emu.output().empty() ? " output" : " empty")));
+    ImGui::End();
+    if (attach) setPanelDetached(st, panel, false);
+}
+
 ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view, ImVec2 size) {
     st.importPanel.shown.clear();
     // A file dialog whose caller names no folder opens in the project, not Documents (#160).
@@ -16622,8 +16747,8 @@ ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view,
     st.frameWasOpen = st.frame.open;
     st.frameShows = st.frame.shows;
     // A new Play brings the docked console to the front.
-    if (!st.play.tools.consoleDocked && st.bottomTab == State::BottomTab::Console) st.bottomTab = State::BottomTab::Project;
-    if (st.play.tools.consoleDocked && st.play.cons[0].emu.running() && !st.consoleWasRunning) st.bottomTab = State::BottomTab::Console;
+    if (!consoleTabShown(st) && st.bottomTab == State::BottomTab::Console) st.bottomTab = State::BottomTab::Project;
+    if (consoleTabShown(st) && st.play.cons[0].emu.running() && !st.consoleWasRunning) st.bottomTab = State::BottomTab::Console;
     st.consoleWasRunning = st.play.cons[0].emu.running();
     // The timeline takes Delete and Space while it has focus, before the
     // scene's shortcuts see them; only while its tab is in front.
@@ -16707,10 +16832,13 @@ ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view,
     // While a game runs the Game view shares the tab's room: the Scene tab's
     // always, the UI, Tilemap and script tabs' too unless View > Game View on
     // Every Tab is off (#345).
-    const bool gameShown = st.play.cons[0].game.attached() && (st.scripts.sceneShown() || st.play.tools.gameEveryTab);
+    // Out in its own window (#345) it leaves the tab its whole room.
+    const bool gameShown = st.play.cons[0].game.attached() && !st.play.tools.gameWindow.detached &&
+                           (st.scripts.sceneShown() || st.play.tools.gameEveryTab);
     if (gameShown) body = splitViewport(st, dl, body);
     scriptLine("game.shown", std::string("game: shown ") + (gameShown ? "yes" : "no") + " every tab " +
-                                 (st.play.tools.gameEveryTab ? "on" : "off"));
+                                 (st.play.tools.gameEveryTab ? "on" : "off") +
+                                 (st.play.tools.gameWindow.detached ? " own window" : ""));
     // The timeline takes this frame's scrub first, so the Scene draws the
     // pose at the new scrub head now rather than a frame late (empty when
     // closed or behind the Project tab).
