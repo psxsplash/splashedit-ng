@@ -1,6 +1,7 @@
 // Editor panels that leave the main window for an OS window of their own and
-// come back (#345): the Game view and Play's Console. What is out, where its
-// window was, and where to open it again; saved with Play's tools
+// come back (#345): the Game view, Play's Console, the Scene (the object
+// tree), the Inspector, the Project panel and the Timeline. What is out,
+// where its window was, and where to open it again; saved with Play's tools
 // (editor/play.hh). The windows themselves are the shell's (main.cpp).
 #pragma once
 
@@ -9,10 +10,13 @@
 
 namespace editor {
 
-enum class DetachPanel { Game, Console };
-inline constexpr int kDetachPanels = 2;
-// "game" or "console": the settings keys' prefix and the scripted name.
+enum class DetachPanel { Game, Console, Scene, Inspector, Project, Timeline };
+inline constexpr int kDetachPanels = 6;
+// "game", "console", "scene", "inspector", "project" or "timeline": the
+// settings keys' prefix and the scripted name.
 const char* detachPanelName(DetachPanel panel);
+// "Game", "Console", "Scene", ...: its window's title and header.
+const char* detachPanelTitle(DetachPanel panel);
 
 // A window's place on the desktop, in screen coordinates. Empty until the
 // window was first placed.
@@ -35,8 +39,10 @@ std::string windowRectValue(const WindowRect& r);
 bool parseWindowRect(const std::string& text, WindowRect& out);
 
 // Whether the panel's window is open now: while it is detached, and for the
-// Game view only while a game shows (as the split in the main window).
-bool panelWindowOpen(DetachPanel panel, const PanelWindow& w, bool gameShows);
+// Timeline only while it is open on a sequence (`shows`, the panel's own
+// open flag; ignored for the others). The Game view's window stays open
+// between Plays, so a Play neither opens it again nor takes the focus.
+bool panelWindowOpen(DetachPanel panel, const PanelWindow& w, bool shows);
 
 // The size a panel's window first opens at.
 WindowRect defaultPanelRect(DetachPanel panel);

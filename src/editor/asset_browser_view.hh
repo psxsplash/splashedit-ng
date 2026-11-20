@@ -49,8 +49,14 @@ class AssetBrowser {
     std::function<void(ImDrawList*, ImRect)> tabs;
     float tabsWidth = 0;
 
+    // In a window of its own (#345): always open, its tab and the collapse
+    // button fold nothing.
+    bool windowed = false;
+
     // Takes the bottom of `area` (a drag bar resizes it); returns what is left above.
     ImRect dock(ImRect area);
+    // Takes all of `area` (its own window), in place of dock().
+    void fill(ImRect area) { m_rect = area; }
     // Draws in the rect dock() took; rescans the project about once a second.
     void draw(ImDrawList* dl, editor::Document& doc);
     std::vector<Request> takeRequests();

@@ -1,5 +1,5 @@
-# The Game view and Play's Console out in OS windows of their own (#345),
-# driven through the GUI. Play runs the fake pcsx-redux gamedockcheck.py uses
+# The Game view, Play's Console, the Scene, the Inspector, the Project panel
+# and the Timeline out in OS windows of their own (#345), driven through the GUI. Play runs the fake pcsx-redux gamedockcheck.py uses
 # (emulator_tests with SPLASHEDIT_FAKE_REDUX=320x240: colour bars).
 #  - View > Game View in Own Window while a game runs opens a second window
 #    with the game's picture in it (not blank: the bars), and the main
@@ -11,8 +11,15 @@
 #  - Out or not, and where the window was, are saved in the play settings
 #    (--play-settings); saved out, the window opens there at the next Play.
 #  - The Console's Own window does the same for Play's output.
-# Detached windows are written beside each screenshot as <shot>-game.png and
-# <shot>-console.png.
+#  - Saved out, the Game view's window opens as the editor starts and stays
+#    open across Plays: a Play neither opens it again nor takes the keyboard
+#    from the main window.
+#  - View > Scene / Inspector / Project / Timeline in Own Window: the panel
+#    draws in its own window (not blank), the main window gives its room to
+#    the others (no hole), its Attach puts it back where it was.
+#  - --in <panel> with --ctrl-held: a Ctrl-click in the Scene's window adds to
+#    the selection there (the click lands in that window, with Ctrl).
+# Detached windows are written beside each screenshot as <shot>-<panel>.png.
 # usage: python3 detachcheck.py <splashedit> [screenshot prefix]   (needs a display: xvfb-run -a)
 import os, shutil, stat, struct, subprocess, sys, tempfile, zlib
 
@@ -27,6 +34,10 @@ engine = os.path.join(work, 'psxsplash.ps-exe')
 with open(engine, 'wb') as fh:
     fh.write(b'PS-X EXE fake')
 DETACH_GAME = ['--click', '@menu.view', '--wait', '3', '--click', '@menu.view/Game View in Own Window', '--wait', '30']
+
+
+def detach(title):
+    return ['--click', '@menu.view', '--wait', '3', '--click', '@menu.view/%s in Own Window' % title, '--wait', '30']
 
 
 def check(name, ok, detail=''):
@@ -86,7 +97,7 @@ def has_bars(cs):
     return yellow and green and blue
 
 
-def run(name, args, cfg_text=None):
+def run(name, args, cfg_text=None, play=True):
     project = os.path.join(tempfile.mkdtemp(), 'p')
     shutil.copytree(example, project)
     settings = os.path.join(work, name + '.cfg')
@@ -102,7 +113,8 @@ def run(name, args, cfg_text=None):
     base = (shots + '-' + name) if shots else os.path.join(work, name)
     args = [a.replace('{mid}', base + '-mid.png') for a in args]
     cmd = [editor, '--size', '1600x960', '--project', project, '--scene', os.path.join(project, 'courtyard.scene'),
-           '--play-settings', settings, '--wait', '5', '--key', 'f5', '--wait', '240'] + args + ['--wait', '20', '--screenshot', base + '.png']
+           '--play-settings', settings, '--wait', '5'] + (['--key', 'f5', '--wait', '240'] if play else []) + args + \
+          ['--wait', '20', '--screenshot', base + '.png']
     r = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=300)
     lines = (r.stdout + r.stderr).strip().splitlines()
     controls = {}
@@ -196,6 +208,69 @@ else:
 check('console: closing it put it back', 'detach: console back' in lines and 'panel window console: attached' in lines,
       [l for l in lines if l.startswith('detach') or l.startswith('panel window')])
 check('console: saved back', 'console_detached=0\n' in cfg and 'console_window=' in cfg, cfg)
+
+# 5. Saved out, the Game view's window opens with the editor and stays open
+#    across Plays: Play, stop, Play again from the main window (the keyboard
+#    there) neither opens it again nor gives the game the keyboard.
+lines, c, cfg, shot = run('replay', ['--focus-window', 'main', '--wait', '10', '--key', 'f5', '--wait', '240', '--key', 'f5', '--wait', '60',
+                                     '--key', 'f5', '--wait', '240'], 'game_detached=1\ngame_window=100,120,500,400\n', play=False)
+opened = [l for l in lines if l.startswith('panel window game: opened')]
+check('replay: its window opened once, as the editor started', len(opened) == 1 and not opened[0].endswith(' raised'), opened)
+check('replay: no Play closed it', 'panel window game: closed' not in lines, [l for l in lines if l.startswith('panel window game')])
+drawn = [l for l in lines if l.startswith('window: game drawn')]
+shown = ''.join('f' if ' frames' in l else 'w' for l in drawn)
+check('replay: it showed the first game, waited, then the second', 'fwf' in ''.join(ch for i, ch in enumerate(shown) if i == 0 or shown[i - 1] != ch),
+      drawn)
+check('replay: no Play gave the game the keyboard', bool(drawn) and not any(' frames' in l and l.endswith(' focused') for l in drawn), drawn)
+check('replay: still out', 'game_detached=1\n' in cfg, cfg)
+
+# 6. The Scene, the Inspector, the Project panel and the Timeline: out from the
+#    View menu (the main window gives its room to the rest), and saved out
+#    then put back with their window's Attach.
+NEWCS = ['--click', '@newcs', '--wait', '20']  # the courtyard has no cutscene: one, open in the Timeline
+lines, plain_c, cfg, _ = run('plain', [], play=False)
+lines, tl_c, cfg, _ = run('plain-tl', NEWCS, play=False)
+check('plain: the panels are in the main window', all(k in plain_c for k in ('treelist.panel', 'inspector.tab/Inspector', 'tab_project')) and
+      'timeline.body' not in plain_c, sorted(k for k in plain_c if '.' not in k)[:12])
+PANELS = [  # name, title, a control of it in the main window, one in its own, how the Scene view grows, before (args)
+    ('scene', 'Scene', 'treelist.panel', 'tree.Crate', 'left', []),
+    ('inspector', 'Inspector', 'inspector.tab/Inspector', 'inspector.tab/Inspector', 'right', []),
+    ('project', 'Project', 'tab_project', 'assets.tree/.', 'down', []),
+    ('timeline', 'Timeline', 'tab_timeline', 'addtrack', 'down', NEWCS),
+]
+for name, title, mark, inner, grows, before in PANELS:
+    base_c = tl_c if before else plain_c
+    lines, c, cfg, shot = run(name + '-out', before + detach(title) + ['--shot', '{mid}'], play=False)
+    check('%s-out: it went out' % name, 'detach: %s out' % name in lines and
+          any(l.startswith('panel window %s: opened ' % name) and l.endswith(' raised') for l in lines),
+          [l for l in lines if l.startswith('detach') or l.startswith('panel window')])
+    check('%s-out: its window draws it' % name, any(l.startswith('window: %s drawn ' % name) for l in lines) and
+          all('%s:%s' % (name, k) in c for k in (name + '.body', name + '.attach', inner)), sorted(k for k in c if k.startswith(name + ':'))[:8])
+    wpng = shot + '-mid-%s.png' % name
+    check('%s-out: its window was written, not blank' % name, os.path.exists(wpng) and len(colours(wpng)) >= 8, wpng)
+    check('%s-out: gone from the main window' % name, mark not in c, sorted(k for k in c if ':' not in k and k.startswith(mark.split('.')[0]))[:6])
+    b, a = base_c.get('vp.view'), c.get('vp.view')
+    grew = bool(a and b) and (a[0] < b[0] if grows == 'left' else a[2] > b[2] if grows == 'right' else a[3] > b[3])
+    check('%s-out: the Scene view takes its room (%s)' % (name, grows), grew, (b, a))
+    check('%s-out: saved out' % name, '%s_detached=1\n' % name in cfg and '%s_window=' % name in cfg, cfg)
+    lines, c, cfg, shot = run(name + '-back', before + ['--wait', '10', '--in', name, '--click', '@%s.attach' % name, '--wait', '30'],
+                              '%s_detached=1\n%s_window=40,50,620,500\n' % (name, name), play=False)
+    check('%s-back: saved out, it opened at the saved size' % name, any(l.startswith('panel window %s: opened 620x500' % name) for l in lines),
+          [l for l in lines if l.startswith('panel window ' + name)])
+    check('%s-back: Attach put it back' % name, 'detach: %s back' % name in lines and 'panel window %s: attached' % name in lines,
+          [l for l in lines if l.startswith('detach') or l.startswith('panel window ' + name)])
+    mc, mb = main_controls(c), main_controls(base_c)
+    moved = sorted(k for k in set(mc) | set(mb) if mc.get(k) != mb.get(k))
+    check('%s-back: back, the main window\'s controls are where they were' % name, not moved, [(k, mb.get(k), mc.get(k)) for k in moved][:8])
+    check('%s-back: saved back, with where its window was' % name, '%s_detached=0\n' % name in cfg and '%s_window=40,50,620,500\n' % name in cfg, cfg)
+
+# 7. --in with --ctrl-held: the Ctrl-click lands in the Scene's own window,
+#    with Ctrl (a second object joins the selection). --ctrl-held between
+#    --in and its click must leave --in on the click.
+lines, c, cfg, shot = run('ctrl', detach('Scene') + ['--in', 'scene', '--click', '@tree.Crate', '--wait', '10',
+                                                     '--in', 'scene', '--ctrl-held', '--click', '@tree.Fill', '--wait', '10'], play=False)
+sel = [l for l in lines if l.startswith('selection: ')]
+check('ctrl: Ctrl-click in the Scene\'s window added to the selection', bool(sel) and sel[-1] == 'selection: 2 primary=Fill all=Crate;Fill', sel)
 
 print('detachcheck: %d failure(s)' % fails if fails else 'detachcheck: all passed')
 sys.exit(1 if fails else 0)

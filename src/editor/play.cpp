@@ -62,10 +62,12 @@ PlayTools loadPlayTools(const fs::path& file) {
         else if (key == "scale_lock") t.scaleLock = value == "1";
         else if (key == "game_every_tab") t.gameEveryTab = value != "0";
         else if (key == "console_docked") t.consoleDocked = value == "1";
-        else if (key == "game_detached") t.gameWindow.detached = value == "1";
-        else if (key == "console_detached") t.consoleWindow.detached = value == "1";
-        else if (key == "game_window") parseWindowRect(value, t.gameWindow.rect);
-        else if (key == "console_window") parseWindowRect(value, t.consoleWindow.rect);
+        else
+            for (int k = 0; k < kDetachPanels; ++k) {
+                const std::string name = detachPanelName(DetachPanel(k));
+                if (key == name + "_detached") t.window(DetachPanel(k)).detached = value == "1";
+                else if (key == name + "_window") parseWindowRect(value, t.window(DetachPanel(k)).rect);
+            }
     }
     return t;
 }
@@ -95,11 +97,12 @@ bool savePlayTools(const fs::path& file, const PlayTools& t) {
         << "ui_safe_area=" << (t.uiSafeArea ? 1 : 0) << "\n"
         << "scale_lock=" << (t.scaleLock ? 1 : 0) << "\n"
         << "game_every_tab=" << (t.gameEveryTab ? 1 : 0) << "\n"
-        << "console_docked=" << (t.consoleDocked ? 1 : 0) << "\n"
-        << "game_detached=" << (t.gameWindow.detached ? 1 : 0) << "\n"
-        << "console_detached=" << (t.consoleWindow.detached ? 1 : 0) << "\n";
-    if (!t.gameWindow.rect.empty()) out << "game_window=" << windowRectValue(t.gameWindow.rect) << "\n";
-    if (!t.consoleWindow.rect.empty()) out << "console_window=" << windowRectValue(t.consoleWindow.rect) << "\n";
+        << "console_docked=" << (t.consoleDocked ? 1 : 0) << "\n";
+    for (int k = 0; k < kDetachPanels; ++k)
+        out << detachPanelName(DetachPanel(k)) << "_detached=" << (t.window(DetachPanel(k)).detached ? 1 : 0) << "\n";
+    for (int k = 0; k < kDetachPanels; ++k)
+        if (const WindowRect& r = t.window(DetachPanel(k)).rect; !r.empty())
+            out << detachPanelName(DetachPanel(k)) << "_window=" << windowRectValue(r) << "\n";
     return bool(out);
 }
 

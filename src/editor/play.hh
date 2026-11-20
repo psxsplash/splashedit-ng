@@ -2,6 +2,7 @@
 // boot it in pcsx-redux. This half has no SDL; the process lives in the app.
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -55,9 +56,16 @@ struct PlayTools {
     // Scene tab only); consoleDocked shows the output in a Console tab of
     // the bottom dock instead of a popup off the status bar.
     bool gameEveryTab = true, consoleDocked = false;
-    // The Game view and the output in OS windows of their own (#345,
+    // The Game view, the output, the Scene, the Inspector, the Project panel
+    // and the Timeline in OS windows of their own (#345,
     // editor/panel_window.hh): out or not, and where each window was.
-    PanelWindow gameWindow, consoleWindow;
+    PanelWindow gameWindow, consoleWindow, sceneWindow, inspectorWindow, projectWindow, timelineWindow;
+    // The one for `panel` (in DetachPanel order).
+    std::array<PanelWindow*, kDetachPanels> windows() {
+        return {&gameWindow, &consoleWindow, &sceneWindow, &inspectorWindow, &projectWindow, &timelineWindow};
+    }
+    PanelWindow& window(DetachPanel panel) { return *windows()[size_t(panel)]; }
+    const PanelWindow& window(DetachPanel panel) const { return *const_cast<PlayTools*>(this)->windows()[size_t(panel)]; }
     // The inspector's Scale lock (#264): one axis edited scales all three.
     bool scaleLock = false;
 };
@@ -72,8 +80,9 @@ inline bool usesRelay(const PlayTools& t) { return t.players >= 3 || (t.players 
 // game_look= (rgb, svideo or composite), game_overlay= (over, strip or hover),
 // game_crop= (none, action or title), game_fps= (1 or 0), ui_safe_area= (1 or 0),
 // scale_lock= (1 or 0), game_every_tab= (1 or 0), console_docked= (1 or 0),
-// game_detached= and console_detached= (1 or 0), game_window= and console_window=
-// (x,y,w,h in screen coordinates; written only once placed). A missing
+// <panel>_detached= (1 or 0) and <panel>_window= (x,y,w,h in screen
+// coordinates; written only once placed) for each of game, console, scene,
+// inspector, project and timeline. A missing
 // file or key reads as empty or off, but boot_logo, game_dither and game_every_tab as on,
 // players as 1 (also for a value that is not a number) and game_aspect as 4:3;
 // an unknown game_overlay or game_crop as over and none.
