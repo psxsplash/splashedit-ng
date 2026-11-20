@@ -656,12 +656,15 @@ void Document::record(std::unique_ptr<Command> cmd, bool mergeable) {
 namespace {
 
 // `after` differs from `before` (an instance, children left out) in more
-// than what an instance overrides: its name, active flags and transform.
+// than what an instance overrides: its name, active flags, spawn pool and
+// transform.
 bool touchesContent(splash::Object before, splash::Object after) {
     if (before.prefab != after.prefab) return true;
     after.name = before.name;
     after.active = before.active;
     after.startActive = before.startActive;
+    after.spawnPool = before.spawnPool;
+    after.spawnPoolName = before.spawnPoolName;
     after.transform = before.transform;
     after.extra = before.extra;
     before.prefab.clear();

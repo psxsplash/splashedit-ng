@@ -300,6 +300,10 @@ struct Object {
     std::string name;
     bool active = true;       // exported at all; off leaves the object out of the pack
     bool startActive = true;  // exported objects only: shown and colliding when the scene loads
+    // A spawn pool: the export writes this many copies of the object, all
+    // inactive, for Scene.Spawn(spawnPoolName, ...) to hand out. 0 = not a pool.
+    int spawnPool = 0;
+    std::string spawnPoolName;  // empty = the object's name
     Transform transform;
     std::optional<MeshComponent> mesh;
     std::optional<ColliderComponent> collider;

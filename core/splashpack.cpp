@@ -634,7 +634,7 @@ void planStreaming(const Scene& scene, std::vector<ExpObject>& exporters, std::v
     std::vector<std::vector<float>> triLowY;  // per candidate, per tri: lowest world Y (scene view overlay)
     for (size_t i = 0; i < exporters.size(); i++) {
         const ExpObject& e = exporters[i];
-        if (e.tris.empty() || e.obj->script || e.obj->skin || e.obj->agent) continue;
+        if (e.tris.empty() || e.obj->script || e.obj->skin || e.obj->agent || e.obj->spawnPool > 0) continue;
         if (e.obj->collider && e.obj->collider->kind == ColliderKind::Dynamic) continue;
         if (std::any_of(interactables.begin(), interactables.end(), [&](const FlatObject* fo) { return fo->object == e.obj; }))
             continue;
@@ -2182,6 +2182,50 @@ static ExportResult exportSplashpackBaked(const Scene& scene, const fs::path& ro
     }
     if (!res.ok()) return res;
 
+    // Spawn pools: an object with a pool exports as that many copies of
+    // itself, back to back, each an ordinary game object (its own triangles,
+    // collider, skin and BVH refs), so every count and meter below sees them.
+    // The engine loads them inactive and Scene.Spawn hands them out.
+    {
+        std::vector<ExpObject> pooled;
+        pooled.reserve(exporters.size());
+        for (ExpObject& e : exporters) {
+            const int n = e.obj->spawnPool;
+            if (n <= 0) {
+                pooled.push_back(std::move(e));
+                continue;
+            }
+            const std::string where = e.obj->name + ": ";
+            if (n > kMaxSpawnPoolCopies)
+                res.errors.push_back(where + "a spawn pool holds at most " + std::to_string(kMaxSpawnPoolCopies) +
+                                     " copies, this one asks for " + std::to_string(n));
+            const char* comp = e.obj->player ? "Player" : e.obj->trigger ? "Trigger" : e.obj->interactable ? "Interactable"
+                             : e.obj->agent ? "Agent" : e.obj->navigation ? "Navigation" : e.obj->room ? "Room"
+                             : e.obj->portal ? "Portal" : nullptr;
+            if (comp)
+                res.errors.push_back(where + "a spawn pool's object cannot have a " + comp +
+                                     " component: the copies would share it. Remove it or set Spawn pool to 0");
+            if (!e.obj->children.empty())
+                res.warnings.push_back(where + "a spawn pool copies the object alone; its children are exported once "
+                                               "and do not move with a spawned copy");
+            for (int c = 1; c < n; c++) pooled.push_back(e);
+            pooled.push_back(std::move(e));
+        }
+        exporters = std::move(pooled);
+    }
+    // The header counts objects in a u16 and every object index is one.
+    auto tooManyObjects = [](size_t n) {
+        return "the scene exports " + std::to_string(n) + " objects (spawn pool copies included) and a splashpack holds " +
+               std::to_string(kMaxObjects) + ". Lower a Spawn pool or merge small props into one mesh";
+    };
+    if (exporters.size() > size_t(kMaxObjects)) res.errors.push_back(tooManyObjects(exporters.size()));
+    if (!res.ok()) return res;
+    // A pool's second and later copies: warnings about the object are given
+    // once, for the first.
+    auto repeatCopy = [&](size_t i) {
+        return i > 0 && exporters[i].obj->spawnPool > 0 && exporters[i - 1].obj == exporters[i].obj;
+    };
+
     if (!options.objectOrder.empty()) {
         auto rank = [&](const ExpObject& e) {
             auto it = std::find(options.objectOrder.begin(), options.objectOrder.end(), e.obj->name);
@@ -2250,7 +2294,7 @@ static ExportResult exportSplashpackBaked(const Scene& scene, const fs::path& ro
             for (auto& m : errs) res.errors.push_back(where + m);
             so.clips.push_back(std::move(b));
         }
-        if (clamped)
+        if (clamped && !repeatCopy(i))
             res.warnings.push_back(where + "bone values outside the 4.12 range were clamped (bone moves more than " +
                                    std::to_string(int(8 * gte)) + " units from its bind position?)");
         {
@@ -2280,7 +2324,7 @@ static ExportResult exportSplashpackBaked(const Scene& scene, const fs::path& ro
             case DynamicLighting::Auto: e.dynamicLit = reaching > 0; break;
         }
         e.dynamicLitSmooth = e.dynamicLit && e.mc->dynamicLighting == DynamicLighting::Smooth;
-        if (e.dynamicLit && reaching > kMaxLightsPerMesh)
+        if (e.dynamicLit && reaching > kMaxLightsPerMesh && !repeatCopy(size_t(&e - exporters.data())))
             res.warnings.push_back(e.obj->name + ": " + std::to_string(reaching) +
                                    " runtime point lights reach it and the PS1 lights a mesh with " +
                                    std::to_string(kMaxLightsPerMesh) + " (the first in scene order): " + names);
@@ -2594,6 +2638,38 @@ static ExportResult exportSplashpackBaked(const Scene& scene, const fs::path& ro
     if (scene.settings.streamWorld)
         planStreaming(scene, exporters, streamed, streamRegions, luaSources, interactables, gte, res);
 
+    // The spawn pool table's runs (v33): the copies made above, in object order.
+    struct PoolOut {
+        uint16_t first, count;
+        std::string name;
+    };
+    std::vector<PoolOut> pools;
+    for (size_t i = 0; i < exporters.size();) {
+        const Object* o = exporters[i].obj;
+        size_t j = i;
+        while (j < exporters.size() && exporters[j].obj == o) j++;
+        if (o->spawnPool > 0) {
+            const std::string name = o->spawnPoolName.empty() ? o->name : o->spawnPoolName;
+            if (j > size_t(kMaxObjects))  // checked above for the whole table; kept here so a run never wraps its u16s
+                res.errors.push_back(tooManyObjects(exporters.size()));
+            else if (size_t(o->spawnPool) != j - i)
+                res.errors.push_back(o->name + ": its spawn pool's copies are not one run of " +
+                                     std::to_string(o->spawnPool) + " objects in the pack");
+            else if (std::any_of(pools.begin(), pools.end(), [&](const PoolOut& p) { return p.name == name; }))
+                res.errors.push_back(o->name + ": another spawn pool is already called \"" + name +
+                                     "\"; Scene.Spawn would only find the first. Give each pool its own name");
+            else
+                pools.push_back({uint16_t(i), uint16_t(j - i), name});
+        }
+        i = j;
+    }
+    if (pools.size() > size_t(kMaxSpawnPools))
+        res.errors.push_back("the scene has " + std::to_string(pools.size()) + " spawn pools and psxsplash holds " +
+                             std::to_string(kMaxSpawnPools));
+    if (!res.ok()) return res;
+    const bool hasPools = !pools.empty();
+    st.spawnPools = int(pools.size());
+
     // BVH over active objects' exported triangles.
     std::vector<BvhInputObject> bvhIn;
     for (ExpObject& e : exporters) {
@@ -2812,11 +2888,13 @@ static ExportResult exportSplashpackBaked(const Scene& scene, const fs::path& ro
                                                                  : st.bumpAllocatorNeed;
 
     // ---- header (156 bytes, v27; 160 bytes, v28, only when the scene has
-    // shadows, so a scene without them exports exactly as before)
+    // shadows, so a scene without them exports exactly as before; 176 bytes,
+    // v33, only when it has spawn pools, with the v29-v32 table offsets
+    // (background, shine, particles) written 0)
     bool hasLights = !runtimeLights.empty();
     w.u8('S');
     w.u8('P');
-    w.u16(hasShadows ? 28 : 27);
+    w.u16(hasPools ? 33 : hasShadows ? 28 : 27);
     w.u16(uint16_t(luaFiles.size()));
     w.u16(uint16_t(exporters.size()));
     res.stats.gameObjects = int(exporters.size());
@@ -2906,9 +2984,16 @@ static ExportResult exportSplashpackBaked(const Scene& scene, const fs::path& ro
     w.u32(0);
     w.u32(st.orderingTableSize);
     w.u32(st.bumpAllocatorSize);
-    size_t shadowTableOffsetPos = 0;
-    if (hasShadows) {
+    size_t shadowTableOffsetPos = 0, spawnPoolTableOffsetPos = 0;
+    if (hasShadows || hasPools) {
         shadowTableOffsetPos = w.pos();
+        w.u32(0);  // patched when the scene has shadows
+    }
+    if (hasPools) {
+        w.u32(0);  // v29 background table offset
+        w.u32(0);  // v30 shine table offset
+        w.u32(0);  // v32 particle table offset
+        spawnPoolTableOffsetPos = w.pos();
         w.u32(0);
     }
 
@@ -2934,7 +3019,7 @@ static ExportResult exportSplashpackBaked(const Scene& scene, const fs::path& ro
         // A streamed object draws nothing until the stream table attaches its region.
         w.u16(streamed[oi] ? 0 : uint16_t(e.tris.size()));
         w.i16(e.obj->script ? luaIndex(e.obj->script->lua) : int16_t(-1));
-        w.u32((e.obj->startActive ? 1u : 0u) | (e.obj->skin ? 0x10u : 0u) | (hasLights && e.dynamicLit ? 0x10000u : 0u) |
+        w.u32((e.obj->startActive && e.obj->spawnPool <= 0 ? 1u : 0u) | (e.obj->skin ? 0x10u : 0u) | (hasLights && e.dynamicLit ? 0x10000u : 0u) |
               (hasLights && e.dynamicLitSmooth ? 0x20000u : 0u));
         {
             auto it = std::find_if(interactables.begin(), interactables.end(),
@@ -3396,6 +3481,30 @@ static ExportResult exportSplashpackBaked(const Scene& scene, const fs::path& ro
                 offset += uint32_t(tris) * stream::kBytesPerTri;
             }
         }
+    }
+
+    // ---- spawn pools (v33, psxsplash spawnpool.hh): {u16 count, u16 0}, then
+    // 8-byte records {u16 first object, u16 count, u32 name offset}, then the
+    // NUL-terminated names the offsets point at
+    if (hasPools) {
+        w.align4();
+        const size_t start = w.pos();
+        w.patchU32(spawnPoolTableOffsetPos, uint32_t(start));
+        w.u16(uint16_t(pools.size()));
+        w.u16(0);
+        std::vector<size_t> namePos;
+        for (const PoolOut& p : pools) {
+            w.u16(p.first);
+            w.u16(p.count);
+            namePos.push_back(w.pos());
+            w.u32(0);
+        }
+        for (size_t i = 0; i < pools.size(); i++) {
+            w.patchU32(namePos[i], uint32_t(w.pos()));
+            w.bytes(pools[i].name);
+            w.u8(0);
+        }
+        st.spawnPoolTableBytes = uint32_t(w.pos() - start);
     }
 
     fs::path outPath = out;
