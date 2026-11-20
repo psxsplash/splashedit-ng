@@ -185,6 +185,8 @@ struct State {
         };
         std::array<Console, editor::kMaxPlayers> cons;
         bool gameFocus = false;   // the Game view has the keyboard (a click in either view moves it)
+        // The Game view's own window (#345) has the OS keyboard focus (the shell's).
+        bool gameWindowFocused = false;
         // Play with linked consoles (tools.players): the session's console
         // count and whether they go through the relay, fixed when Play
         // starts; the console waiting to start (0: none) and since when (each
@@ -591,7 +593,8 @@ struct State {
     };
     std::vector<AssetSlotTarget> assetSlots;
     // Panels in OS windows of their own (#345): the shell raises a panel's
-    // window when this asks (the status bar's Play entry with the output out).
+    // window when this asks (the status bar's Play entry with the output out,
+    // a panel just sent out, the Timeline opened while it is out).
     std::array<bool, editor::kDetachPanels> raisePanel{};
 };
 
@@ -599,14 +602,16 @@ struct State {
 // rect so the platform layer can make it draggable.
 ImRect drawMainScreen(State& state, editor::Document& doc, viewport::Ps1View& view, ImVec2 size);
 
-// The Game view and Play's output out of the main window (#345). The saved
-// part (out or not, where) is Play's tools' (editor::PlayTools::gameWindow,
-// consoleWindow); the shell opens a window for each panel while
-// panelWindowWanted says, draws it with drawPanelWindow in an ImGui context of
-// its own filling `size`, and closing the window calls setPanelDetached(false).
+// Panels out of the main window (#345): the Game view, Play's output, the
+// Scene, the Inspector, the Project panel and the Timeline. The saved part
+// (out or not, where) is Play's tools' (editor::PlayTools::window); the shell
+// opens a window for each panel while panelWindowWanted says, draws it with
+// drawPanelWindow in an ImGui context of its own filling `size`, and closing
+// the window calls setPanelDetached(false). The main window gives an absent
+// panel's room to the others.
 editor::PanelWindow& panelWindow(State& state, editor::DetachPanel panel);
 bool panelWindowWanted(const State& state, editor::DetachPanel panel);
 void setPanelDetached(State& state, editor::DetachPanel panel, bool detached);
-void drawPanelWindow(State& state, editor::Document& doc, editor::DetachPanel panel, ImVec2 size);
+void drawPanelWindow(State& state, editor::Document& doc, viewport::Ps1View& view, editor::DetachPanel panel, ImVec2 size);
 
 }  // namespace mockup

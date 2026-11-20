@@ -5,7 +5,14 @@
 
 namespace editor {
 
-const char* detachPanelName(DetachPanel panel) { return panel == DetachPanel::Game ? "game" : "console"; }
+static constexpr const char* kNames[kDetachPanels] = {"game", "console", "scene", "inspector", "project", "timeline"};
+static constexpr const char* kTitles[kDetachPanels] = {"Game", "Console", "Scene", "Inspector", "Project", "Timeline"};
+// The size each window first opens at.
+static constexpr WindowRect kDefaultRects[kDetachPanels] = {
+    {0, 0, 680, 560}, {0, 0, 760, 420}, {0, 0, 320, 640}, {0, 0, 400, 720}, {0, 0, 900, 360}, {0, 0, 1000, 380}};
+
+const char* detachPanelName(DetachPanel panel) { return kNames[int(panel)]; }
+const char* detachPanelTitle(DetachPanel panel) { return kTitles[int(panel)]; }
 
 std::string windowRectValue(const WindowRect& r) {
     char b[64];
@@ -22,13 +29,11 @@ bool parseWindowRect(const std::string& text, WindowRect& out) {
     return true;
 }
 
-bool panelWindowOpen(DetachPanel panel, const PanelWindow& w, bool gameShows) {
-    return w.detached && (panel != DetachPanel::Game || gameShows);
+bool panelWindowOpen(DetachPanel panel, const PanelWindow& w, bool shows) {
+    return w.detached && (panel != DetachPanel::Timeline || shows);
 }
 
-WindowRect defaultPanelRect(DetachPanel panel) {
-    return panel == DetachPanel::Game ? WindowRect{0, 0, 680, 560} : WindowRect{0, 0, 760, 420};
-}
+WindowRect defaultPanelRect(DetachPanel panel) { return kDefaultRects[int(panel)]; }
 
 static long long overlap(const WindowRect& a, const WindowRect& b) {
     const long long w = std::min(a.x + a.w, b.x + b.w) - std::max(a.x, b.x);

@@ -88,7 +88,15 @@ std::array<PanelOs, editor::kDetachPanels> g_panels;
 // The window --focus-window last focused (screenshot runs; null: none yet).
 SDL_Window* g_scriptFocus = nullptr;
 
-// The panel `name` names ("game", "console"), or -1.
+// Every panel's scripted name, "game, console, ... or timeline".
+std::string panelNames() {
+    std::string s;
+    for (int k = 0; k < editor::kDetachPanels; ++k)
+        s += std::string(k == 0 ? "" : k + 1 == editor::kDetachPanels ? " or " : ", ") + editor::detachPanelName(editor::DetachPanel(k));
+    return s;
+}
+
+// The panel `name` names ("game", "console", "scene", ...), or -1.
 int panelByName(const std::string& name) {
     for (int k = 0; k < editor::kDetachPanels; ++k)
         if (name == editor::detachPanelName(editor::DetachPanel(k))) return k;
@@ -200,6 +208,10 @@ struct Args {
     bool assumeMaximized = false;
     std::vector<Action> actions;
     int padButton = -1;  // SDL_GamepadButton held on a virtual gamepad for the whole run
+    // --ctrl-held: Ctrl down for the whole run, in the main window and in
+    // every panel window (#345) alike. Not an action: one put first in the
+    // list moved the next --in onto the action before the one it named.
+    bool ctrlHeld = false;
     bool splash = false;
     // --drop <file>@x,y releases a file there after the scripted input;
     // --drag-over x,y holds a dragged file there for the whole run.
@@ -650,24 +662,24 @@ Args parse(int argc, char** argv) {
             a.padButton = SDL_GetGamepadButtonFromString(spec);
             if (a.padButton == SDL_GAMEPAD_BUTTON_INVALID) std::fprintf(stderr, "unknown gamepad button '%s'\n", spec);
         } else if (!std::strcmp(argv[i], "--in")) {
-            // --in <game|console>: the next action's input goes to that panel's own window.
+            // --in <panel>: the next action's input goes to that panel's own window.
             const char* v = next();
             pendingPanel = panelByName(v);
             pendingAt = a.actions.size();
             if (pendingPanel < 0) {
-                std::fprintf(stderr, "--in wants game or console\n");
+                std::fprintf(stderr, "--in wants %s\n", panelNames().c_str());
                 std::exit(2);
             }
             continue;
         } else if (!std::strcmp(argv[i], "--close-window") || !std::strcmp(argv[i], "--focus-window")) {
-            // --close-window <game|console>: the OS asks that panel's own window to close (its close button).
-            // --focus-window <game|console|main>: that window takes the keyboard, as a click on it would.
+            // --close-window <panel>: the OS asks that panel's own window to close (its close button).
+            // --focus-window <panel|main>: that window takes the keyboard, as a click on it would.
             Action act(!std::strcmp(argv[i], "--close-window") ? Action::CloseWindow : Action::FocusWindow);
             act.text = next();
             if (act.text != "main" || act.kind == Action::CloseWindow) {
                 act.panel = panelByName(act.text);
                 if (act.panel < 0) {
-                    std::fprintf(stderr, "%s wants game or console%s\n", argv[i], act.kind == Action::FocusWindow ? " or main" : "");
+                    std::fprintf(stderr, "%s wants %s%s\n", argv[i], panelNames().c_str(), act.kind == Action::FocusWindow ? " or main" : "");
                     std::exit(2);
                 }
             }
@@ -676,11 +688,9 @@ Args parse(int argc, char** argv) {
             // Screenshot runs skip the startup splash unless asked; it plays silent there.
             a.splash = true;
         } else if (!std::strcmp(argv[i], "--ctrl-held")) {
-            // Holds Ctrl down for the whole run (Ctrl-snapping while dragging).
-            Action act(Action::Key);
-            act.key = ImGuiMod_Ctrl;
-            act.button = -1;
-            a.actions.insert(a.actions.begin(), act);
+            // Holds Ctrl down for the whole run (Ctrl-snapping while dragging, Ctrl-click).
+            a.ctrlHeld = true;
+            continue;  // takes no action, so a --in before it still names the next one
         }
     }
     applyIn();
@@ -969,10 +979,6 @@ int main(int argc, char** argv) {
     int firstFrame = 5, timelineEnd = firstFrame;
     std::vector<int> actionStart;
     for (const Action& a : args.actions) {
-        if (a.button == -1) {  // --ctrl-held takes no time
-            actionStart.push_back(-1);
-            continue;
-        }
         actionStart.push_back(timelineEnd);
         timelineEnd += actionFrames(a);
     }
@@ -1009,7 +1015,7 @@ int main(int argc, char** argv) {
             }
             if (want && !po.win) {
                 const editor::WindowRect r = editor::placePanelWindow(panel, mockup::panelWindow(state, panel).rect, displayRects());
-                const std::string title = std::string(panel == editor::DetachPanel::Game ? "Game" : "Console") + " - SplashEdit";
+                const std::string title = std::string(editor::detachPanelTitle(panel)) + " - SplashEdit";
                 po.win = SDL_CreateWindow(title.c_str(), r.w, r.h, SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY | SDL_WINDOW_HIDDEN);
                 if (po.win) {
                     SDL_SetWindowPosition(po.win, r.x, r.y);
@@ -1045,13 +1051,20 @@ int main(int argc, char** argv) {
                 SDL_SetHint("SDL_BORDERLESS_WINDOWED_STYLE", "1");  // as after the main backend's init
                 ImGui::GetPlatformIO().Platform_SetImeDataFn = setImeDataScaled;
                 ImGui::SetCurrentContext(mainCtx);
+                // Sent out just now it comes up in front with the keyboard;
+                // saved out (opened as the editor starts) it leaves the main
+                // window the focus.
+                const bool raise = state.raisePanel[size_t(k)];
+                state.raisePanel[size_t(k)] = false;
+                if (!raise) SDL_SetHint(SDL_HINT_WINDOW_ACTIVATE_WHEN_SHOWN, "0");
                 SDL_ShowWindow(po.win);
-                SDL_RaiseWindow(po.win);
+                if (raise) SDL_RaiseWindow(po.win);
+                else SDL_SetHint(SDL_HINT_WINDOW_ACTIVATE_WHEN_SHOWN, "1");
                 mockup::panelWindow(state, panel).rect = windowRectOf(po.win);
                 if (args.screenshot) {
                     int pw, ph;
                     SDL_GetWindowSizeInPixels(po.win, &pw, &ph);
-                    std::printf("panel window %s: opened %dx%d\n", name, pw, ph);
+                    std::printf("panel window %s: opened %dx%d%s\n", name, pw, ph, raise ? " raised" : "");
                 }
             }
             if (!po.win) continue;
@@ -1078,7 +1091,7 @@ int main(int argc, char** argv) {
             std::vector<ImRect> mainInteractive = std::move(ui::interactiveRects());
             ui::namedRects().clear();
             ui::interactiveRects().clear();
-            mockup::drawPanelWindow(state, doc, panel, pio.DisplaySize);
+            mockup::drawPanelWindow(state, doc, view, panel, pio.DisplaySize);
             po.named = std::move(ui::namedRects());
             ui::namedRects() = std::move(mainNamed);
             ui::interactiveRects() = std::move(mainInteractive);
@@ -1152,6 +1165,8 @@ int main(int argc, char** argv) {
                 editor::PanelWindow& pw = mockup::panelWindow(state, panel);
                 if (e.type == SDL_EVENT_WINDOW_MOVED || e.type == SDL_EVENT_WINDOW_RESIZED) pw.rect = windowRectOf(g_panels[size_t(k)].win);
                 // Out, the game has the keyboard only while its window has the focus.
+                if (panel == editor::DetachPanel::Game && e.type == SDL_EVENT_WINDOW_FOCUS_GAINED) state.play.gameWindowFocused = true;
+                if (panel == editor::DetachPanel::Game && e.type == SDL_EVENT_WINDOW_FOCUS_LOST) state.play.gameWindowFocused = false;
                 if (e.type == SDL_EVENT_WINDOW_FOCUS_GAINED && panel == editor::DetachPanel::Game) state.play.gameFocus = true;
                 else if (e.type == SDL_EVENT_WINDOW_FOCUS_GAINED && state.play.tools.gameWindow.detached) state.play.gameFocus = false;
                 // Its close button puts the panel back in the main window.
@@ -1169,6 +1184,9 @@ int main(int argc, char** argv) {
                 else state.quitRequested = true;
             }
             // Files dragged in from the desktop: hover feedback, then import where released.
+            // Onto a panel's own window (#345) they land nowhere: its
+            // coordinates are not the main window's.
+            if (e.type >= SDL_EVENT_DROP_FILE && e.type <= SDL_EVENT_DROP_POSITION && panelOfWindow(e.drop.windowID) >= 0) continue;
             if (e.type == SDL_EVENT_DROP_BEGIN) state.drop.hovering = true;
             // (SDL reports where in window coordinates.)
             const ImVec2 dropAt(ui::toUi(e.drop.x, g_uiScale), ui::toUi(e.drop.y, g_uiScale));
@@ -1204,12 +1222,16 @@ int main(int argc, char** argv) {
                                        cancelNow.Max.x == cancelSeen.Max.x && cancelNow.Min.y == cancelSeen.Min.y &&
                                        state.live.result() && !state.live.busy();
             cancelSeen = cancelNow;
+            // --ctrl-held: Ctrl down in every context each frame (a repeat is
+            // no event), so a panel window opened later has it too and a
+            // focus change, which lets the keys go, does not end it.
+            if (args.ctrlHeld) {
+                io.AddKeyEvent(ImGuiMod_Ctrl, true);
+                for (PanelOs& po : g_panels)
+                    if (po.ctx) po.ctx->IO.AddKeyEvent(ImGuiMod_Ctrl, true);
+            }
             for (size_t i = 0; i < args.actions.size(); ++i) {
                 Action& a = args.actions[i];
-                if (actionStart[i] < 0) {
-                    if (frame == 0) io.AddKeyEvent(ImGuiMod_Ctrl, true);
-                    continue;
-                }
                 if (a.importCancel && frame == actionStart[i] && !held) {
                     // Holds the script (up to 90 s) while an import runs and the bar settles.
                     const auto now = std::chrono::steady_clock::now();

@@ -327,7 +327,7 @@ void AssetBrowser::header(ImDrawList* dl, ImRect h) {
         const char* tab = "Project";
         const float tw = measure(f.semibold, type::body, tab).x + 30 + space::md * 2;
         tr = ImRect(h.Min, ImVec2(h.Min.x + tw, h.Max.y));
-        if (interact("tab", tr).clicked) open = !open;
+        if (interact("tab", tr).clicked && !windowed) open = !open;
         text(dl, ImVec2(tr.Min.x + space::md, centerY(f.medium, type::icon, tr.Min.y, tr.Max.y)), f.medium, type::icon - 1,
              typeColor(AssetType::Folder), icon::folderOpen);
         text(dl, ImVec2(tr.Min.x + space::md + 22, centerY(f.semibold, type::body, tr.Min.y, tr.Max.y)), f.semibold, type::body, color::text, tab);
@@ -342,11 +342,13 @@ void AssetBrowser::header(ImDrawList* dl, ImRect h) {
     float x = h.Max.x - space::xs;
     // The chevron points the way the panel goes: down to fold it, up (where
     // it opens, from the bottom of the window) to show it.
-    ImRect cb(ImVec2(x - 26, h.Min.y + 4), ImVec2(x, h.Max.y - 4));
-    nameRect("project.collapse", cb);
-    if (iconButton("collapse", cb, open ? icon::chevronDown : icon::chevronUp, false, open ? "Hide the Project panel" : "Show the Project panel"))
-        open = !open;
-    x = cb.Min.x - space::xs;
+    if (!windowed) {
+        ImRect cb(ImVec2(x - 26, h.Min.y + 4), ImVec2(x, h.Max.y - 4));
+        nameRect("project.collapse", cb);
+        if (iconButton("collapse", cb, open ? icon::chevronDown : icon::chevronUp, false, open ? "Hide the Project panel" : "Show the Project panel"))
+            open = !open;
+        x = cb.Min.x - space::xs;
+    }
     if (!open) return;
     ImRect lb(ImVec2(x - 26, h.Min.y + 4), ImVec2(x, h.Max.y - 4));
     if (iconButton("listview", lb, kList, m_list, "List")) m_list = true;

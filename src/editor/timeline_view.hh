@@ -48,7 +48,12 @@ public:
     // Takes the bottom of `area` (with a drag bar to resize) when open;
     // returns what is left above it.
     ImRect dock(ImRect area);
-    // Draws in the rect dock() took.
+    // Takes all of `area` (its own window, #345), in place of dock().
+    void fill(ImRect area) { m_rect = area; }
+    // Fits the sequence to the width again at the next draw (moved to or
+    // from its own window, its width changed).
+    void refit() { m_fitPending = true; }
+    // Draws in the rect dock() or fill() took.
     void draw(ImDrawList* dl, editor::Document& doc);
     // Inspector rows: each cutscene and animation with an Edit in timeline
     // button, then New cutscene and New animation. Returns the y under them.

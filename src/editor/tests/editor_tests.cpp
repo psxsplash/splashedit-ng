@@ -21592,12 +21592,12 @@ static void testPanelWindows() {
         }
         CHECK(WindowRect{}.empty() && !r.empty());
     }
-    // Open while detached; the Game view's only while a game shows.
+    // Open while detached (testPanelWindowsOpen has each panel's).
     {
         editor::PanelWindow w;
         CHECK(!editor::panelWindowOpen(DetachPanel::Game, w, true) && !editor::panelWindowOpen(DetachPanel::Console, w, true));
         w.detached = true;
-        CHECK(editor::panelWindowOpen(DetachPanel::Game, w, true) && !editor::panelWindowOpen(DetachPanel::Game, w, false));
+        CHECK(editor::panelWindowOpen(DetachPanel::Game, w, true));
         CHECK(editor::panelWindowOpen(DetachPanel::Console, w, false));
     }
     // Where it opens: where it was while that is on a display, else centred on the first.
@@ -21651,6 +21651,74 @@ static void testPanelWindows() {
         CHECK(!odd.gameWindow.detached && odd.consoleWindow.detached);
         CHECK(odd.gameWindow.rect.empty() && (odd.consoleWindow.rect == WindowRect{5, 6, 700, 300}));
     }
+}
+
+// The Scene, Inspector, Project and Timeline panels out in windows of their
+// own too (#345): each panel's name (the settings keys' prefix, --in's word)
+// and title, when its window is open, and its first size. The Game view's
+// window stays open between Plays while it is out, so a Play does not open it
+// again (and take the focus); the Timeline's only while the Timeline is open.
+static void testPanelWindowsOpen() {
+    using editor::DetachPanel;
+    const char* names[] = {"game", "console", "scene", "inspector", "project", "timeline"};
+    const char* titles[] = {"Game", "Console", "Scene", "Inspector", "Project", "Timeline"};
+    CHECK(editor::kDetachPanels == 6);
+    for (int k = 0; k < editor::kDetachPanels; ++k) {
+        const DetachPanel panel = DetachPanel(k);
+        CHECK(std::string(editor::detachPanelName(panel)) == names[k]);
+        CHECK(std::string(editor::detachPanelTitle(panel)) == titles[k]);
+        CHECK(!editor::defaultPanelRect(panel).empty());
+        editor::PanelWindow w;
+        CHECK(!editor::panelWindowOpen(panel, w, true) && !editor::panelWindowOpen(panel, w, false));
+        w.detached = true;
+        CHECK(editor::panelWindowOpen(panel, w, true));
+        // Shown or not only matters to the Timeline: no Timeline open, no window.
+        CHECK(editor::panelWindowOpen(panel, w, false) == (panel != DetachPanel::Timeline));
+    }
+    CHECK(editor::panelWindowOpen(DetachPanel::Game, editor::PanelWindow{true, {}}, false));  // between Plays
+    // The side columns open tall, the bottom dock's panels wide.
+    const editor::WindowRect s = editor::defaultPanelRect(DetachPanel::Scene), i = editor::defaultPanelRect(DetachPanel::Inspector);
+    const editor::WindowRect p = editor::defaultPanelRect(DetachPanel::Project), t = editor::defaultPanelRect(DetachPanel::Timeline);
+    CHECK(s.h > s.w && i.h > i.w && p.w > p.h && t.w > t.h);
+}
+
+// Each panel's out-or-not and window saved with Play's tools under its own
+// keys, <name>_detached= and <name>_window=, and read back to the same panel.
+static void testPanelWindowsSaved() {
+    namespace fs = std::filesystem;
+    using editor::DetachPanel;
+    using editor::WindowRect;
+    const fs::path dir = g_outDir / "panelwindows";
+    fs::create_directories(dir);
+    editor::PlayTools t;
+    CHECK(&t.window(DetachPanel::Scene) == &t.sceneWindow && &t.window(DetachPanel::Inspector) == &t.inspectorWindow);
+    CHECK(&t.window(DetachPanel::Project) == &t.projectWindow && &t.window(DetachPanel::Timeline) == &t.timelineWindow);
+    CHECK(&t.window(DetachPanel::Game) == &t.gameWindow && &t.window(DetachPanel::Console) == &t.consoleWindow);
+    for (int bits = 0; bits < (1 << editor::kDetachPanels); bits += 5) {
+        for (int k = 0; k < editor::kDetachPanels; ++k) {
+            t.window(DetachPanel(k)).detached = bits & (1 << k);
+            t.window(DetachPanel(k)).rect = (bits >> k) & 1 ? WindowRect{k * 100 - 50, bits, 300 + k, 200 + bits} : WindowRect{};
+        }
+        CHECK(editor::savePlayTools(dir / "panels.cfg", t));
+        std::ifstream in(dir / "panels.cfg", std::ios::binary);
+        const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        const editor::PlayTools back = editor::loadPlayTools(dir / "panels.cfg");
+        for (int k = 0; k < editor::kDetachPanels; ++k) {
+            const std::string name = editor::detachPanelName(DetachPanel(k));
+            const bool out = bits & (1 << k);
+            CHECK(text.find(name + "_detached=" + (out ? "1" : "0") + "\n") != std::string::npos);
+            CHECK((text.find(name + "_window=") != std::string::npos) == out);  // written once placed
+            CHECK(back.window(DetachPanel(k)).detached == out);
+            CHECK(back.window(DetachPanel(k)).rect == t.window(DetachPanel(k)).rect);
+        }
+    }
+    {
+        std::ofstream odd(dir / "panels-odd.cfg", std::ios::binary);
+        odd << "scene_detached=1\ninspector_detached=yes\ntimeline_window=1,2,3,0\nproject_window=-10,20,900,360\nprojects_detached=1\n";
+    }
+    const editor::PlayTools odd = editor::loadPlayTools(dir / "panels-odd.cfg");
+    CHECK(odd.sceneWindow.detached && !odd.inspectorWindow.detached && !odd.projectWindow.detached && !odd.timelineWindow.detached);
+    CHECK(odd.timelineWindow.rect.empty() && (odd.projectWindow.rect == WindowRect{-10, 20, 900, 360}));
 }
 
 // splash::writePlayer over each kind of pcsx-redux install, with stand-in
@@ -22641,6 +22709,8 @@ int main(int argc, char** argv) {
     testTvPreview();
     testGameView();
     testPanelWindows();
+    testPanelWindowsOpen();
+    testPanelWindowsSaved();
     testSkinCrossfade();
     if (g_failures) {
         std::fprintf(stderr, "editor_tests: %d of %d checks failed\n", g_failures, g_checks);
