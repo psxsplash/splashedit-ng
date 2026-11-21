@@ -7,7 +7,8 @@
 # keeping its offset (position X, rotation Y, light intensity), a clamp
 # stopping only the one it reaches; one Ctrl+Z undoes the whole drag. The
 # field reads "mixed" all through the drag. A value typed into the mixed field
-# still sets it on all. Move to Top Level from the row menu with ShelfA and
+# still sets it on all; typed +15 or *2 works on each value from its own (#376)
+# while 2+3 sets all to 5. Move to Top Level from the row menu with ShelfA and
 # ShelfB selected puts both at the top level after Rack, in tree order,
 # keeping where they are in the world; one Ctrl+Z puts both back.
 # usage: python3 multiscrubcheck.py <splashedit> [keep-dir]   (needs a display: xvfb-run -a)
@@ -186,6 +187,16 @@ s, _, _, _ = run('typed', TWO + typed('obj.pos.x', '2'))
 check('typed position X 2 puts both at X 2', lamps(s)['LampA'][0][0] == 2 and lamps(s)['LampB'][0][0] == 2, lamps(s))
 s, _, _, _ = run('typedlint', TWO + typed('obj.lint', '3'))
 check('typed intensity 3 sets both', all(lamps(s)[n][2] == 3 for n in LAMPS), lamps(s))
+# Arithmetic typed into it (#376): a leading +, * or / works on each value from
+# its own; a plain sum sets both to its result.
+s, _, _, _ = run('typedplus', TWO + typed('obj.pos.x', '+15'))
+check('typed +15 into position X puts LampA at 16 and LampB at 19',
+      lamps(s)['LampA'][0][0] == 16 and lamps(s)['LampB'][0][0] == 19, lamps(s))
+s, _, _, _ = run('typedtimes', TWO + typed('obj.lint', '*2'))
+check('typed *2 into intensity doubles each (2 and 5)',
+      lamps(s)['LampA'][2] == 2 and lamps(s)['LampB'][2] == 5, lamps(s))
+s, _, _, _ = run('typedsum', TWO + typed('obj.pos.x', '2+3'))
+check('typed 2+3 into position X puts both at 5', all(lamps(s)[n][0][0] == 5 for n in LAMPS), lamps(s))
 
 # A drag held: the field still reads "mixed" while scrubbing (screenshot).
 _, _, lines, shot = run('hold', TWO + ['--scroll-to', '@obj.pos.x', '--drag-hold', '@obj.pos.x,0,0,50,0'] + W(5), save=False)

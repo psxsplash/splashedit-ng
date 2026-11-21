@@ -1838,7 +1838,8 @@ void CanvasView::multiInspector(ImDrawList* dl, ImRect r, float y, editor::Docum
 
     // A whole number over every element. Typed, it sets that value on all; a
     // scrub on a mixed field moves each by the drag from its own value when
-    // the drag began (ui::scrubOffset), so each keeps its offset.
+    // the drag began (ui::scrubOffset), so each keeps its offset, and a typed
+    // +n, *n, /n works on each from its own (ui::eachValue).
     struct MixedScrub {
         std::string key;
         std::vector<int> sels;
@@ -1855,13 +1856,13 @@ void CanvasView::multiInspector(ImDrawList* dl, ImRect r, float y, editor::Docum
         const std::string key = std::string("uinum") + id;
         FieldEdit fe = numberField(id, fr, shown.c_str(), unit, axis, axisLabel, &v, true, !shared);
         const bool scrubbing = scrub.key == key && scrub.sels == sels;
-        if (fe.changed && fe.scrubbed && (!shared || scrubbing)) {
+        if (fe.changed && fe.perValue() && (!shared || scrubbing)) {
             if (!scrubbing) {
                 scrub = {key, sels, {}};
                 for (int i : sels) scrub.from.push_back(get(cv.elements[size_t(i)]));
             }
             uic::editElements(doc, c, sels, [&](UIElement& el, size_t k) {
-                set(el, int(ui::scrubOffset(float(scrub.from[k]), fe.scrubFrom, v, float(lo), float(hi), true)));
+                set(el, int(ui::eachValue(fe, float(scrub.from[k]), v, float(lo), float(hi), true)));
             }, key);
         } else if (fe.changed) {
             const int nv = std::clamp(int(std::lround(v)), lo, hi);

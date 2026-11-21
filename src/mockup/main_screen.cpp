@@ -11740,7 +11740,8 @@ static void multiInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
     };
     auto editAll = [&](const std::function<void(splash::Object&)>& fn, const std::string& key = {}) { doc.editMany(paths, fn, key); };
     // A scrub on a mixed field moves each object by the drag from its own
-    // value when the drag began (ui::scrubOffset), kept here until release.
+    // value when the drag began (ui::scrubOffset), kept here until release;
+    // a typed +n, *n, /n works on each from its own the same way (ui::eachValue).
     // Once begun it goes on so until release, even when the values meet.
     struct MixedScrub {
         std::string key;
@@ -11890,10 +11891,10 @@ static void multiInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
             const int i = fe.index;
             const float nv = v[i];
             const std::string key = "mpos." + std::to_string(i);
-            if (fe.scrubbed && (mx[i] || scrubbingMixed(key))) {
+            if (fe.perValue() && (mx[i] || scrubbingMixed(key))) {
                 auto from = scrubStart(key, posOf);
                 doc.editEach(paths, [&](const editor::ObjectPath& p, splash::Object& ob) {
-                    component(ob.transform.position, i) = ui::scrubOffset(from(p)[i], fe.scrubFrom, nv, -kNoLimit, kNoLimit, false);
+                    component(ob.transform.position, i) = ui::eachValue(fe, from(p)[i], nv, -kNoLimit, kNoLimit, false);
                 }, key);
             } else {
                 editAll([i, nv](splash::Object& ob) { component(ob.transform.position, i) = nv; }, key);
@@ -11911,12 +11912,12 @@ static void multiInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
             const int i = fe.index;
             const float nv = v[i];
             const std::string key = "mrot." + std::to_string(i);
-            if (fe.scrubbed && (mx[i] || scrubbingMixed(key))) {
+            if (fe.perValue() && (mx[i] || scrubbingMixed(key))) {
                 // Each from its own angles at the start, so the other two axes do not drift.
                 auto from = scrubStart(key, rotOf);
                 doc.editEach(paths, [&](const editor::ObjectPath& p, splash::Object& ob) {
                     splash::Vec3 e = from(p);
-                    component(e, i) = ui::scrubOffset(e[i], fe.scrubFrom, nv, -kNoLimit, kNoLimit, false);
+                    component(e, i) = ui::eachValue(fe, e[i], nv, -kNoLimit, kNoLimit, false);
                     ob.transform.rotation = quatFromEuler(e);
                 }, key);
             } else {
@@ -11956,13 +11957,13 @@ static void multiInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
             const int i = fe.index;
             const float nv = v[i];
             const std::string key = "mscl." + std::to_string(i);
-            if (fe.scrubbed && (mx[i] || scrubbingMixed(key))) {
+            if (fe.perValue() && (mx[i] || scrubbingMixed(key))) {
                 // Each axis from its own start by the drag; locked, the other two follow in proportion.
                 auto from = scrubStart(key, sclOf);
                 const bool lock = st.play.tools.scaleLock;
                 doc.editEach(paths, [&](const editor::ObjectPath& p, splash::Object& ob) {
                     const splash::Vec3 f0 = from(p);
-                    const float to = ui::scrubOffset(f0[i], fe.scrubFrom, nv, -kNoLimit, kNoLimit, false);
+                    const float to = ui::eachValue(fe, f0[i], nv, -kNoLimit, kNoLimit, false);
                     if (lock) ob.transform.scale = editor::lockedScale(f0, i, to);
                     else component(ob.transform.scale, i) = to;
                 }, key);
@@ -12015,11 +12016,11 @@ static void multiInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
         nameRect(std::string("obj.") + id, fr);
         FieldEdit fe = numberField(id, fr, mixed ? "mixed" : shown.c_str(), unit, 0, nullptr, &nv, false, mixed);
         const std::string key = std::string("m.") + id;
-        if (fe.changed && fe.scrubbed && (mixed || scrubbingMixed(key))) {
+        if (fe.changed && fe.perValue() && (mixed || scrubbingMixed(key))) {
             // Each from its own start by the drag, clamped on its own.
             auto from = scrubStart(key, [&](const splash::Object& o) { return splash::Vec3{get(o), 0, 0}; });
             doc.editEach(paths, [&](const editor::ObjectPath& p, splash::Object& ob) {
-                set(ob, ui::scrubOffset(from(p).x, fe.scrubFrom, nv, lo, hi, decimals == 0));
+                set(ob, ui::eachValue(fe, from(p).x, nv, lo, hi, decimals == 0));
             }, key);
         } else if (fe.changed) {
             const float v = splash::clampv(nv, lo, hi);

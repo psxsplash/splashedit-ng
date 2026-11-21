@@ -657,12 +657,13 @@ FieldEdit numberField(const char* id, ImRect r, const char* value, const char* u
         TextEdit res = textEdit(id, r, f.regular, type::body, x, right, &typed, 255, nullptr, step);
         decorations();
         if (res == TextEdit::Commit) {
-            char* end = nullptr;
-            float v = std::strtof(typed.c_str(), &end);
-            while (end && *end == ' ') ++end;
-            if (end && end != typed.c_str() && *end == 0 && std::isfinite(v) && (v != *edit || mixed)) {
+            // A number, or arithmetic, on the value there with a leading +, * or / (#376).
+            float v = 0;
+            Relative rel;
+            if (evalNumber(typed, *edit, v, &rel) && (v != *edit || mixed)) {
                 *edit = v;
                 out.changed = true;
+                if (mixed) out.typed = rel;  // each value works it from its own
             }
         }
         out.done = res == TextEdit::Commit || res == TextEdit::Cancel;
