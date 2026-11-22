@@ -10074,6 +10074,39 @@ void testTimelineSelection() {
     CHECK(editor::moveSelection(d, aref, {{{0, 0}}, {}, {}}, 1));
 }
 
+// A double-click on a lane keys the frame under the mouse (#375), not the
+// scrub head: frameUnder reads the lanes' view back to the nearest whole
+// frame, and keyAtOrAdd adds a key there or gives the one already there.
+void testTimelineKeyAtClick() {
+    using splash::TrackType;
+    // Frame 20 at pixel 500, 4 pixels a frame: 600 is frame 45, 601 still 45, 603 46.
+    CHECK(editor::frameUnder(600, 500, 20, 4) == 45);
+    CHECK(editor::frameUnder(601, 500, 20, 4) == 45 && editor::frameUnder(603, 500, 20, 4) == 46);
+    CHECK(editor::frameUnder(400, 500, 20, 4) == 0);  // left of frame 0: frame 0
+    CHECK(editor::frameUnder(1e9f, 500, 20, 4) == editor::kMaxTimelineFrame);
+    CHECK(editor::frameUnder(530, 500, 0, 0.2f) == 150);  // zoomed out
+
+    splash::Scene sc;
+    splash::Cutscene cs;
+    cs.name = "intro";
+    cs.tracks.push_back(trackOf(TrackType::ObjectPosition, {{0, 0}, {60, 6}}));
+    sc.cutscenes.push_back(cs);
+    editor::Document d;
+    d.reset(sc);
+    const editor::SeqRef ref{editor::SeqKind::Cutscene, 0};
+    const auto& ks = editor::seqTracks(d, ref)->at(0).keyframes;
+
+    // Clicked at frame 45 (the scrub head elsewhere): a key at 45 with the curve's value there, one step.
+    const auto k = editor::keyAtOrAdd(d, ref, 0, editor::frameUnder(600, 500, 20, 4));
+    CHECK(k && k->track == 0 && k->key == 1 && ks.size() == 3 && ks[1].frame == 45);
+    CHECK(std::fabs(ks[1].value[0] - 4.5f) < 1e-4f && d.historySize() == 1);
+    // On a frame that has one: that key, no step.
+    const auto again = editor::keyAtOrAdd(d, ref, 0, 60);
+    CHECK(again && again->key == 2 && ks.size() == 3 && d.historySize() == 1);
+    CHECK(!editor::keyAtOrAdd(d, ref, 1, 10) && !editor::keyAtOrAdd(d, ref, -1, 10));
+    CHECK(editor::keyAtOrAdd(d, ref, 0, 99999)->key == 3 && ks.back().frame == editor::kMaxTimelineFrame);
+}
+
 // Copy and paste at the scrub head: keys land in the track with their type
 // and target, events come along, one step; limits refuse the whole paste.
 void testTimelineClipboard() {
@@ -22596,6 +22629,7 @@ int main(int argc, char** argv) {
     testTimelineFixedSample();
     testTimelinePreviewMore();
     testTimelineSelection();
+    testTimelineKeyAtClick();
     testTimelineClipboard();
     testTimelineEvents();
     testSeqRenameLua();

@@ -204,6 +204,9 @@ std::vector<std::string> targetsFor(const Document& doc, splash::TrackType type)
 // rounding), so adding a key leaves the motion as it was. Returns the key, or nullopt when the frame already has one or the
 // track is full.
 std::optional<KeyRef> addKey(Document& doc, SeqRef ref, int track, int frame, std::optional<KeyValue> value = std::nullopt);
+// The key on `track` at `frame`: the one there, or one added there as
+// addKey() does. nullopt for a bad track or a full one.
+std::optional<KeyRef> keyAtOrAdd(Document& doc, SeqRef ref, int track, int frame);
 // Moves every key in `keys` by `delta` frames. Refused when one would leave
 // 0..kMaxTimelineFrame or land on a key that is not moving. Returns the keys'
 // new addresses, in the order given. Consecutive moves with the same
@@ -248,6 +251,11 @@ bool setKeyInterp(Document& doc, SeqRef ref, KeyRef k, splash::Interp interp);
 // Clamped to 1..kMaxTimelineFrame. Keys past the end stay (the runtime stops
 // at the length; they show greyed).
 bool setLength(Document& doc, SeqRef ref, int frames, const std::string& mergeKey = {});
+
+// The Timeline panel's lanes show frame `view0` at pixel `x0`, `ppf` pixels
+// a frame. The whole frame under pixel `x`: the nearest, 0..kMaxTimelineFrame
+// (where a double-click keys).
+int frameUnder(float x, float x0, float view0, float ppf);
 
 // Sampling, in the track's own units. `frame` may be fractional (a sub-frame).
 // As the runtime: before the first key the track blends from `initial` (the

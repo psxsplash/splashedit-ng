@@ -994,6 +994,16 @@ std::optional<KeyRef> addKey(Document& doc, SeqRef ref, int track, int frame, st
     return added;
 }
 
+std::optional<KeyRef> keyAtOrAdd(Document& doc, SeqRef ref, int track, int frame) {
+    frame = std::clamp(frame, 0, kMaxTimelineFrame);
+    const std::vector<CutsceneTrack>* tracks = seqTracks(doc, ref);
+    if (!tracks || track < 0 || track >= int(tracks->size())) return std::nullopt;
+    const std::vector<Keyframe>& ks = (*tracks)[size_t(track)].keyframes;
+    for (int k = 0; k < int(ks.size()); ++k)
+        if (ks[size_t(k)].frame == frame) return KeyRef{track, k};
+    return addKey(doc, ref, track, frame);
+}
+
 std::optional<std::vector<KeyRef>> moveKeys(Document& doc, SeqRef ref, const std::vector<KeyRef>& keys, int delta,
                                             const std::string& mergeKey) {
     std::optional<std::vector<KeyRef>> out;
@@ -1284,6 +1294,12 @@ bool setLength(Document& doc, SeqRef ref, int frames, const std::string& mergeKe
             return true;
         },
         mergeKey);
+}
+
+int frameUnder(float x, float x0, float view0, float ppf) {
+    const float f = view0 + (x - x0) / std::max(ppf, 1e-6f);
+    if (!std::isfinite(f)) return 0;
+    return int(std::lround(std::clamp(f, 0.0f, float(kMaxTimelineFrame))));
 }
 
 // Sampling: psxsplash's interpolation.cpp in floating point.

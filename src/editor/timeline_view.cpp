@@ -852,10 +852,10 @@ void TimelinePanel::lanes(ImDrawList* dl, ImRect labels, ImRect body, editor::Do
     std::snprintf(fullSkin, sizeof fullSkin, "This sequence has the runtime's %d skin clip events", editor::kMaxSkinEvents);
     if (audio)
         eventLabel(audioRow, "Audio", "addaudio", kAudioColor, int(audio->size()), editor::kMaxAudioEvents,
-                   "Add an audio event at the scrub head (or double-click the lane)", fullAudio, "##addaudio", true);
+                   "Add an audio event at the scrub head (or double-click the lane where it goes)", fullAudio, "##addaudio", true);
     if (anySkinned)
         eventLabel(skinRow, "Skin clips", "addskin", kSkinColor, int(skin.size()), editor::kMaxSkinEvents,
-                   "Play a skinned mesh's clip from the scrub head (or double-click the lane)", fullSkin, "##addskin", true);
+                   "Play a skinned mesh's clip from the scrub head (or double-click the lane where it starts)", fullSkin, "##addskin", true);
     ImGui::PopClipRect();
     trackMenu(doc);
 
@@ -1089,17 +1089,11 @@ void TimelinePanel::lanes(ImDrawList* dl, ImRect labels, ImRect body, editor::Do
         m_boxing = false;
     }
     if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) && laneAt >= 0 && laneAt < n && !hit) {
-        // A key at the scrub head, or the one already there selected.
-        const int fr = int(std::lround(m_frame));
-        if (auto k = editor::addKey(doc, m_ref, laneAt, fr)) {
+        // A key at the frame clicked, or the one already there selected.
+        if (auto k = editor::keyAtOrAdd(doc, m_ref, laneAt, editor::frameUnder(io.MousePos.x, m_bodyX0, m_view0, m_ppf)))
             m_sel = {{*k}, {}, {}};
-        } else {
-            const auto& ks = tracks[size_t(laneAt)].keyframes;
-            for (int k2 = 0; k2 < int(ks.size()); ++k2)
-                if (ks[size_t(k2)].frame == fr) m_sel = {{KeyRef{laneAt, k2}}, {}, {}};
-        }
     }
-    // Double- or right-click an event lane: its add menu, for the scrub head.
+    // Double- or right-click an event lane: its add menu, for the frame clicked.
     const bool eventLaneAt = laneAt >= 0 && (laneAt == audioRow || laneAt == skinRow);
     if (eventLaneAt && !hit && ImGui::IsItemHovered() &&
         (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) || ImGui::IsMouseClicked(ImGuiMouseButton_Right))) {
@@ -1110,7 +1104,7 @@ void TimelinePanel::lanes(ImDrawList* dl, ImRect labels, ImRect body, editor::Do
         } else {
             openAdd = isAudio ? "##addaudio" : "##addskin";
             addAt = io.MousePos;
-            m_addFrame = int(std::lround(m_frame));
+            m_addFrame = editor::frameUnder(io.MousePos.x, m_bodyX0, m_view0, m_ppf);
         }
     }
     if (hit && ImGui::IsItemHovered() && !ImGui::IsItemActive()) {
@@ -1238,7 +1232,7 @@ void TimelinePanel::keyRow(ImDrawList* dl, ImRect r, editor::Document& doc) {
     float x = r.Min.x + space::md;
     if (m_sel.empty()) {
         text(dl, ImVec2(x, cy - 9), f.regular, type::label, color::textFaint,
-             "Double-click a lane to key it at the scrub head. Drag across lanes to box-select, drag a key to move the "
+             "Double-click a lane to key it at that frame. Drag across lanes to box-select, drag a key to move the "
              "selection; Del deletes, Ctrl+C / Ctrl+V copy and paste at the scrub head.");
         return;
     }

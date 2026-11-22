@@ -1,5 +1,5 @@
-# Timeline panel: scrub the ruler, double-click a lane to key it at the scrub
-# head, drag a key, Delete a selected key (and not the selected object),
+# Timeline panel: scrub the ruler, double-click a lane to key it at the frame
+# clicked, drag a key, Delete a selected key (and not the selected object),
 # undo, and open the panel from the scene inspector's Edit in timeline. Each
 # run saves with Ctrl+S and the check reads the saved scene. Drives the editor
 # headless on copies of the courtyard example with a cutscene added.
@@ -74,13 +74,14 @@ def names(objs):
     return out
 
 
-# Scrub to 38, double-click the camera rotation lane: a key at 38 with the
-# value the track had there (linear 0 -> -60 over 150 frames: -15.2).
+# Scrub to 38, double-click the camera rotation lane at 100: a key at 100
+# (where it was clicked, not the scrub head) with the value the track had
+# there (linear 0 -> -60 over 150 frames: -40).
 scene, out = run(['--timeline', 'intro', '--click', f'{fx(38)},{RULER_Y}', '--wait', '3', '--dblclick', f'{fx(100)},{lane(1)}',
                   '--wait', '3'])
-check('double-click a lane keys it at the scrub head', frames(scene, 1) == [0, 38, 150], str(frames(scene, 1)) + ' | ' + out[-200:])
-k = next((k for k in scene['cutscenes'][0]['tracks'][1]['keyframes'] if k['frame'] == 38), None)
-check('the new key takes the sampled value', k is not None and abs(k['value'][1] + 15.2) < 0.01 and abs(k['value'][0] - 10) < 0.01,
+check('double-click a lane keys it at the frame clicked', frames(scene, 1) == [0, 100, 150], str(frames(scene, 1)) + ' | ' + out[-200:])
+k = next((k for k in scene['cutscenes'][0]['tracks'][1]['keyframes'] if k['frame'] == 100), None)
+check('the new key takes the sampled value', k is not None and abs(k['value'][1] + 40) < 0.01 and abs(k['value'][0] - 10) < 0.01,
       k)
 check('the other lanes are untouched', frames(scene, 0) == [0, 60, 150] and frames(scene, 2) == [0, 45, 90], scene['cutscenes'][0])
 
@@ -109,7 +110,7 @@ check('Ctrl+Z takes the added key back', frames(scene, 1) == [0, 150], str(frame
 # The scene inspector's Edit in timeline opens the panel on the cutscene.
 scene, out = run(['--click', EDIT_IN_TIMELINE, '--wait', '5', '--click', f'{fx(38)},{RULER_Y}', '--wait', '3', '--dblclick',
                   f'{fx(100)},{lane(1)}', '--wait', '3'])
-check('Edit in timeline opens the cutscene in the panel', frames(scene, 1) == [0, 38, 150], str(frames(scene, 1)) + ' | ' + out[-200:])
+check('Edit in timeline opens the cutscene in the panel', frames(scene, 1) == [0, 100, 150], str(frames(scene, 1)) + ' | ' + out[-200:])
 
 print(f'{fails} failures')
 sys.exit(1 if fails else 0)
