@@ -10133,6 +10133,47 @@ void testTimelineZoomPan() {
     CHECK(near(editor::panView({0, 60}, 60, 12).ppf, 60) && near(editor::panView({0, 60}, 60, 12).view0, 1));
 }
 
+// The Player view follows the cutscene open in the timeline (#375):
+// previewEye takes the camera tracks' eye, look and H at the scrub head, the
+// player's start eye and the project's H for what no track drives, and
+// nothing when the sequence has no camera track.
+void testTimelinePreviewEye() {
+    auto near = [](splash::Vec3 a, splash::Vec3 b) { return std::fabs(a.x - b.x) + std::fabs(a.y - b.y) + std::fabs(a.z - b.z) < 1e-4f; };
+    const splash::Vec3 start{1, 2, 3}, look{0, 0, 1};
+    editor::Preview p;
+    p.objects["Cube"] = {};
+    CHECK(!editor::previewEye(p, start, look, 120));  // no camera track
+    p.cameraPosition = splash::Vec3{5, 6, 7};
+    auto e = editor::previewEye(p, start, look, 150);
+    CHECK(e && near(e->eye, {5, 6, 7}) && near(e->forward, look) && e->h == 150);
+    // Yaw 90: looking down +X; the eye stays the track's.
+    p.cameraRotation = splash::Vec3{0, 90, 0};
+    e = editor::previewEye(p, start, look, 120);
+    CHECK(e && near(e->forward, {1, 0, 0}) && near(e->eye, {5, 6, 7}));
+    // Rotation alone: the player's start eye. H rounds and clamps to the engine's range.
+    p.cameraPosition.reset();
+    p.cameraH = 200.4f;
+    e = editor::previewEye(p, start, look, 120);
+    CHECK(e && near(e->eye, start) && e->h == 200);
+    p.cameraH = 5000;
+    e = editor::previewEye(p, start, look, 120);
+    CHECK(e && e->h == 1024);
+    p.cameraH = 0.2f;
+    e = editor::previewEye(p, start, look, 120);
+    CHECK(e && e->h == 1);
+
+    // From a cutscene: a camera position track sampled at the scrub head.
+    splash::Scene sc;
+    splash::Cutscene cs;
+    cs.name = "intro";
+    cs.tracks.push_back(trackOf(splash::TrackType::CameraPosition, {{0, 0}, {60, 6}}));
+    sc.cutscenes.push_back(cs);
+    editor::Document d;
+    d.reset(sc);
+    const auto pe = editor::previewEye(editor::samplePreview(d, {editor::SeqKind::Cutscene, 0}, 30), start, look, 120);
+    CHECK(pe && std::fabs(pe->eye.x - 3) < 1e-2f && near(pe->forward, look) && pe->h == 120);
+}
+
 // Copy and paste at the scrub head: keys land in the track with their type
 // and target, events come along, one step; limits refuse the whole paste.
 void testTimelineClipboard() {
@@ -22657,6 +22698,7 @@ int main(int argc, char** argv) {
     testTimelineSelection();
     testTimelineKeyAtClick();
     testTimelineZoomPan();
+    testTimelinePreviewEye();
     testTimelineClipboard();
     testTimelineEvents();
     testSeqRenameLua();

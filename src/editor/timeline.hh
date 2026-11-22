@@ -366,5 +366,16 @@ void applyPreview(splash::Scene& scene, const Preview& preview);
 splash::SkinPlay skinPlay(const ObjectPose::Skin& pose, const std::vector<splash::BakedClip>& clips);
 // Quaternion.Euler: about Z, then X, then Y (degrees).
 splash::Quat quatEuler(splash::Vec3 deg);
+// The Scene view's Player camera while the timeline is open on a cutscene
+// with camera tracks (#375): the eye, forward (unit, Unity space) and H the
+// tracks give at the scrub head, each one a track does not drive left at the
+// one given (the player's start eye, the project's H). nullopt when the
+// preview has no camera track. H is rounded to the engine's 1..1024.
+struct PreviewEye {
+    splash::Vec3 eye;
+    splash::Vec3 forward;
+    int h = 120;
+};
+std::optional<PreviewEye> previewEye(const Preview& p, splash::Vec3 eye, splash::Vec3 forward, int h);
 
 }  // namespace editor

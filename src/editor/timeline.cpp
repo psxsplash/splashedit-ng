@@ -1326,6 +1326,14 @@ TimelineView panView(TimelineView v, float px, float pad) {
     return clampView(v, pad);
 }
 
+std::optional<PreviewEye> previewEye(const Preview& p, splash::Vec3 eye, splash::Vec3 forward, int h) {
+    if (!p.cameraPosition && !p.cameraRotation && !p.cameraH) return std::nullopt;
+    PreviewEye e{p.cameraPosition.value_or(eye), forward, h};
+    if (p.cameraRotation) e.forward = splash::normalized(splash::rotate(quatEuler(*p.cameraRotation), {0, 0, 1}));
+    if (p.cameraH) e.h = std::isfinite(*p.cameraH) ? int(std::lround(std::clamp(*p.cameraH, 1.0f, 1024.0f))) : h;
+    return e;
+}
+
 // Sampling: psxsplash's interpolation.cpp in floating point.
 
 float applyCurve(float t, Interp mode) {
