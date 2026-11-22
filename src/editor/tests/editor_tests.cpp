@@ -85,6 +85,7 @@
 #include "ui/list_scroll.hh"
 #include "ui/popup_place.hh"
 #include "ui/scrub.hh"
+#include "ui/number_expr.hh"
 #include "ui/colour_hex.hh"
 #include "ui/icons.h"
 #include "budget.hh"
@@ -17261,6 +17262,115 @@ void testMixedScrub() {
     CHECK(ui::scrubOffset(10, 3, 5.6f, 0, 65535, true) == 13);
 }
 
+// What a number field takes when typed into (#376): a number, arithmetic on
+// numbers with the usual precedence, or with a leading +, * or / arithmetic on
+// the value there. A leading - is a negative number. Anything else, division
+// by zero included, is no value and leaves the field as it was.
+void testNumberExpr() {
+    auto eval = [](const char* text, float current) {
+        float v = -12345;
+        return ui::evalNumber(text, current, v) ? v : -12345.0f;
+    };
+    const float none = -12345;
+    // Plain numbers, as strtof took them.
+    CHECK(eval("90", 0) == 90);
+    CHECK(eval(" 12 ", 0) == 12);
+    CHECK(eval("0.25", 0) == 0.25f);
+    CHECK(eval(".5", 0) == 0.5f);
+    CHECK(eval("5.", 0) == 5);
+    CHECK(eval("1e3", 0) == 1000);
+    CHECK(eval("2.5E-1", 0) == 0.25f);
+    CHECK(eval("-5", 90) == -5);  // a negative number, not 90 - 5
+    CHECK(eval("-0", 90) == 0 && !std::signbit(eval("-0", 90)));
+    CHECK(eval(" -0.5 ", 90) == -0.5f);
+    // Arithmetic on numbers.
+    CHECK(eval("90+15", 0) == 105);
+    CHECK(eval("90 + 15", 7) == 105);
+    CHECK(eval("90-15", 0) == 75);
+    CHECK(eval("90*2", 0) == 180);
+    CHECK(eval("90/4", 0) == 22.5f);
+    CHECK(eval("2+3*4", 0) == 14);  // * before +
+    CHECK(eval("(2+3)*4", 0) == 20);
+    CHECK(eval("10-4-3", 0) == 3);  // left to right
+    CHECK(eval("64/4/2", 0) == 8);
+    CHECK(eval("-(2+3)", 0) == -5);
+    CHECK(eval("2*-3", 0) == -6);
+    CHECK(eval("3--2", 0) == 5);
+    CHECK(eval("1e2+5", 0) == 105);
+    CHECK(eval("0.1+0.2", 0) == 0.3f);
+    // On the value there.
+    CHECK(eval("+15", 90) == 105);
+    CHECK(eval("*2", 90) == 180);
+    CHECK(eval("/2", 90) == 45);
+    CHECK(eval("/3", 90) == 30);
+    CHECK(eval(" + 15", 90) == 105);
+    CHECK(eval("+-5", 90) == 85);  // subtracting from it
+    CHECK(eval("*2+1", 90) == 181);  // as if the value were typed first
+    CHECK(eval("+2*3", 90) == 96);
+    CHECK(eval("/(1+1)", 90) == 45);
+    CHECK(eval("*0.5", -8) == -4);
+    CHECK(eval("+0.1", 0.2f) == 0.3f);
+    // No value: the field keeps its own.
+    CHECK(eval("", 90) == none);
+    CHECK(eval("   ", 90) == none);
+    CHECK(eval("All", 0) == none);  // a word, as the Triangles field shows (it takes 0 for All)
+    CHECK(eval("12px", 0) == none);
+    CHECK(eval("2+", 0) == none);
+    CHECK(eval("-", 0) == none);
+    CHECK(eval("+", 90) == none);
+    CHECK(eval("*", 90) == none);
+    CHECK(eval("5 5", 0) == none);
+    CHECK(eval("(2+3", 0) == none);
+    CHECK(eval("2+3)", 0) == none);
+    CHECK(eval("1/0", 0) == none);
+    CHECK(eval("/0", 90) == none);
+    CHECK(eval("/(2-2)", 90) == none);
+    CHECK(eval("inf", 0) == none);
+    CHECK(eval("nan", 0) == none);
+    CHECK(eval("1e39", 0) == none);  // past float
+    CHECK(eval("*1e30", 1e30f) == none);
+    CHECK(eval("2**3", 0) == none);
+    CHECK(eval(std::string(200, '-').append("1").c_str(), 0) == none);  // no unbounded recursion
+    CHECK(eval((std::string(100, '(') + "1" + std::string(100, ')')).c_str(), 0) == none);
+    CHECK(eval("((((1))))", 0) == 1);
+    {
+        float v = 7;
+        CHECK(!ui::evalNumber("1/0", 3, v) && v == 7);  // untouched
+    }
+}
+
+// A typed +n, *n, /n into a mixed field works on each value from its own
+// (#376): evalNumber gives it as a scale and an offset, relativeTo applies
+// it, clamped and rounded as a scrub is. A plain entry is no relative one.
+void testMixedTyped() {
+    auto rel = [](const char* text) {
+        float v = 0;
+        ui::Relative r;
+        r.scale = -99;
+        return ui::evalNumber(text, 1, v, &r) ? r : ui::Relative{false, -99, -99};
+    };
+    const ui::Relative add = rel("+15"), mul = rel("*2"), div = rel("/4"), both = rel("*2+1"), plain = rel("90+15");
+    CHECK(add.on && add.scale == 1 && add.offset == 15);
+    CHECK(mul.on && mul.scale == 2 && mul.offset == 0);
+    CHECK(div.on && div.scale == 0.25 && div.offset == 0);
+    CHECK(both.on && both.scale == 2 && both.offset == 1);
+    CHECK(!plain.on && plain.scale == 1 && plain.offset == 0);
+    CHECK(!rel("-5").on);
+    CHECK(rel("1/0").scale == -99);  // no value: untouched
+    const float lo = -1e9f, hi = 1e9f;
+    CHECK(ui::relativeTo(1, add, lo, hi, false) == 16);  // LampA at 1, LampB at 4: +15 puts them at 16 and 19
+    CHECK(ui::relativeTo(4, add, lo, hi, false) == 19);
+    CHECK(ui::relativeTo(1, mul, lo, hi, false) == 2);
+    CHECK(ui::relativeTo(2.5f, mul, lo, hi, false) == 5);
+    CHECK(ui::relativeTo(90, rel("/3"), lo, hi, false) == 30);
+    CHECK(ui::relativeTo(0.2f, rel("+0.1"), lo, hi, false) == 0.3f);
+    CHECK(ui::relativeTo(95, add, 0, 100, false) == 100);  // clamped on its own
+    CHECK(ui::relativeTo(20, add, 0, 100, false) == 35);
+    CHECK(ui::relativeTo(5, div, 0, 65535, true) == 1);  // whole numbers: rounded (1.25)
+    CHECK(ui::relativeTo(7, rel("/2"), 0, 65535, true) == 4);  // 3.5 rounds up
+    CHECK(ui::relativeTo(7, plain, lo, hi, false) == 7);  // not relative: its own
+}
+
 // A colour field's Copy / Paste text (#176): Copy writes what the field
 // shows, Paste reads that back and the usual hand-typed forms, nothing else.
 void testColourHex() {
@@ -22656,6 +22766,8 @@ int main(int argc, char** argv) {
     testNumberScrub();
     testNumberKeyStep();
     testMixedScrub();
+    testNumberExpr();
+    testMixedTyped();
     testDialogGate();
     testColourHex();
     testWindowChrome();

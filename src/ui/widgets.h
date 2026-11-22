@@ -11,6 +11,8 @@
 #include <string>
 #include <vector>
 
+#include "ui/number_expr.hh"
+#include "ui/scrub.hh"
 #include "ui/theme.h"
 
 // The editor's own widget layer. Everything is drawn with ImDrawList from
@@ -108,17 +110,33 @@ struct FieldEdit {
     int index = 0;         // component that changed, for vec3Field
     bool scrubbed = false; // the change came from a drag, not typing
     float scrubFrom = 0;   // with `scrubbed`: the value when the drag began (the drag has moved it by *edit - scrubFrom)
+    Relative typed;        // on for a typed +n, *n, /n into a mixed field (#376): apply it to each value it stands for
+    // The change is to be made to each value a mixed field stands for from
+    // its own (a drag, a typed relative entry), not one value set on all.
+    bool perValue() const { return scrubbed || typed.on; }
 };
+
+// What `own`, one of the values a mixed field stands for, becomes under
+// `fe` (with perValue()): a drag moves it by the drag's change
+// (ui::scrubOffset; `to` is the field's *edit), a typed relative entry works
+// on it (ui::relativeTo). Clamped to [lo, hi]; a whole-number field rounds it.
+inline float eachValue(const FieldEdit& fe, float own, float to, float lo, float hi, bool integer) {
+    return fe.typed.on ? relativeTo(own, fe.typed, lo, hi, integer) : scrubOffset(own, fe.scrubFrom, to, lo, hi, integer);
+}
 
 // A number in a well. With `edit`, it is editable: drag horizontally to
 // scrub (faster for larger values, Shift for fine steps), double-click to
 // type (Enter or clicking away commits, Esc cancels; while typing, Up and Down
-// step the typed value by ui::keyStep). `value` is the text shown.
+// step the typed value by ui::keyStep). `value` is the text shown. What is
+// typed may be arithmetic, on the value there with a leading +, * or / ("+15",
+// "*2", "90+15": ui::evalNumber); anything else leaves the value as it was.
 // An `integer` field (pixels, frames) scrubs one per pixel (ui/scrub.hh).
 // A `mixed` field stands for several objects whose values differ (#263):
 // `value` is drawn faint, typing starts empty, and any typed number counts
 // as a change even when it equals *edit. A scrub's change says so
-// (FieldEdit::scrubbed), so a mixed field can move each value by the drag.
+// (FieldEdit::scrubbed), so a mixed field can move each value by the drag;
+// so does a typed +n, *n, /n (FieldEdit::typed), to work on each value from
+// its own (ui::eachValue), while "90+15" sets them all to 105.
 FieldEdit numberField(const char* id, ImRect r, const char* value, const char* unit = nullptr, ImU32 axis = 0,
                       const char* axisLabel = nullptr, float* edit = nullptr, bool integer = false, bool mixed = false);
 // Three numberFields; `edit` points at three floats, `mixed` (when given) at three flags.
