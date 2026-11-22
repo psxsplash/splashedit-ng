@@ -1,6 +1,6 @@
 # Localisation in the editor (splashedit-ng#209), driven through the GUI on a
 # copy of tests/ui/ui.scene with a strings.json (en, fr):
-#  - View > Strings: Add key, rename it in the Key column, type its texts,
+#  - View > Panels > Strings: Add key, rename it in the Key column, type its texts,
 #    delete another key and bring it back with Ctrl+Z (one undo step per edit,
 #    each saved to strings.json at once); Add language and give it an id;
 #    the search hides the rows that do not match; Import CSV opens its dialog
@@ -75,7 +75,8 @@ def elements(d):
 
 
 W = ['--wait', '3']
-OPEN = ['--click', '@menu.view', '--wait', '3', '--click', '@menu.view/Strings', '--wait', '5']
+OPEN = ['--click', '@menu.view', '--wait', '3', '--click', '@menu.view/Panels', '--wait', '3', '--click', '@menu.view/Panels/Strings',
+        '--wait', '5']
 
 
 def typed(handle, text):

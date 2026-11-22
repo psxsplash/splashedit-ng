@@ -336,6 +336,9 @@ jobs:
       - name: Menu check marks and dots
         if: runner.os == 'Linux'
         run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/menumarkcheck.py build/splashedit
+      - name: Long menus scroll, View submenus
+        if: runner.os == 'Linux'
+        run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/menuscrollcheck.py build/splashedit
       - name: Boot logo off
         if: runner.os == 'Linux'
         run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/bootlogocheck.py build/splashedit build/emulator_tests

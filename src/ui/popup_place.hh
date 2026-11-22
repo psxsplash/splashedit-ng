@@ -36,4 +36,41 @@ inline PopupPos popupBelow(PopupBox field, float w, float h, PopupBox screen, fl
     return p;
 }
 
+// The height a popup list `full` px tall gets when its top is at `top` (#378):
+// all of it when it fits above the screen's bottom less `margin`, else what
+// does fit, and its rows scroll.
+inline float popupHeight(float full, float top, float screenBottom, float margin) {
+    return std::max(0.0f, std::min(full, screenBottom - margin - top));
+}
+
+// The top left corner for a submenu `w` x `h` opened from the row `row` of its
+// menu (#378): to the row's right, `gap` px off it, its top on the row's top;
+// to the left of the menu when there is no room on the right; then clamped
+// inside `screen` with `margin` px kept clear, a submenu near the bottom
+// moving up. `h` is taken as already no taller than the screen.
+inline PopupPos popupBeside(PopupBox row, float w, float h, PopupBox screen, float gap, float margin) {
+    const float left = screen.x0 + margin, top = screen.y0 + margin;
+    const float right = screen.x1 - margin, bottom = screen.y1 - margin;
+    PopupPos p;
+    p.x = row.x1 + gap;
+    if (p.x + w > right) p.x = row.x0 - gap - w;  // no room right: to the left
+    p.y = row.y0;
+    p.x = std::max(std::min(p.x, right - w), left);
+    p.y = std::max(std::min(p.y, bottom - h), top);
+    return p;
+}
+
+// How many rows a picker (Add object, Add component) shows of `count` (#378):
+// as many as fit between `top` and the screen's bottom (`chrome` px of it
+// taken by the search field and padding, `margin` px kept clear), at least
+// `atLeast` when the whole screen has room for them (the picker then moves
+// up), never more than the screen holds, and at least one.
+inline int pickerRows(int count, float top, float screenTop, float screenBottom, float chrome, float rowH, float margin, int atLeast) {
+    if (rowH <= 0) return 1;
+    const int whole = std::max(1, static_cast<int>((screenBottom - screenTop - 2 * margin - chrome) / rowH));
+    const int below = static_cast<int>((screenBottom - margin - top - chrome) / rowH);
+    const int fit = std::min(whole, std::max(below, atLeast));
+    return std::clamp(count, 1, std::max(1, fit));
+}
+
 }  // namespace ui

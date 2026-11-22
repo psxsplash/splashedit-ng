@@ -195,6 +195,15 @@ struct PickerItem {
 };
 int picker(const char* id, ImVec2 pos, float width, const char* placeholder, std::string* query, const std::vector<PickerItem>& items);
 
+// A popup list's scrollbar (#378): when `content` px of rows overflow the
+// `view` they scroll in, a thin thumb at its right edge, `scroll` px down,
+// that can be dragged. scrollThumb registers the thumb, before the rows so
+// it wins the press where they meet (named `name` for scripted checks when
+// given); while it is held, ui::thumbDragScroll of the mouse's move is how
+// far to scroll. drawScrollThumb draws it, after the rows.
+Hit scrollThumb(const char* id, ImRect view, float scroll, float content, const std::string& name = {});
+void drawScrollThumb(ImDrawList* dl, ImRect view, float scroll, float content, bool hot);
+
 // What an asset field asked for this frame: a left click (the caller opens
 // its picker) or a row of its right-click menu.
 enum class AssetAction { None, Clicked, Browse, ShowInProject, ShowInExplorer, Clear };

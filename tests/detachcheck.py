@@ -1,7 +1,7 @@
 # The Game view, Play's Console, the Scene, the Inspector, the Project panel
 # and the Timeline out in OS windows of their own (#345), driven through the GUI. Play runs the fake pcsx-redux gamedockcheck.py uses
 # (emulator_tests with SPLASHEDIT_FAKE_REDUX=320x240: colour bars).
-#  - View > Game View in Own Window while a game runs opens a second window
+#  - View > Panels > Game View in Own Window while a game runs opens a second window
 #    with the game's picture in it (not blank: the bars), and the main
 #    window's tab takes the room the split had.
 #  - The keyboard is the controller in that window while it has the focus,
@@ -14,7 +14,7 @@
 #  - Saved out, the Game view's window opens as the editor starts and stays
 #    open across Plays: a Play neither opens it again nor takes the keyboard
 #    from the main window.
-#  - View > Scene / Inspector / Project / Timeline in Own Window: the panel
+#  - View > Panels > Scene / Inspector / Project / Timeline in Own Window: the panel
 #    draws in its own window (not blank), the main window gives its room to
 #    the others (no hole), its Attach puts it back where it was.
 #  - --in <panel> with --ctrl-held: a Ctrl-click in the Scene's window adds to
@@ -33,11 +33,13 @@ work = tempfile.mkdtemp()
 engine = os.path.join(work, 'psxsplash.ps-exe')
 with open(engine, 'wb') as fh:
     fh.write(b'PS-X EXE fake')
-DETACH_GAME = ['--click', '@menu.view', '--wait', '3', '--click', '@menu.view/Game View in Own Window', '--wait', '30']
+DETACH_GAME = ['--click', '@menu.view', '--wait', '3', '--click', '@menu.view/Panels', '--wait', '3',
+               '--click', '@menu.view/Panels/Game View in Own Window', '--wait', '30']
 
 
 def detach(title):
-    return ['--click', '@menu.view', '--wait', '3', '--click', '@menu.view/%s in Own Window' % title, '--wait', '30']
+    return ['--click', '@menu.view', '--wait', '3', '--click', '@menu.view/Panels', '--wait', '3',
+            '--click', '@menu.view/Panels/%s in Own Window' % title, '--wait', '30']
 
 
 def check(name, ok, detail=''):
