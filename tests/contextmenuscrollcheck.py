@@ -2,7 +2,8 @@
 # than the window stays inside it and shows a thumb, and dragging the thumb
 # brings its last row into view, as the title-bar menus do (#378):
 #  - the Project panel's menu for a mesh (its last row Copy path);
-#  - the Scene tree's menu for an object (its last row Pin in Inspector).
+#  - the Scene tree's menu for an object (its last row Pin in Inspector);
+#  - the Project panel's type filter (its last row Other files).
 # usage: python3 contextmenuscrollcheck.py <splashedit>   (needs a display: xvfb-run -a)
 import os, re, shutil, subprocess, sys, tempfile
 
@@ -22,6 +23,9 @@ MESH_TILE = '530,85'
 # At 1000x300: the "Floor" row in the Scene tree.
 TREE = '1000x300'
 FLOOR_ROW = '98,179'
+# At 1000x240 the Project panel's header is clear of the title bar (at 170 it
+# is not) and its type filter's list still does not fit.
+TYPES = '1000x240'
 
 
 def check(name, ok, detail=''):
@@ -70,6 +74,8 @@ def menu_checks(label, size, height, open_args, menu, last, shot):
 menu_checks('the Project menu for a mesh', SHORT, 170,
             ['--click', MESHES_ROW, '--wait', '3', '--click', MESH_TILE + ',1', '--wait', '3'], 'assets.menu', 'Copy path', 'assets')
 menu_checks("the Scene tree's menu", TREE, 300, ['--click', FLOOR_ROW + ',1', '--wait', '3'], 'treemenu', 'Pin in Inspector', 'tree')
+menu_checks("the Project panel's type filter", TYPES, 240, ['--click', '@project.typefilter', '--wait', '3'], 'project.types',
+            'Other files', 'types')
 
 print('screenshots in ' + work)
 print('%d failure%s' % (fails, '' if fails == 1 else 's'))
