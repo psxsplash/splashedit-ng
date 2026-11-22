@@ -446,14 +446,7 @@ void ScriptTabs::tabMenu() {
     }
     float w, h;
     menuSize(items, &w, &h);
-    const ImVec2 d = ImGui::GetIO().DisplaySize;
-    ImVec2 pos = m_menuPos;
-    if (pos.x + w > d.x - space::xs) pos.x -= w;
-    if (pos.y + h > d.y - space::xs) pos.y -= h;
-    pos.x = std::max(pos.x, space::xs);
-    pos.y = std::max(pos.y, space::xs);
-    ImGui::SetNextWindowPos(pos);
-    ImGui::SetNextWindowSize(ImVec2(w, h));
+    placeMenu(m_menuPos, m_menuPos, w, &h);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
     ImGui::PushStyleVar(ImGuiStyleVar_PopupBorderSize, 0.0f);
     const bool shown = ImGui::BeginPopup(id, ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |

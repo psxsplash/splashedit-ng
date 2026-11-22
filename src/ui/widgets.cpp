@@ -841,6 +841,25 @@ void drawScrollThumb(ImDrawList* dl, ImRect view, float scroll, float content, b
     dl->AddRectFilled(ImVec2(r.Max.x - 4, r.Min.y + 2), ImVec2(r.Max.x - 1, r.Max.y - 2), hot ? color::textDim : color::textFaint, 2);
 }
 
+MenuScroll menuScroll(ImRect track, float content, const std::string& name) {
+    ImGuiStorage* store = ImGui::GetStateStorage();
+    const ImGuiID scrollKey = ImGui::GetID("##scroll"), pressKey = ImGui::GetID("##thumbpress");
+    const ImGuiIO& io = ImGui::GetIO();
+    float scroll = ImGui::IsWindowAppearing() ? 0.0f : store->GetFloat(scrollKey, 0);
+    if (ImGui::IsWindowHovered()) scroll -= io.MouseWheel * 48.0f;
+    scroll = ui::clampScroll(scroll, content, track.GetHeight());
+    const Hit thumb = scrollThumb("##thumb", track, scroll, content, name);
+    if (thumb.held) {
+        // From where the press was, so the thumb stays under the pointer.
+        if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) store->SetFloat(pressKey, scroll);
+        const float dy = io.MousePos.y - io.MouseClickedPos[ImGuiMouseButton_Left].y;
+        scroll = ui::clampScroll(store->GetFloat(pressKey, scroll) + ui::thumbDragScroll(dy, content, track.GetHeight()), content,
+                                 track.GetHeight());
+    }
+    store->SetFloat(scrollKey, scroll);
+    return {scroll, thumb.hovered || thumb.held};
+}
+
 // Keyboard highlight and scroll of the open picker; only one is open at a time.
 struct PickerState {
     int hi = 0;      // highlighted row, index into the items
@@ -1033,14 +1052,7 @@ AssetAction assetMenu(const char* id, ImRect r, bool hovered, const char* menuNa
         items.push_back({"Clear", "", hasFile && clearable, [&out] { out = AssetAction::Clear; }});
         float w, mh;
         menuSize(items, &w, &mh);
-        const ImVec2 d = ImGui::GetIO().DisplaySize;
-        ImVec2 pos = menuPos;
-        if (pos.x + w > d.x - space::xs) pos.x -= w;
-        if (pos.y + mh > d.y - space::xs) pos.y = r.Min.y - space::xs - mh;  // no room below: above it
-        pos.x = std::max(pos.x, space::xs);
-        pos.y = std::max(pos.y, space::xs);
-        ImGui::SetNextWindowPos(pos);
-        ImGui::SetNextWindowSize(ImVec2(w, mh));
+        placeMenu(menuPos, ImVec2(menuPos.x, r.Min.y - space::xs), w, &mh);  // no room below: above the field
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
         ImGui::PushStyleVar(ImGuiStyleVar_PopupBorderSize, 0.0f);
         const bool shown = ImGui::BeginPopup(popup, ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoDecoration |
@@ -1156,14 +1168,7 @@ ColorFieldHit colorField(const char* id, ImRect r, const std::array<float, 3>& v
         items.push_back({"Paste", clipHex, clip.has_value(), [&out] { out.pasted = clip; }});
         float w, mh;
         menuSize(items, &w, &mh);
-        const ImVec2 d = ImGui::GetIO().DisplaySize;
-        ImVec2 pos = menuPos;
-        if (pos.x + w > d.x - space::xs) pos.x -= w;
-        if (pos.y + mh > d.y - space::xs) pos.y = r.Min.y - space::xs - mh;  // no room below: above it
-        pos.x = std::max(pos.x, space::xs);
-        pos.y = std::max(pos.y, space::xs);
-        ImGui::SetNextWindowPos(pos);
-        ImGui::SetNextWindowSize(ImVec2(w, mh));
+        placeMenu(menuPos, ImVec2(menuPos.x, r.Min.y - space::xs), w, &mh);  // no room below: above the field
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
         ImGui::PushStyleVar(ImGuiStyleVar_PopupBorderSize, 0.0f);
         const bool shown = ImGui::BeginPopup(popup, ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoDecoration |
@@ -1273,12 +1278,18 @@ std::function<void()> menuRows(const std::vector<MenuItem>& items, float w, floa
     auto centerY = [](ImFont* font, float size, float y0, float y1) { return y0 + (y1 - y0 - measure(font, size, "Ag").y) * 0.5f; };
     Fonts& f = fonts();
     const float pad = space::xs, rowH = size::field + 4, sepH = 9;
+    float fullW, full;  // the width is the caller's `w`
+    menuSize(items, &fullW, &full);
     ImDrawList* dl = ImGui::GetWindowDrawList();
     ImRect box(ImGui::GetWindowPos(), ImGui::GetWindowPos() + ImVec2(w, h));
+    if (name) nameRect(std::string(name) + "#popup", box);
     dl->AddRectFilled(box.Min + ImVec2(0, 2), box.Max + ImVec2(0, 6), rgb(0x000000, 80), radius::card);
     dl->AddRectFilled(box.Min, box.Max, color::raised, radius::card);
     dl->AddRect(box.Min, box.Max, color::borderStrong, radius::card);
-    float y = box.Min.y + pad;
+    const ImRect track(box.Min + ImVec2(0, pad), box.Max - ImVec2(0, pad));
+    const float content = full - pad * 2;
+    const MenuScroll scroll = menuScroll(track, content, name ? std::string(name) + "/thumb" : std::string());
+    float y = box.Min.y + pad - scroll.scroll;
     std::function<void()> run;
     int i = 0;
     for (const MenuItem& e : items) {
@@ -1289,7 +1300,7 @@ std::function<void()> menuRows(const std::vector<MenuItem>& items, float w, floa
         } else {
             ImRect ir(ImVec2(box.Min.x + pad, y), ImVec2(box.Max.x - pad, y + rowH));
             Hit hit = interact("item", ir);
-            if (name) nameRect(std::string(name) + "/" + e.label, ir);
+            if (name && box.Contains(ir.GetCenter())) nameRect(std::string(name) + "/" + e.label, ir);  // out of view: not clickable
             const bool on = e.enabled && hit.hover > 0;
             if (on) dl->AddRectFilled(ir.Min, ir.Max, lerpColor(rgb(0x2a2f39, 0), color::hover, hit.hover), radius::field);
             const ImU32 tc = !e.enabled ? color::textFaint : on && hit.hover > 0.5f ? color::text : color::textDim;
@@ -1305,7 +1316,16 @@ std::function<void()> menuRows(const std::vector<MenuItem>& items, float w, floa
         }
         ImGui::PopID();
     }
+    drawScrollThumb(dl, track, scroll.scroll, content, scroll.hot);
     return run;
+}
+
+void placeMenu(ImVec2 at, ImVec2 flip, float w, float* h) {
+    const ImVec2 d = ImGui::GetIO().DisplaySize;
+    const ui::PopupFit p = ui::popupAt(at.x, at.y, flip.x, flip.y, w, *h, {0, 0, d.x, d.y}, space::xs);
+    *h = p.h;
+    ImGui::SetNextWindowPos(ImVec2(p.x, p.y));
+    ImGui::SetNextWindowSize(ImVec2(w, p.h));
 }
 
 void menuSize(const std::vector<MenuItem>& items, float* w, float* h) {

@@ -60,6 +60,29 @@ inline PopupPos popupBeside(PopupBox row, float w, float h, PopupBox screen, flo
     return p;
 }
 
+// Where a right-click menu goes and how tall it is.
+struct PopupFit {
+    float x, y, h;
+};
+
+// A right-click menu `w` x `h` opened at the pointer or under a field: its
+// top left at (`x`, `y`); its right edge on `flipX` when it would cross the
+// screen's right there, its bottom on `flipY` when it would cross the bottom;
+// then clamped inside `screen` with `margin` px kept clear. One taller than
+// the screen gets the screen's height, its top on the margin, and its rows
+// scroll.
+inline PopupFit popupAt(float x, float y, float flipX, float flipY, float w, float h, PopupBox screen, float margin) {
+    const float left = screen.x0 + margin, top = screen.y0 + margin;
+    const float right = screen.x1 - margin, bottom = screen.y1 - margin;
+    PopupFit p;
+    p.h = std::max(0.0f, std::min(h, bottom - top));
+    p.x = x + w > right ? flipX - w : x;
+    p.y = y + p.h > bottom ? flipY - p.h : y;
+    p.x = std::max(std::min(p.x, right - w), left);
+    p.y = std::max(std::min(p.y, bottom - p.h), top);
+    return p;
+}
+
 // How many rows a picker (Add object, Add component) shows of `count` (#378):
 // as many as fit between `top` and the screen's bottom (`chrome` px of it
 // taken by the search field and padding, `margin` px kept clear), at least
