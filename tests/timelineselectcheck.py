@@ -28,8 +28,8 @@ def lane(i):
 
 RULER_Y = 668
 AUDIO_Y = lane(3)
-# Double-clicking the audio lane at (1100, AUDIO_Y) opens the clip menu
-# upwards from the mouse: bell, then gong.
+# Double-clicking the audio lane at (1100, AUDIO_Y), frame 128, opens the
+# clip menu upwards from the mouse: bell, then gong.
 ADD_AT = f'1100,{AUDIO_Y}'
 MENU_GONG = '1120,806'
 
@@ -131,11 +131,12 @@ cs, out = run(['--click', f'{fx(45)},{lane(0)}', '--wait', '3', '--key', 'ctrl+c
 check('Ctrl+C then Ctrl+V pastes the key at the scrub head', frames(cs)[0] == [0, 45, 90, 100] and
       cs['tracks'][0]['keyframes'][3]['value'] == [0, 1.5, 0], str(cs['tracks'][0]) + ' | ' + out[-200:])
 
-# Audio lane: double-click it for the clip menu, pick gong: an event at the scrub head.
+# Audio lane: double-click it for the clip menu, pick gong: an event at the
+# frame clicked (128), not the scrub head (100).
 ADD = ['--click', f'{fx(100)},{RULER_Y}', '--wait', '3', '--dblclick', ADD_AT, '--wait', '3', '--click', MENU_GONG, '--wait', '3']
 cs, out = run(ADD)
-check('the audio lane\'s menu adds an event of the picked clip at the scrub head',
-      events(cs) == START_AUDIO + [(100, 'gong')] and cs['audioEvents'][2]['volume'] == 100, f'{events(cs)} | ' + out[-200:])
+check('the audio lane\'s menu adds an event of the picked clip at the frame clicked',
+      events(cs) == START_AUDIO + [(128, 'gong')] and cs['audioEvents'][2]['volume'] == 100, f'{events(cs)} | ' + out[-200:])
 cs, out = run(ADD + ['--key', 'ctrl+z', '--wait', '3'])
 check('Ctrl+Z takes the added audio event back', events(cs) == START_AUDIO, f'{events(cs)} | ' + out[-200:])
 

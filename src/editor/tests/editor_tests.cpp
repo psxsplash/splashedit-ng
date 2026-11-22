@@ -10074,6 +10074,176 @@ void testTimelineSelection() {
     CHECK(editor::moveSelection(d, aref, {{{0, 0}}, {}, {}}, 1));
 }
 
+// A double-click on a lane keys the frame under the mouse (#375), not the
+// scrub head: frameUnder reads the lanes' view back to the nearest whole
+// frame, and keyAtOrAdd adds a key there or gives the one already there.
+void testTimelineKeyAtClick() {
+    using splash::TrackType;
+    // Frame 20 at pixel 500, 4 pixels a frame: 600 is frame 45, 601 still 45, 603 46.
+    CHECK(editor::frameUnder(600, 500, 20, 4) == 45);
+    CHECK(editor::frameUnder(601, 500, 20, 4) == 45 && editor::frameUnder(603, 500, 20, 4) == 46);
+    CHECK(editor::frameUnder(400, 500, 20, 4) == 0);  // left of frame 0: frame 0
+    CHECK(editor::frameUnder(1e9f, 500, 20, 4) == editor::kMaxTimelineFrame);
+    CHECK(editor::frameUnder(530, 500, 0, 0.2f) == 150);  // zoomed out
+
+    splash::Scene sc;
+    splash::Cutscene cs;
+    cs.name = "intro";
+    cs.tracks.push_back(trackOf(TrackType::ObjectPosition, {{0, 0}, {60, 6}}));
+    sc.cutscenes.push_back(cs);
+    editor::Document d;
+    d.reset(sc);
+    const editor::SeqRef ref{editor::SeqKind::Cutscene, 0};
+    const auto& ks = editor::seqTracks(d, ref)->at(0).keyframes;
+
+    // Clicked at frame 45 (the scrub head elsewhere): a key at 45 with the curve's value there, one step.
+    const auto k = editor::keyAtOrAdd(d, ref, 0, editor::frameUnder(600, 500, 20, 4));
+    CHECK(k && k->track == 0 && k->key == 1 && ks.size() == 3 && ks[1].frame == 45);
+    CHECK(std::fabs(ks[1].value[0] - 4.5f) < 1e-4f && d.historySize() == 1);
+    // On a frame that has one: that key, no step.
+    const auto again = editor::keyAtOrAdd(d, ref, 0, 60);
+    CHECK(again && again->key == 2 && ks.size() == 3 && d.historySize() == 1);
+    CHECK(!editor::keyAtOrAdd(d, ref, 1, 10) && !editor::keyAtOrAdd(d, ref, -1, 10));
+    CHECK(editor::keyAtOrAdd(d, ref, 0, 99999)->key == 3 && ks.back().frame == editor::kMaxTimelineFrame);
+}
+
+// The zoom buttons and Ctrl+wheel (#375): zoomView keeps the frame under
+// the anchor pixel where it is and holds the zoom range; panView moves the
+// view by pixels and keeps view0 in -pad/ppf..kMaxTimelineFrame.
+void testTimelineZoomPan() {
+    using editor::TimelineView;
+    auto near = [](float a, float b) { return std::fabs(a - b) < 1e-3f; };
+    // Frame 20 at pixel 500, 4 pixels a frame: frame 45 at 600. Zoom x2 about 600: still 45 there.
+    const TimelineView z = editor::zoomView({20, 4}, 2, 600, 500, 12);
+    CHECK(near(z.ppf, 8) && near(z.view0 + (600 - 500) / z.ppf, 45));
+    // Zoom out about the same pixel: back where it was.
+    const TimelineView back = editor::zoomView(z, 0.5f, 600, 500, 12);
+    CHECK(near(back.ppf, 4) && near(back.view0, 20));
+    // The range holds at both ends.
+    CHECK(near(editor::zoomView({0, 30}, 10, 500, 500, 12).ppf, editor::kMaxTimelinePpf));
+    CHECK(near(editor::zoomView({0, 0.3f}, 0.01f, 500, 500, 12).ppf, editor::kMinTimelinePpf));
+    // Zooming out about a pixel near frame 0 cannot put the view far left of frame 0: -pad/ppf at most.
+    const TimelineView left = editor::zoomView({0, 4}, 0.5f, 900, 500, 12);
+    CHECK(near(left.ppf, 2) && near(left.view0, -6));
+    // Pan: 40 pixels right at 4 a frame is 10 frames; left of frame 0 stops at -pad/ppf, the end at the max frame.
+    CHECK(near(editor::panView({20, 4}, 40, 12).view0, 30) && near(editor::panView({20, 4}, 40, 12).ppf, 4));
+    CHECK(near(editor::panView({20, 4}, -4000, 12).view0, -3));
+    CHECK(near(editor::panView({8000, 4}, 4000, 12).view0, float(editor::kMaxTimelineFrame)));
+    // A fit past the zoom range keeps its zoom when panned.
+    CHECK(near(editor::panView({0, 60}, 60, 12).ppf, 60) && near(editor::panView({0, 60}, 60, 12).view0, 1));
+}
+
+// The Player view follows the cutscene open in the timeline (#375):
+// previewEye takes the camera tracks' eye, look and H at the scrub head, the
+// player's start eye and the project's H for what no track drives, and
+// nothing when the sequence has no camera track.
+void testTimelinePreviewEye() {
+    auto near = [](splash::Vec3 a, splash::Vec3 b) { return std::fabs(a.x - b.x) + std::fabs(a.y - b.y) + std::fabs(a.z - b.z) < 1e-4f; };
+    const splash::Vec3 start{1, 2, 3}, look{0, 0, 1};
+    editor::Preview p;
+    p.objects["Cube"] = {};
+    CHECK(!editor::previewEye(p, start, look, 120));  // no camera track
+    p.cameraPosition = splash::Vec3{5, 6, 7};
+    auto e = editor::previewEye(p, start, look, 150);
+    CHECK(e && near(e->eye, {5, 6, 7}) && near(e->forward, look) && e->h == 150);
+    // Yaw 90: looking down +X; the eye stays the track's.
+    p.cameraRotation = splash::Vec3{0, 90, 0};
+    e = editor::previewEye(p, start, look, 120);
+    CHECK(e && near(e->forward, {1, 0, 0}) && near(e->eye, {5, 6, 7}));
+    // Rotation alone: the player's start eye. H rounds and clamps to the engine's range.
+    p.cameraPosition.reset();
+    p.cameraH = 200.4f;
+    e = editor::previewEye(p, start, look, 120);
+    CHECK(e && near(e->eye, start) && e->h == 200);
+    p.cameraH = 5000;
+    e = editor::previewEye(p, start, look, 120);
+    CHECK(e && e->h == 1024);
+    p.cameraH = 0.2f;
+    e = editor::previewEye(p, start, look, 120);
+    CHECK(e && e->h == 1);
+
+    // From a cutscene: a camera position track sampled at the scrub head.
+    splash::Scene sc;
+    splash::Cutscene cs;
+    cs.name = "intro";
+    cs.tracks.push_back(trackOf(splash::TrackType::CameraPosition, {{0, 0}, {60, 6}}));
+    sc.cutscenes.push_back(cs);
+    editor::Document d;
+    d.reset(sc);
+    const auto pe = editor::previewEye(editor::samplePreview(d, {editor::SeqKind::Cutscene, 0}, 30), start, look, 120);
+    CHECK(pe && std::fabs(pe->eye.x - 3) < 1e-2f && near(pe->forward, look) && pe->h == 120);
+}
+
+// Several keys of one track edit together in the key row (#375): keysShown
+// marks each field mixed where they differ, a typed "+3" works on each key's
+// value and frame from its own, and each edit is one undo step. Keys across
+// tracks have no shared row.
+void testTimelineMultiKeyEdit() {
+    using splash::TrackType;
+    using editor::KeyRef;
+    splash::Scene sc;
+    splash::Cutscene cs;
+    cs.name = "intro";
+    cs.tracks.push_back(trackOf(TrackType::ObjectPosition, {{10, 1}, {20, 2}, {30, 3}}));
+    cs.tracks.push_back(trackOf(TrackType::ObjectPosition, {{10, 5}}));
+    sc.cutscenes.push_back(cs);
+    editor::Document d;
+    d.reset(sc);
+    const editor::SeqRef ref{editor::SeqKind::Cutscene, 0};
+    const auto& ks = editor::seqTracks(d, ref)->at(0).keyframes;
+
+    CHECK(editor::keysTrack({{0, 0}, {0, 2}}) == 0 && editor::keysTrack({{0, 0}, {1, 0}}) == -1 && editor::keysTrack({}) == -1);
+    CHECK(!editor::keysShown(d, ref, {{0, 0}, {1, 0}}));
+    const std::vector<KeyRef> sel{{0, 0}, {0, 2}};
+    auto shown = editor::keysShown(d, ref, sel);
+    CHECK(shown && shown->frame == 10 && shown->frameMixed && shown->value[0] == 1);
+    CHECK(shown->valueMixed[0] && shown->valueMixed[1] && !shown->valueMixed[2] && !shown->interpMixed);
+    const auto one = editor::keysShown(d, ref, {{0, 1}});
+    CHECK(one && one->frame == 20 && !one->frameMixed && !one->valueMixed[0]);
+
+    // "+3" typed into the mixed X field: 1 and 3 become 4 and 6, one step.
+    float typed = 0;
+    ui::Relative rel;
+    CHECK(ui::evalNumber("+3", shown->value[0], typed, &rel) && rel.on);
+    std::vector<float> xs;
+    for (const KeyRef& k : sel) xs.push_back(ui::relativeTo(editor::key(d, ref, k)->value[0], rel, -1e9f, 1e9f, false));
+    CHECK(editor::setKeysComponent(d, ref, sel, 0, xs, "timeline.value.0"));
+    d.endMerge();
+    CHECK(ks[0].value[0] == 4 && ks[2].value[0] == 6 && ks[1].value[0] == 2 && ks[0].value[1] == 2 && d.historySize() == 1);
+    // The same values again: no change, no step.
+    CHECK(!editor::setKeysComponent(d, ref, sel, 0, xs));
+    CHECK(d.historySize() == 1);
+
+    // "+3" into the mixed frame field: 10 and 30 become 13 and 33, one step.
+    std::vector<int> fs;
+    for (const KeyRef& k : sel) fs.push_back(int(ui::relativeTo(float(editor::key(d, ref, k)->frame), rel, 0, editor::kMaxTimelineFrame, true)));
+    auto moved = editor::setKeyFrames(d, ref, sel, fs, "timeline.kframe");
+    d.endMerge();
+    CHECK(moved && *moved == sel && ks[0].frame == 13 && ks[2].frame == 33 && ks[1].frame == 20 && d.historySize() == 2);
+    // A drag merges: frames step by step under one merge key are one step.
+    CHECK(editor::setKeyFrames(d, ref, sel, {14, 34}, "timeline.kframe") && editor::setKeyFrames(d, ref, sel, {15, 35}, "timeline.kframe"));
+    d.endMerge();
+    CHECK(ks[0].frame == 15 && ks[2].frame == 35 && d.historySize() == 3);
+    // Past the key that stays: the order changes, the addresses follow.
+    moved = editor::setKeyFrames(d, ref, sel, {25, 35});
+    CHECK(moved && (*moved == std::vector<KeyRef>{{0, 1}, {0, 2}}) && ks[0].frame == 20 && ks[1].frame == 25 && ks[1].value[0] == 4);
+    CHECK(d.historySize() == 4);
+    // Refused, no step: onto the key that stays, two on one frame, out of range.
+    CHECK(!editor::setKeyFrames(d, ref, *moved, {20, 40}) && !editor::setKeyFrames(d, ref, *moved, {40, 40}));
+    CHECK(!editor::setKeyFrames(d, ref, *moved, {-1, 35}) && !editor::setKeyFrames(d, ref, *moved, {25, 35}));
+    CHECK(d.historySize() == 4 && ks[1].frame == 25 && ks[2].frame == 35);
+
+    // One curve for them all, one step; then not mixed.
+    CHECK(editor::setKeysInterp(d, ref, *moved, splash::Interp::Step) && d.historySize() == 5);
+    CHECK(ks[1].interp == splash::Interp::Step && ks[2].interp == splash::Interp::Step && ks[0].interp == splash::Interp::Linear);
+    shown = editor::keysShown(d, ref, *moved);
+    CHECK(shown && !shown->interpMixed && shown->interp == splash::Interp::Step);
+    const auto mix = editor::keysShown(d, ref, {{0, 0}, {0, 1}});  // Linear and Step
+    CHECK(mix && mix->interpMixed);
+    // Undo takes the whole multi-key edits back one at a time.
+    CHECK(d.undo() && ks[1].interp == splash::Interp::Linear && ks[2].interp == splash::Interp::Linear);
+}
+
 // Copy and paste at the scrub head: keys land in the track with their type
 // and target, events come along, one step; limits refuse the whole paste.
 void testTimelineClipboard() {
@@ -22596,6 +22766,10 @@ int main(int argc, char** argv) {
     testTimelineFixedSample();
     testTimelinePreviewMore();
     testTimelineSelection();
+    testTimelineKeyAtClick();
+    testTimelineZoomPan();
+    testTimelinePreviewEye();
+    testTimelineMultiKeyEdit();
     testTimelineClipboard();
     testTimelineEvents();
     testSeqRenameLua();

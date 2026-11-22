@@ -7332,14 +7332,20 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
         view.setFovY(viewport::Ps1View::kFovY);
     }
     const splash::FlatObject* viewPlayer = st.playerView ? editor::scenePlayer(flats) : nullptr;
-    const editor::PlayerFrame playerFrame = editor::playerFrame(st.projH, r.GetWidth() / std::max(r.GetHeight(), 1.0f));
-    if (viewPlayer) {
-        const editor::PlayerEye pe = editor::playerEye(*viewPlayer);
-        view.setPose({toGl(pe.eye), toGl(pe.eye + pe.forward * 5.0f), false, playerFrame.fovY});
-    }
+    // A cutscene open in the timeline with camera tracks (#375): the Player
+    // view looks through its camera at the scrub head, as the game would.
+    const editor::PlayerEye startEye = viewPlayer ? editor::playerEye(*viewPlayer) : editor::PlayerEye{{0, 0, 0}, {0, 0, 1}, 0};
+    const std::optional<editor::PreviewEye> cutEye =
+        st.playerView ? editor::previewEye(view.preview(), startEye.eye, startEye.forward, st.projH) : std::nullopt;
+    const editor::PlayerFrame playerFrame =
+        editor::playerFrame(cutEye ? cutEye->h : st.projH, r.GetWidth() / std::max(r.GetHeight(), 1.0f));
+    if (cutEye)
+        view.setPose({toGl(cutEye->eye), toGl(cutEye->eye + cutEye->forward * 5.0f), false, playerFrame.fovY});
+    else if (viewPlayer)
+        view.setPose({toGl(startEye.eye), toGl(startEye.eye + startEye.forward * 5.0f), false, playerFrame.fovY});
     unsigned tex = view.render((int)(r.GetWidth() * fb.x), (int)(r.GetHeight() * fb.y), 240);
     ui::addTextureImageRounded(dl, (ImTextureID)(intptr_t)tex, r.Min, r.Max, ImVec2(0, 1), ImVec2(1, 0), IM_COL32_WHITE, radius::window);
-    if (viewPlayer && (playerFrame.fracW < 0.999f || playerFrame.fracH < 0.999f)) {
+    if ((viewPlayer || cutEye) && (playerFrame.fracW < 0.999f || playerFrame.fracH < 0.999f)) {
         // Outside the engine's 4:3 frame the game shows nothing: shade it.
         const ImVec2 c = r.GetCenter(), half(r.GetWidth() * playerFrame.fracW * 0.5f, r.GetHeight() * playerFrame.fracH * 0.5f);
         const ImRect game(c - half, c + half);
@@ -7477,8 +7483,9 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
     const char* info = st.viewMode == 0 ? "320 x 240  ·  15-bit dither  ·  affine" : "Clean view";
     std::string playerInfo;
     if (st.playerView) {
-        playerInfo = viewPlayer ? "Player view  ·  " + viewPlayer->object->name + "  ·  " + editor::projectionHLabel(st.projH)
-                                : std::string("Player view  ·  no active PSXPlayer in the scene");
+        playerInfo = cutEye       ? "Player view  ·  the cutscene's camera  ·  " + editor::projectionHLabel(cutEye->h)
+                     : viewPlayer ? "Player view  ·  " + viewPlayer->object->name + "  ·  " + editor::projectionHLabel(st.projH)
+                                  : std::string("Player view  ·  no active PSXPlayer in the scene");
         info = playerInfo.c_str();
     }
     ImVec2 is = measure(f.regular, type::caption, info);

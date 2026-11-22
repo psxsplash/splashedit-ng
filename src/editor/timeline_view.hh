@@ -109,6 +109,11 @@ private:
     int m_menuTrack = -1;
     float xOf(float frame) const;
     float frameAt(float x) const;
+    editor::TimelineView view() const { return {m_view0, m_ppf}; }
+    void setView(editor::TimelineView v) {
+        m_view0 = v.view0;
+        m_ppf = v.ppf;
+    }
     void fit(int length);
     void validate(const editor::Document& doc);
 
@@ -141,6 +146,17 @@ private:
     // A drag of the selection: the frame under the mouse when it started and
     // the whole frames applied so far.
     bool m_dragging = false;
+    // A drag on a key row field with several keys: the field, the keys and
+    // each one's frame and value when it began (#375).
+    struct KeyScrub {
+        std::string field;
+        std::vector<editor::KeyRef> keys;
+        std::vector<int> frames;
+        std::vector<editor::KeyValue> values;
+    };
+    KeyScrub m_keyScrub;
+    // A middle-mouse drag panning the lanes.
+    bool m_panning = false;
     float m_dragFrom = 0;
     int m_dragApplied = 0;
     // skinTargets() for the skin lane's missing objects and clips, and the

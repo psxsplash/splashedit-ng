@@ -377,7 +377,7 @@ out, shown = run(project, ['--timeline', 'intro', '--wait', '3', '--click', PROJ
                            '--wait', '3', '--click', f'{fx(38)},{RULER_Y},0', '--wait', '3', '--dblclick', f'{fx(100)},740', '--wait', '3',
                            '--key', 'ctrl+s', '--wait', '5'])
 frames = [k['frame'] for k in scene(project)['cutscenes'][0]['tracks'][1]['keyframes']]
-check('the Timeline tab brings its lanes back: a key added there is saved', frames == [0, 38, 150], str(frames) + ' | ' + out[-200:])
+check('the Timeline tab brings its lanes back: a key added there is saved', frames == [0, 100, 150], str(frames) + ' | ' + out[-200:])
 
 # --- View > Project: the panel folded by its chevron comes back ---
 project = project_copy()

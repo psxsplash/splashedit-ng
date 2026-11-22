@@ -4,6 +4,7 @@
 #include <cfloat>
 #include <cmath>
 #include <cstdio>
+#include <limits>
 #include <set>
 
 #include "editor/document.hh"
@@ -23,6 +24,8 @@ using splash::TrackType;
 namespace {
 
 constexpr float kHeaderH = 46, kRulerH = 26, kLaneH = 40, kKeyRowH = 46, kLabelW = 240, kDiamond = 6, kPad = 12;
+// One wheel notch of zoom; the buttons take two.
+constexpr float kZoomStep = 1.2f;
 // A drag past the lanes' edge scrolls this many pixels a second, plus the gain per pixel out, up to the max.
 constexpr float kAutoScrollBase = 240, kAutoScrollGain = 8, kAutoScrollMax = 2400;
 
@@ -413,7 +416,7 @@ void TimelinePanel::header(ImDrawList* dl, ImRect r, editor::Document& doc) {
         m_playing = !m_playing;
     }
     x += 30;
-    if (iconButton("loop", ImRect(ImVec2(x, cy - 13), ImVec2(x + 28, cy + 13)), icon::redo, m_loop,
+    if (iconButton("loop", ImRect(ImVec2(x, cy - 13), ImVec2(x + 28, cy + 13)), icon::repeat, m_loop,
                    m_loop ? "Loop: on (playback starts over at the end)" : "Loop: off"))
         m_loop = !m_loop;
     x += 28 + space::md;
@@ -455,6 +458,17 @@ void TimelinePanel::header(ImDrawList* dl, ImRect r, editor::Document& doc) {
     if (iconButton("fit", ImRect(ImVec2(rx - 28, cy - 13), ImVec2(rx, cy + 13)), icon::maximize, false,
                    "Fit the whole length in the panel (Ctrl+wheel zooms, wheel scrolls)"))
         m_fitPending = true;
+    rx -= 28 + 2;
+    // Zoom out and in, about the scrub head while it is in view, else the lanes' middle.
+    const float headX = xOf(m_frame);
+    const float zoomAt = headX >= m_bodyX0 && headX <= m_bodyX1 ? headX : (m_bodyX0 + m_bodyX1) / 2;
+    if (iconButton("zoomin", ImRect(ImVec2(rx - 28, cy - 13), ImVec2(rx, cy + 13)), icon::zoomIn, false,
+                   "Zoom in (Ctrl+wheel zooms about the mouse)"))
+        setView(editor::zoomView(view(), kZoomStep * kZoomStep, zoomAt, m_bodyX0, kPad));
+    rx -= 28 + 2;
+    if (iconButton("zoomout", ImRect(ImVec2(rx - 28, cy - 13), ImVec2(rx, cy + 13)), icon::zoomOut, false,
+                   "Zoom out (Ctrl+wheel zooms about the mouse)"))
+        setView(editor::zoomView(view(), 1 / (kZoomStep * kZoomStep), zoomAt, m_bodyX0, kPad));
     rx -= 28 + space::sm;
     const char* addLabel = "Add track";
     const float aw = space::md * 2 + measure(f.medium, type::icon, icon::plus).x + space::sm - 2 + measure(f.medium, type::body, addLabel).x;
@@ -747,26 +761,31 @@ void TimelinePanel::lanes(ImDrawList* dl, ImRect labels, ImRect body, editor::Do
     const ImRect rulerArea(ImVec2(body.Min.x, body.Min.y - kRulerH), body.Max);
     if ((area.Contains(io.MousePos) || rulerArea.Contains(io.MousePos)) && io.MouseWheel != 0 &&
         ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem)) {
-        if (io.KeyCtrl) {
-            const float at = frameAt(io.MousePos.x);
-            m_ppf = std::clamp(m_ppf * std::pow(1.2f, io.MouseWheel), 0.2f, 40.0f);
-            m_view0 = at - (io.MousePos.x - m_bodyX0) / m_ppf;
-        } else if (io.KeyShift || maxScroll <= 0) {
-            m_view0 -= io.MouseWheel * 40 / m_ppf;
-        } else {
+        if (io.KeyCtrl)
+            setView(editor::zoomView(view(), std::pow(kZoomStep, io.MouseWheel), io.MousePos.x, m_bodyX0, kPad));
+        else if (io.KeyShift || maxScroll <= 0)
+            setView(editor::panView(view(), -io.MouseWheel * 40, kPad));
+        else
             m_scrollY -= io.MouseWheel * kLaneH;
-        }
-        m_view0 = std::clamp(m_view0, -kPad / m_ppf, float(editor::kMaxTimelineFrame));
     }
     if (io.MouseWheelH != 0 && area.Contains(io.MousePos)) m_view0 = std::max(0.0f, m_view0 - io.MouseWheelH * 40 / m_ppf);
+    // Middle-mouse drag pans: the frames follow the mouse, and the lanes too when they scroll.
+    if (ImGui::IsMouseClicked(ImGuiMouseButton_Middle) && (area.Contains(io.MousePos) || rulerArea.Contains(io.MousePos)) &&
+        ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem))
+        m_panning = true;
+    if (m_panning && !ImGui::IsMouseDown(ImGuiMouseButton_Middle)) m_panning = false;
+    if (m_panning) {
+        ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
+        if (io.MouseDelta.x != 0) setView(editor::panView(view(), -io.MouseDelta.x, kPad));
+        m_scrollY -= io.MouseDelta.y;
+    }
     // Dragging keys or a box past the left or right of the lanes scrolls them,
     // faster the further out the mouse is.
     if ((m_dragging || m_boxing) && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
         const float out = io.MousePos.x < body.Min.x ? io.MousePos.x - body.Min.x : io.MousePos.x > body.Max.x ? io.MousePos.x - body.Max.x : 0;
         if (out != 0) {
             const float pxPerSec = std::min(kAutoScrollMax, kAutoScrollBase + kAutoScrollGain * std::fabs(out));
-            m_view0 += std::copysign(pxPerSec, out) * io.DeltaTime / m_ppf;
-            m_view0 = std::clamp(m_view0, -kPad / m_ppf, float(editor::kMaxTimelineFrame));
+            setView(editor::panView(view(), std::copysign(pxPerSec, out) * io.DeltaTime, kPad));
         }
     }
     m_scrollY = std::clamp(m_scrollY, 0.0f, maxScroll);
@@ -852,10 +871,10 @@ void TimelinePanel::lanes(ImDrawList* dl, ImRect labels, ImRect body, editor::Do
     std::snprintf(fullSkin, sizeof fullSkin, "This sequence has the runtime's %d skin clip events", editor::kMaxSkinEvents);
     if (audio)
         eventLabel(audioRow, "Audio", "addaudio", kAudioColor, int(audio->size()), editor::kMaxAudioEvents,
-                   "Add an audio event at the scrub head (or double-click the lane)", fullAudio, "##addaudio", true);
+                   "Add an audio event at the scrub head (or double-click the lane where it goes)", fullAudio, "##addaudio", true);
     if (anySkinned)
         eventLabel(skinRow, "Skin clips", "addskin", kSkinColor, int(skin.size()), editor::kMaxSkinEvents,
-                   "Play a skinned mesh's clip from the scrub head (or double-click the lane)", fullSkin, "##addskin", true);
+                   "Play a skinned mesh's clip from the scrub head (or double-click the lane where it starts)", fullSkin, "##addskin", true);
     ImGui::PopClipRect();
     trackMenu(doc);
 
@@ -1089,17 +1108,11 @@ void TimelinePanel::lanes(ImDrawList* dl, ImRect labels, ImRect body, editor::Do
         m_boxing = false;
     }
     if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) && laneAt >= 0 && laneAt < n && !hit) {
-        // A key at the scrub head, or the one already there selected.
-        const int fr = int(std::lround(m_frame));
-        if (auto k = editor::addKey(doc, m_ref, laneAt, fr)) {
+        // A key at the frame clicked, or the one already there selected.
+        if (auto k = editor::keyAtOrAdd(doc, m_ref, laneAt, editor::frameUnder(io.MousePos.x, m_bodyX0, m_view0, m_ppf)))
             m_sel = {{*k}, {}, {}};
-        } else {
-            const auto& ks = tracks[size_t(laneAt)].keyframes;
-            for (int k2 = 0; k2 < int(ks.size()); ++k2)
-                if (ks[size_t(k2)].frame == fr) m_sel = {{KeyRef{laneAt, k2}}, {}, {}};
-        }
     }
-    // Double- or right-click an event lane: its add menu, for the scrub head.
+    // Double- or right-click an event lane: its add menu, for the frame clicked.
     const bool eventLaneAt = laneAt >= 0 && (laneAt == audioRow || laneAt == skinRow);
     if (eventLaneAt && !hit && ImGui::IsItemHovered() &&
         (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) || ImGui::IsMouseClicked(ImGuiMouseButton_Right))) {
@@ -1110,7 +1123,7 @@ void TimelinePanel::lanes(ImDrawList* dl, ImRect labels, ImRect body, editor::Do
         } else {
             openAdd = isAudio ? "##addaudio" : "##addskin";
             addAt = io.MousePos;
-            m_addFrame = int(std::lround(m_frame));
+            m_addFrame = editor::frameUnder(io.MousePos.x, m_bodyX0, m_view0, m_ppf);
         }
     }
     if (hit && ImGui::IsItemHovered() && !ImGui::IsItemActive()) {
@@ -1238,11 +1251,13 @@ void TimelinePanel::keyRow(ImDrawList* dl, ImRect r, editor::Document& doc) {
     float x = r.Min.x + space::md;
     if (m_sel.empty()) {
         text(dl, ImVec2(x, cy - 9), f.regular, type::label, color::textFaint,
-             "Double-click a lane to key it at the scrub head. Drag across lanes to box-select, drag a key to move the "
+             "Double-click a lane to key it at that frame. Drag across lanes to box-select, drag a key to move the "
              "selection; Del deletes, Ctrl+C / Ctrl+V copy and paste at the scrub head.");
         return;
     }
-    if (m_sel.size() > 1) {
+    // Keys of one track edit together (#375); keys across tracks, or with events, only say how many.
+    const bool oneTrack = m_sel.audio.empty() && m_sel.skin.empty() && editor::keysTrack(m_sel.keys) >= 0;
+    if (m_sel.size() > 1 && !oneTrack) {
         char b[96];
         const int ev = int(m_sel.audio.size() + m_sel.skin.size());
         if (ev == 0)
@@ -1267,41 +1282,78 @@ void TimelinePanel::keyRow(ImDrawList* dl, ImRect r, editor::Document& doc) {
         eventRow(dl, r, x, doc);
         return;
     }
-    const KeyRef k = m_sel.keys.front();
-    const splash::Keyframe kf = *editor::key(doc, m_ref, k);
-    const splash::CutsceneTrack& t = (*editor::seqTracks(doc, m_ref))[size_t(k.track)];
-    const std::string label = editor::trackLabel(t);
+    const std::vector<KeyRef> keys = m_sel.keys;
+    const std::optional<editor::KeysShown> shown = editor::keysShown(doc, m_ref, keys);
+    if (!shown) return;
+    const bool multi = keys.size() > 1;
+    const splash::CutsceneTrack& t = (*editor::seqTracks(doc, m_ref))[size_t(keys.front().track)];
+    std::string label = editor::trackLabel(t);
+    if (multi) label = std::to_string(keys.size()) + " keys  " + label;
     ImGui::PushClipRect(ImVec2(x, r.Min.y), ImVec2(x + 150, r.Max.y), true);
     text(dl, ImVec2(x, cy - 9), f.medium, type::label, trackColor(t.type), label.c_str());
     ImGui::PopClipRect();
+    if (multi && ImGui::IsMouseHoveringRect(ImVec2(x, r.Min.y), ImVec2(x + 150, r.Max.y)))
+        tooltip("Each field edits every selected key; a mixed one takes +n, *n, /n or a drag on each key from its own.");
     x += 150 + space::sm;
+
+    // A drag or a typed +n, *n, /n on a field works on each key from its own
+    // value; a drag from the values when it began, kept until release.
+    auto scrubbing = [&](const char* id) { return m_keyScrub.field == id && m_keyScrub.keys == keys; };
+    auto scrubStart = [&](const char* id) -> const KeyScrub& {
+        if (!scrubbing(id)) {
+            m_keyScrub = {id, keys, {}, {}};
+            for (const KeyRef& k : keys) {
+                const splash::Keyframe kk = *editor::key(doc, m_ref, k);
+                m_keyScrub.frames.push_back(kk.frame);
+                m_keyScrub.values.push_back(kk.value);
+            }
+        }
+        return m_keyScrub;
+    };
 
     text(dl, ImVec2(x, cy - 8), f.medium, type::caption, color::textFaint, "FRAME");
     x += measure(f.medium, type::caption, "FRAME").x + space::sm;
     {
-        float v = float(kf.frame);
+        float v = float(shown->frame);
         char b[16];
-        std::snprintf(b, sizeof b, "%d", kf.frame);
+        std::snprintf(b, sizeof b, "%d", shown->frame);
         const ImRect fr(ImVec2(x, cy - 12), ImVec2(x + 54, cy + 12));
-        FieldEdit fe = numberField("kframe", fr, b, nullptr, 0, nullptr, &v, true);
+        FieldEdit fe = numberField("kframe", fr, shown->frameMixed ? "mixed" : b, nullptr, 0, nullptr, &v, true, shown->frameMixed);
         nameRect("timeline.kframe", fr);
         if (fe.changed) {
-            const int to = std::clamp(int(std::lround(v)), 0, editor::kMaxTimelineFrame);
-            if (auto moved = editor::moveKeys(doc, m_ref, {k}, to - kf.frame, "timeline.kframe")) m_sel = {*moved, {}, {}};
+            std::vector<int> to;
+            if (fe.perValue() || scrubbing("kframe")) {
+                const bool drag = !fe.typed.on;
+                const KeyScrub& from = drag ? scrubStart("kframe") : KeyScrub{};
+                for (size_t j = 0; j < keys.size(); ++j) {
+                    const float own = drag ? float(from.frames[j]) : float(editor::key(doc, m_ref, keys[j])->frame);
+                    to.push_back(int(ui::eachValue(fe, own, v, 0, float(editor::kMaxTimelineFrame), true)));
+                }
+            } else {
+                to.assign(keys.size(), std::clamp(int(std::lround(v)), 0, editor::kMaxTimelineFrame));
+            }
+            if (auto moved = editor::setKeyFrames(doc, m_ref, keys, to, "timeline.kframe")) {
+                m_sel = {*moved, {}, {}};
+                if (scrubbing("kframe")) m_keyScrub.keys = *moved;
+            }
         }
-        if (fe.done) doc.endMerge();
+        if (fe.done) {
+            doc.endMerge();
+            m_keyScrub = {};
+        }
         x += 54 + space::md;
     }
 
     text(dl, ImVec2(x, cy - 8), f.medium, type::caption, color::textFaint, "VALUE");
     x += measure(f.medium, type::caption, "VALUE").x + space::sm;
     if (editor::isDiscrete(t.type)) {
-        const bool on = kf.value[0] > 0.5f;
+        const bool on = shown->value[0] > 0.5f;
+        const bool mixed = shown->valueMixed[0];
         const ImRect tr(ImVec2(x, cy - 10), ImVec2(x + 36, cy + 10));
         nameRect("timeline.kon", tr);
-        if (toggle("kon", tr, on))
-            editor::setKeyValue(doc, m_ref, k, {on ? 0.0f : 1.0f, 0, 0});
-        text(dl, ImVec2(x + 44, cy - 9), f.regular, type::label, color::textDim, on ? "on" : "off");
+        if (toggle("kon", tr, on, mixed))
+            editor::setKeysComponent(doc, m_ref, keys, 0, std::vector<float>(keys.size(), on ? 0.0f : 1.0f));
+        text(dl, ImVec2(x + 44, cy - 9), f.regular, type::label, color::textDim, mixed ? "mixed" : on ? "on" : "off");
         x += 80;
         text(dl, ImVec2(x, cy - 9), f.regular, type::label, color::textFaint, "On/off tracks hold each key until the next.");
     } else {
@@ -1311,32 +1363,50 @@ void TimelinePanel::keyRow(ImDrawList* dl, ImRect r, editor::Document& doc) {
         static const char* rgbl[3] = {"R", "G", "B"};
         const ImU32 axes[3] = {color::axisX, color::axisY, color::axisZ};
         const float fw = nv == 1 ? 84 : 76;
+        constexpr float kNoLimit = std::numeric_limits<float>::infinity();
         for (int c = 0; c < nv; ++c) {
-            float v = kf.value[size_t(c)];
+            float v = shown->value[size_t(c)];
+            const bool mixed = shown->valueMixed[size_t(c)];
             char id[16];
             std::snprintf(id, sizeof id, "kv%d", c);
-            const std::string shown = fmtNum(v);
+            const std::string txt = mixed ? std::string("mixed") : fmtNum(v);
             const ImRect vr(ImVec2(x, cy - 12), ImVec2(x + fw, cy + 12));
-            FieldEdit fe = numberField(id, vr, shown.c_str(), nullptr, nv == 1 ? 0 : axes[c], nv == 1 ? nullptr : (rgbTrack ? rgbl[c] : xyz[c]), &v);
+            FieldEdit fe = numberField(id, vr, txt.c_str(), nullptr, nv == 1 ? 0 : axes[c], nv == 1 ? nullptr : (rgbTrack ? rgbl[c] : xyz[c]), &v,
+                                       false, mixed);
             nameRect(std::string("timeline.") + id, vr);
             if (fe.changed) {
-                KeyValue nvv = kf.value;
-                nvv[size_t(c)] = v;
-                editor::setKeyValue(doc, m_ref, k, nvv, "timeline.value." + std::to_string(c));
+                std::vector<float> to;
+                if (fe.perValue() || scrubbing(id)) {
+                    const bool drag = !fe.typed.on;
+                    const KeyScrub& from = drag ? scrubStart(id) : KeyScrub{};
+                    for (size_t j = 0; j < keys.size(); ++j) {
+                        const float own = drag ? from.values[j][size_t(c)] : editor::key(doc, m_ref, keys[j])->value[size_t(c)];
+                        to.push_back(ui::eachValue(fe, own, v, -kNoLimit, kNoLimit, false));
+                    }
+                } else {
+                    to.assign(keys.size(), v);
+                }
+                editor::setKeysComponent(doc, m_ref, keys, c, to, "timeline.value." + std::to_string(c));
             }
-            if (fe.done) doc.endMerge();
+            if (fe.done) {
+                doc.endMerge();
+                m_keyScrub = {};
+            }
             x += fw + space::xs;
         }
         x += space::md;
         text(dl, ImVec2(x, cy - 8), f.medium, type::caption, color::textFaint, "CURVE");
         x += measure(f.medium, type::caption, "CURVE").x + space::sm;
-        const int cur = int(kf.interp);
+        const int cur = shown->interpMixed ? -1 : int(shown->interp);
         const int pick = segmented("kinterp", ImVec2(x, cy - 13), {"Linear", "Step", "In", "Out", "In-out"}, cur);
-        if (ImGui::IsItemHovered()) tooltip("The curve from the previous key into this one, as the runtime plays it.");
-        if (pick != cur) editor::setKeyInterp(doc, m_ref, k, splash::Interp(pick));
+        if (ImGui::IsItemHovered())
+            tooltip(shown->interpMixed ? "The curves into these keys differ: pick one for them all."
+                                       : "The curve from the previous key into this one, as the runtime plays it.");
+        if (pick != cur && pick >= 0) editor::setKeysInterp(doc, m_ref, keys, splash::Interp(pick));
     }
     nameRect("timeline.delkey", ImRect(ImVec2(r.Max.x - 36, cy - 13), ImVec2(r.Max.x - 10, cy + 13)));
-    if (iconButton("delkey", ImRect(ImVec2(r.Max.x - 36, cy - 13), ImVec2(r.Max.x - 10, cy + 13)), icon::x, false, "Delete this key (Del)")) {
+    if (iconButton("delkey", ImRect(ImVec2(r.Max.x - 36, cy - 13), ImVec2(r.Max.x - 10, cy + 13)), icon::x, false,
+                   multi ? "Delete these keys (Del)" : "Delete this key (Del)")) {
         editor::deleteSelection(doc, m_ref, m_sel);
         m_sel = {};
     }

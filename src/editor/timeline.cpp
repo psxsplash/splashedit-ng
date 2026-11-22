@@ -7,6 +7,7 @@
 #include <fstream>
 #include <iterator>
 #include <limits>
+#include <map>
 #include <memory>
 #include <set>
 #include <span>
@@ -277,16 +278,21 @@ bool keyOk(const SeqMut& m, KeyRef k) {
 
 bool frameOk(int f) { return f >= 0 && f <= kMaxTimelineFrame; }
 
-// Moves `keys` by `delta` in place; false (the copy half done, so dropped) when
-// one leaves the frame range or lands on a key that stays. `result` gets the
-// keys' new addresses in the order given.
-bool moveKeysIn(SeqMut& m, const std::vector<KeyRef>& keys, int delta, std::vector<KeyRef>& result) {
-    std::set<KeyRef> moving(keys.begin(), keys.end());
-    for (const KeyRef& k : moving)
-        if (!keyOk(m, k)) return false;
+// Puts each of `keys` on its frame in `to` (as `keys`) in place; false (the
+// copy half done, so dropped) when one leaves the frame range, two land on one
+// frame or one lands on a key that stays. `result` gets the keys' new
+// addresses in the order given.
+bool placeKeysIn(SeqMut& m, const std::vector<KeyRef>& keys, const std::vector<int>& to, std::vector<KeyRef>& result) {
+    if (to.size() != keys.size()) return false;
+    std::map<KeyRef, int> moving;
+    for (size_t j = 0; j < keys.size(); ++j) {
+        if (!keyOk(m, keys[j])) return false;
+        const auto [it, fresh] = moving.emplace(keys[j], to[j]);
+        if (!fresh && it->second != to[j]) return false;
+    }
     result.assign(keys.size(), KeyRef{});
     std::set<int> tracksTouched;
-    for (const KeyRef& k : moving) tracksTouched.insert(k.track);
+    for (const auto& [k, f] : moving) tracksTouched.insert(k.track);
     for (int ti : tracksTouched) {
         std::vector<Keyframe>& ks = (*m.tracks)[size_t(ti)].keyframes;
         // Each key with its old index, so the new order can be traced back.
@@ -294,8 +300,8 @@ bool moveKeysIn(SeqMut& m, const std::vector<KeyRef>& keys, int delta, std::vect
         std::multiset<int> frames;
         for (int i = 0; i < int(ks.size()); ++i) {
             Keyframe k = ks[size_t(i)];
-            if (moving.count({ti, i})) {
-                k.frame += delta;
+            if (const auto it = moving.find({ti, i}); it != moving.end()) {
+                k.frame = it->second;
                 if (!frameOk(k.frame)) return false;
             }
             frames.insert(k.frame);
@@ -312,6 +318,16 @@ bool moveKeysIn(SeqMut& m, const std::vector<KeyRef>& keys, int delta, std::vect
         }
     }
     return true;
+}
+
+// Moves `keys` by `delta` in place, as placeKeysIn().
+bool moveKeysIn(SeqMut& m, const std::vector<KeyRef>& keys, int delta, std::vector<KeyRef>& result) {
+    std::vector<int> to;
+    for (const KeyRef& k : keys) {
+        if (!keyOk(m, k)) return false;
+        to.push_back((*m.tracks)[size_t(k.track)].keyframes[size_t(k.key)].frame + delta);
+    }
+    return placeKeysIn(m, keys, to, result);
 }
 
 // The selection's events that exist, each once.
@@ -994,6 +1010,16 @@ std::optional<KeyRef> addKey(Document& doc, SeqRef ref, int track, int frame, st
     return added;
 }
 
+std::optional<KeyRef> keyAtOrAdd(Document& doc, SeqRef ref, int track, int frame) {
+    frame = std::clamp(frame, 0, kMaxTimelineFrame);
+    const std::vector<CutsceneTrack>* tracks = seqTracks(doc, ref);
+    if (!tracks || track < 0 || track >= int(tracks->size())) return std::nullopt;
+    const std::vector<Keyframe>& ks = (*tracks)[size_t(track)].keyframes;
+    for (int k = 0; k < int(ks.size()); ++k)
+        if (ks[size_t(k)].frame == frame) return KeyRef{track, k};
+    return addKey(doc, ref, track, frame);
+}
+
 std::optional<std::vector<KeyRef>> moveKeys(Document& doc, SeqRef ref, const std::vector<KeyRef>& keys, int delta,
                                             const std::string& mergeKey) {
     std::optional<std::vector<KeyRef>> out;
@@ -1264,6 +1290,88 @@ bool setKeyValue(Document& doc, SeqRef ref, KeyRef k, KeyValue value, const std:
         mergeKey);
 }
 
+int keysTrack(const std::vector<KeyRef>& keys) {
+    if (keys.empty()) return -1;
+    for (const KeyRef& k : keys)
+        if (k.track != keys.front().track) return -1;
+    return keys.front().track;
+}
+
+std::optional<KeysShown> keysShown(const Document& doc, SeqRef ref, const std::vector<KeyRef>& keys) {
+    const int track = keysTrack(keys);
+    const std::vector<CutsceneTrack>* tracks = seqTracks(doc, ref);
+    if (track < 0 || !tracks || track >= int(tracks->size())) return std::nullopt;
+    const std::vector<Keyframe>& ks = (*tracks)[size_t(track)].keyframes;
+    KeysShown out;
+    for (size_t j = 0; j < keys.size(); ++j) {
+        if (keys[j].key < 0 || keys[j].key >= int(ks.size())) return std::nullopt;
+        const Keyframe& kf = ks[size_t(keys[j].key)];
+        if (j == 0) {
+            out.frame = kf.frame;
+            out.value = kf.value;
+            out.interp = kf.interp;
+            continue;
+        }
+        out.frameMixed = out.frameMixed || kf.frame != out.frame;
+        for (int c = 0; c < 3; ++c) out.valueMixed[size_t(c)] = out.valueMixed[size_t(c)] || kf.value[size_t(c)] != out.value[size_t(c)];
+        out.interpMixed = out.interpMixed || kf.interp != out.interp;
+    }
+    return out;
+}
+
+std::optional<std::vector<KeyRef>> setKeyFrames(Document& doc, SeqRef ref, const std::vector<KeyRef>& keys, const std::vector<int>& frames,
+                                                const std::string& mergeKey) {
+    std::optional<std::vector<KeyRef>> out;
+    editSeq(
+        doc, ref,
+        [&](SeqMut& m) {
+            if (keys.empty()) return false;
+            bool same = frames.size() == keys.size();
+            for (size_t j = 0; same && j < keys.size(); ++j)
+                same = keyOk(m, keys[j]) && (*m.tracks)[size_t(keys[j].track)].keyframes[size_t(keys[j].key)].frame == frames[j];
+            if (same) return false;
+            std::vector<KeyRef> result;
+            if (!placeKeysIn(m, keys, frames, result)) return false;
+            out = std::move(result);
+            return true;
+        },
+        mergeKey);
+    return out;
+}
+
+bool setKeysComponent(Document& doc, SeqRef ref, const std::vector<KeyRef>& keys, int c, const std::vector<float>& values,
+                      const std::string& mergeKey) {
+    return editSeq(
+        doc, ref,
+        [&](SeqMut& m) {
+            if (keys.empty() || values.size() != keys.size() || c < 0 || c > 2) return false;
+            bool changed = false;
+            for (size_t j = 0; j < keys.size(); ++j) {
+                if (!keyOk(m, keys[j])) return false;
+                float& v = (*m.tracks)[size_t(keys[j].track)].keyframes[size_t(keys[j].key)].value[size_t(c)];
+                if (!std::isfinite(values[j])) return false;
+                changed = changed || v != values[j];
+                v = values[j];
+            }
+            return changed;
+        },
+        mergeKey);
+}
+
+bool setKeysInterp(Document& doc, SeqRef ref, const std::vector<KeyRef>& keys, Interp interp) {
+    return editSeq(doc, ref, [&](SeqMut& m) {
+        if (keys.empty()) return false;
+        bool changed = false;
+        for (const KeyRef& k : keys) {
+            if (!keyOk(m, k)) return false;
+            Keyframe& kf = (*m.tracks)[size_t(k.track)].keyframes[size_t(k.key)];
+            changed = changed || kf.interp != interp;
+            kf.interp = interp;
+        }
+        return changed;
+    });
+}
+
 bool setKeyInterp(Document& doc, SeqRef ref, KeyRef k, Interp interp) {
     return editSeq(doc, ref, [&](SeqMut& m) {
         if (!keyOk(m, k)) return false;
@@ -1284,6 +1392,44 @@ bool setLength(Document& doc, SeqRef ref, int frames, const std::string& mergeKe
             return true;
         },
         mergeKey);
+}
+
+int frameUnder(float x, float x0, float view0, float ppf) {
+    const float f = view0 + (x - x0) / std::max(ppf, 1e-6f);
+    if (!std::isfinite(f)) return 0;
+    return int(std::lround(std::clamp(f, 0.0f, float(kMaxTimelineFrame))));
+}
+
+namespace {
+TimelineView clampView(TimelineView v, float pad) {
+    // ppf as it is: a fit to a short sequence may be past the zoom range.
+    if (!std::isfinite(v.ppf) || v.ppf < kMinTimelinePpf) v.ppf = kMinTimelinePpf;
+    if (!std::isfinite(v.view0)) v.view0 = 0;
+    v.view0 = std::clamp(v.view0, -pad / v.ppf, float(kMaxTimelineFrame));
+    return v;
+}
+}  // namespace
+
+TimelineView zoomView(TimelineView v, float factor, float x, float x0, float pad) {
+    const float at = v.view0 + (x - x0) / std::max(v.ppf, 1e-6f);
+    TimelineView out = v;
+    out.ppf = std::clamp(v.ppf * factor, kMinTimelinePpf, kMaxTimelinePpf);
+    if (!std::isfinite(out.ppf)) out.ppf = v.ppf;
+    out.view0 = at - (x - x0) / out.ppf;
+    return clampView(out, pad);
+}
+
+TimelineView panView(TimelineView v, float px, float pad) {
+    v.view0 += px / std::max(v.ppf, 1e-6f);
+    return clampView(v, pad);
+}
+
+std::optional<PreviewEye> previewEye(const Preview& p, splash::Vec3 eye, splash::Vec3 forward, int h) {
+    if (!p.cameraPosition && !p.cameraRotation && !p.cameraH) return std::nullopt;
+    PreviewEye e{p.cameraPosition.value_or(eye), forward, h};
+    if (p.cameraRotation) e.forward = splash::normalized(splash::rotate(quatEuler(*p.cameraRotation), {0, 0, 1}));
+    if (p.cameraH) e.h = std::isfinite(*p.cameraH) ? int(std::lround(std::clamp(*p.cameraH, 1.0f, 1024.0f))) : h;
+    return e;
 }
 
 // Sampling: psxsplash's interpolation.cpp in floating point.
