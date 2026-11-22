@@ -365,8 +365,8 @@ void AssetBrowser::header(ImDrawList* dl, ImRect h) {
     for (int i = 1; i < editor::kAssetTypes; ++i)
         if (m_types == (1u << static_cast<unsigned>(typeOf[i]))) current = i;
     ImRect tf(ImVec2(x - 132, h.Min.y + 5), ImVec2(x, h.Max.y - 5));
-    // Its list opens above: the panel sits at the bottom of the window.
     dropdown("typefilter", tf, nullptr, typeNames[current]);
+    nameRect("project.typefilter", tf);  // scripted tests
     if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) ImGui::OpenPopup("##typefilter");
     if (ImGui::IsPopupOpen("##typefilter")) {
         std::vector<MenuItem> items;
@@ -378,15 +378,17 @@ void AssetBrowser::header(ImDrawList* dl, ImRect h) {
         float mw, mh;
         menuSize(items, &mw, &mh);
         mw = std::max(mw, tf.GetWidth());
-        ImGui::SetNextWindowPos(ImVec2(tf.Max.x - mw, std::max(space::xs, tf.Min.y - space::xs - mh)));
-        ImGui::SetNextWindowSize(ImVec2(mw, mh));
+        // Under the field, its right edge on the field's; above it when there
+        // is no room below (the docked panel sits at the bottom of the
+        // window), and no taller than the window, its rows scrolling.
+        placeMenu(ImVec2(tf.Max.x - mw, tf.Max.y + space::xs), ImVec2(tf.Max.x, tf.Min.y - space::xs), mw, &mh);
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
         ImGui::PushStyleVar(ImGuiStyleVar_PopupBorderSize, 0.0f);
         const bool shown = ImGui::BeginPopup("##typefilter", ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoDecoration |
                                                                  ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
         ImGui::PopStyleVar(2);
         if (shown) {
-            std::function<void()> run = menuRows(items, mw, mh);
+            std::function<void()> run = menuRows(items, mw, mh, "project.types");
             if (run || ImGui::IsKeyPressed(ImGuiKey_Escape, false)) ImGui::CloseCurrentPopup();
             ImGui::EndPopup();
             if (run) run();
