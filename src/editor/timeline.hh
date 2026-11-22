@@ -248,6 +248,34 @@ int addSkinEvent(Document& doc, SeqRef ref, int frame, const std::string& object
 bool setSkinEvent(Document& doc, SeqRef ref, int index, splash::SkinAnimEvent ev, const std::string& mergeKey = {});
 bool setKeyValue(Document& doc, SeqRef ref, KeyRef k, KeyValue value, const std::string& mergeKey = {});
 bool setKeyInterp(Document& doc, SeqRef ref, KeyRef k, splash::Interp interp);
+
+// Several keys of one track edited together (#375). The track every key in
+// `keys` is on, or -1: none, or keys on different tracks.
+int keysTrack(const std::vector<KeyRef>& keys);
+// What the key row shows for keys on one track: the first key's frame, value
+// and curve, each marked mixed where another key differs. nullopt for keys on
+// different tracks (or a bad address).
+struct KeysShown {
+    int frame = 0;
+    KeyValue value{};
+    splash::Interp interp = splash::Interp::Linear;
+    bool frameMixed = false;
+    std::array<bool, 3> valueMixed{};
+    bool interpMixed = false;
+};
+std::optional<KeysShown> keysShown(const Document& doc, SeqRef ref, const std::vector<KeyRef>& keys);
+// Puts each of `keys` on its own frame in `frames` (as `keys`), one step.
+// Refused (nullopt, no step) when nothing moves, one would leave
+// 0..kMaxTimelineFrame, two would share a frame, or one would land on a key
+// that stays. Returns the keys' new addresses in the order given. Merges as
+// moveKeys() does.
+std::optional<std::vector<KeyRef>> setKeyFrames(Document& doc, SeqRef ref, const std::vector<KeyRef>& keys, const std::vector<int>& frames,
+                                                const std::string& mergeKey = {});
+// Value component `c` (0..2) of each of `keys` to its own entry of `values`, one step (merging by `mergeKey`).
+bool setKeysComponent(Document& doc, SeqRef ref, const std::vector<KeyRef>& keys, int c, const std::vector<float>& values,
+                      const std::string& mergeKey = {});
+// Every key's curve to `interp`, one step.
+bool setKeysInterp(Document& doc, SeqRef ref, const std::vector<KeyRef>& keys, splash::Interp interp);
 // Clamped to 1..kMaxTimelineFrame. Keys past the end stay (the runtime stops
 // at the length; they show greyed).
 bool setLength(Document& doc, SeqRef ref, int frames, const std::string& mergeKey = {});

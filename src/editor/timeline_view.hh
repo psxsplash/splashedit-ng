@@ -146,6 +146,15 @@ private:
     // A drag of the selection: the frame under the mouse when it started and
     // the whole frames applied so far.
     bool m_dragging = false;
+    // A drag on a key row field with several keys: the field, the keys and
+    // each one's frame and value when it began (#375).
+    struct KeyScrub {
+        std::string field;
+        std::vector<editor::KeyRef> keys;
+        std::vector<int> frames;
+        std::vector<editor::KeyValue> values;
+    };
+    KeyScrub m_keyScrub;
     // A middle-mouse drag panning the lanes.
     bool m_panning = false;
     float m_dragFrom = 0;

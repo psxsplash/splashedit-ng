@@ -10174,6 +10174,76 @@ void testTimelinePreviewEye() {
     CHECK(pe && std::fabs(pe->eye.x - 3) < 1e-2f && near(pe->forward, look) && pe->h == 120);
 }
 
+// Several keys of one track edit together in the key row (#375): keysShown
+// marks each field mixed where they differ, a typed "+3" works on each key's
+// value and frame from its own, and each edit is one undo step. Keys across
+// tracks have no shared row.
+void testTimelineMultiKeyEdit() {
+    using splash::TrackType;
+    using editor::KeyRef;
+    splash::Scene sc;
+    splash::Cutscene cs;
+    cs.name = "intro";
+    cs.tracks.push_back(trackOf(TrackType::ObjectPosition, {{10, 1}, {20, 2}, {30, 3}}));
+    cs.tracks.push_back(trackOf(TrackType::ObjectPosition, {{10, 5}}));
+    sc.cutscenes.push_back(cs);
+    editor::Document d;
+    d.reset(sc);
+    const editor::SeqRef ref{editor::SeqKind::Cutscene, 0};
+    const auto& ks = editor::seqTracks(d, ref)->at(0).keyframes;
+
+    CHECK(editor::keysTrack({{0, 0}, {0, 2}}) == 0 && editor::keysTrack({{0, 0}, {1, 0}}) == -1 && editor::keysTrack({}) == -1);
+    CHECK(!editor::keysShown(d, ref, {{0, 0}, {1, 0}}));
+    const std::vector<KeyRef> sel{{0, 0}, {0, 2}};
+    auto shown = editor::keysShown(d, ref, sel);
+    CHECK(shown && shown->frame == 10 && shown->frameMixed && shown->value[0] == 1);
+    CHECK(shown->valueMixed[0] && shown->valueMixed[1] && !shown->valueMixed[2] && !shown->interpMixed);
+    const auto one = editor::keysShown(d, ref, {{0, 1}});
+    CHECK(one && one->frame == 20 && !one->frameMixed && !one->valueMixed[0]);
+
+    // "+3" typed into the mixed X field: 1 and 3 become 4 and 6, one step.
+    float typed = 0;
+    ui::Relative rel;
+    CHECK(ui::evalNumber("+3", shown->value[0], typed, &rel) && rel.on);
+    std::vector<float> xs;
+    for (const KeyRef& k : sel) xs.push_back(ui::relativeTo(editor::key(d, ref, k)->value[0], rel, -1e9f, 1e9f, false));
+    CHECK(editor::setKeysComponent(d, ref, sel, 0, xs, "timeline.value.0"));
+    d.endMerge();
+    CHECK(ks[0].value[0] == 4 && ks[2].value[0] == 6 && ks[1].value[0] == 2 && ks[0].value[1] == 2 && d.historySize() == 1);
+    // The same values again: no change, no step.
+    CHECK(!editor::setKeysComponent(d, ref, sel, 0, xs));
+    CHECK(d.historySize() == 1);
+
+    // "+3" into the mixed frame field: 10 and 30 become 13 and 33, one step.
+    std::vector<int> fs;
+    for (const KeyRef& k : sel) fs.push_back(int(ui::relativeTo(float(editor::key(d, ref, k)->frame), rel, 0, editor::kMaxTimelineFrame, true)));
+    auto moved = editor::setKeyFrames(d, ref, sel, fs, "timeline.kframe");
+    d.endMerge();
+    CHECK(moved && *moved == sel && ks[0].frame == 13 && ks[2].frame == 33 && ks[1].frame == 20 && d.historySize() == 2);
+    // A drag merges: frames step by step under one merge key are one step.
+    CHECK(editor::setKeyFrames(d, ref, sel, {14, 34}, "timeline.kframe") && editor::setKeyFrames(d, ref, sel, {15, 35}, "timeline.kframe"));
+    d.endMerge();
+    CHECK(ks[0].frame == 15 && ks[2].frame == 35 && d.historySize() == 3);
+    // Past the key that stays: the order changes, the addresses follow.
+    moved = editor::setKeyFrames(d, ref, sel, {25, 35});
+    CHECK(moved && (*moved == std::vector<KeyRef>{{0, 1}, {0, 2}}) && ks[0].frame == 20 && ks[1].frame == 25 && ks[1].value[0] == 4);
+    CHECK(d.historySize() == 4);
+    // Refused, no step: onto the key that stays, two on one frame, out of range.
+    CHECK(!editor::setKeyFrames(d, ref, *moved, {20, 40}) && !editor::setKeyFrames(d, ref, *moved, {40, 40}));
+    CHECK(!editor::setKeyFrames(d, ref, *moved, {-1, 35}) && !editor::setKeyFrames(d, ref, *moved, {25, 35}));
+    CHECK(d.historySize() == 4 && ks[1].frame == 25 && ks[2].frame == 35);
+
+    // One curve for them all, one step; then not mixed.
+    CHECK(editor::setKeysInterp(d, ref, *moved, splash::Interp::Step) && d.historySize() == 5);
+    CHECK(ks[1].interp == splash::Interp::Step && ks[2].interp == splash::Interp::Step && ks[0].interp == splash::Interp::Linear);
+    shown = editor::keysShown(d, ref, *moved);
+    CHECK(shown && !shown->interpMixed && shown->interp == splash::Interp::Step);
+    const auto mix = editor::keysShown(d, ref, {{0, 0}, {0, 1}});  // Linear and Step
+    CHECK(mix && mix->interpMixed);
+    // Undo takes the whole multi-key edits back one at a time.
+    CHECK(d.undo() && ks[1].interp == splash::Interp::Linear && ks[2].interp == splash::Interp::Linear);
+}
+
 // Copy and paste at the scrub head: keys land in the track with their type
 // and target, events come along, one step; limits refuse the whole paste.
 void testTimelineClipboard() {
@@ -22699,6 +22769,7 @@ int main(int argc, char** argv) {
     testTimelineKeyAtClick();
     testTimelineZoomPan();
     testTimelinePreviewEye();
+    testTimelineMultiKeyEdit();
     testTimelineClipboard();
     testTimelineEvents();
     testSeqRenameLua();
