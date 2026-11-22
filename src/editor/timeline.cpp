@@ -1302,6 +1302,30 @@ int frameUnder(float x, float x0, float view0, float ppf) {
     return int(std::lround(std::clamp(f, 0.0f, float(kMaxTimelineFrame))));
 }
 
+namespace {
+TimelineView clampView(TimelineView v, float pad) {
+    // ppf as it is: a fit to a short sequence may be past the zoom range.
+    if (!std::isfinite(v.ppf) || v.ppf < kMinTimelinePpf) v.ppf = kMinTimelinePpf;
+    if (!std::isfinite(v.view0)) v.view0 = 0;
+    v.view0 = std::clamp(v.view0, -pad / v.ppf, float(kMaxTimelineFrame));
+    return v;
+}
+}  // namespace
+
+TimelineView zoomView(TimelineView v, float factor, float x, float x0, float pad) {
+    const float at = v.view0 + (x - x0) / std::max(v.ppf, 1e-6f);
+    TimelineView out = v;
+    out.ppf = std::clamp(v.ppf * factor, kMinTimelinePpf, kMaxTimelinePpf);
+    if (!std::isfinite(out.ppf)) out.ppf = v.ppf;
+    out.view0 = at - (x - x0) / out.ppf;
+    return clampView(out, pad);
+}
+
+TimelineView panView(TimelineView v, float px, float pad) {
+    v.view0 += px / std::max(v.ppf, 1e-6f);
+    return clampView(v, pad);
+}
+
 // Sampling: psxsplash's interpolation.cpp in floating point.
 
 float applyCurve(float t, Interp mode) {

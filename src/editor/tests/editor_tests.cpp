@@ -10107,6 +10107,32 @@ void testTimelineKeyAtClick() {
     CHECK(editor::keyAtOrAdd(d, ref, 0, 99999)->key == 3 && ks.back().frame == editor::kMaxTimelineFrame);
 }
 
+// The zoom buttons and Ctrl+wheel (#375): zoomView keeps the frame under
+// the anchor pixel where it is and holds the zoom range; panView moves the
+// view by pixels and keeps view0 in -pad/ppf..kMaxTimelineFrame.
+void testTimelineZoomPan() {
+    using editor::TimelineView;
+    auto near = [](float a, float b) { return std::fabs(a - b) < 1e-3f; };
+    // Frame 20 at pixel 500, 4 pixels a frame: frame 45 at 600. Zoom x2 about 600: still 45 there.
+    const TimelineView z = editor::zoomView({20, 4}, 2, 600, 500, 12);
+    CHECK(near(z.ppf, 8) && near(z.view0 + (600 - 500) / z.ppf, 45));
+    // Zoom out about the same pixel: back where it was.
+    const TimelineView back = editor::zoomView(z, 0.5f, 600, 500, 12);
+    CHECK(near(back.ppf, 4) && near(back.view0, 20));
+    // The range holds at both ends.
+    CHECK(near(editor::zoomView({0, 30}, 10, 500, 500, 12).ppf, editor::kMaxTimelinePpf));
+    CHECK(near(editor::zoomView({0, 0.3f}, 0.01f, 500, 500, 12).ppf, editor::kMinTimelinePpf));
+    // Zooming out about a pixel near frame 0 cannot put the view far left of frame 0: -pad/ppf at most.
+    const TimelineView left = editor::zoomView({0, 4}, 0.5f, 900, 500, 12);
+    CHECK(near(left.ppf, 2) && near(left.view0, -6));
+    // Pan: 40 pixels right at 4 a frame is 10 frames; left of frame 0 stops at -pad/ppf, the end at the max frame.
+    CHECK(near(editor::panView({20, 4}, 40, 12).view0, 30) && near(editor::panView({20, 4}, 40, 12).ppf, 4));
+    CHECK(near(editor::panView({20, 4}, -4000, 12).view0, -3));
+    CHECK(near(editor::panView({8000, 4}, 4000, 12).view0, float(editor::kMaxTimelineFrame)));
+    // A fit past the zoom range keeps its zoom when panned.
+    CHECK(near(editor::panView({0, 60}, 60, 12).ppf, 60) && near(editor::panView({0, 60}, 60, 12).view0, 1));
+}
+
 // Copy and paste at the scrub head: keys land in the track with their type
 // and target, events come along, one step; limits refuse the whole paste.
 void testTimelineClipboard() {
@@ -22630,6 +22656,7 @@ int main(int argc, char** argv) {
     testTimelinePreviewMore();
     testTimelineSelection();
     testTimelineKeyAtClick();
+    testTimelineZoomPan();
     testTimelineClipboard();
     testTimelineEvents();
     testSeqRenameLua();

@@ -256,6 +256,19 @@ bool setLength(Document& doc, SeqRef ref, int frames, const std::string& mergeKe
 // a frame. The whole frame under pixel `x`: the nearest, 0..kMaxTimelineFrame
 // (where a double-click keys).
 int frameUnder(float x, float x0, float view0, float ppf);
+// The lanes' zoom range, pixels a frame.
+constexpr float kMinTimelinePpf = 0.2f, kMaxTimelinePpf = 40.0f;
+struct TimelineView {
+    float view0 = 0;  // the frame at pixel x0
+    float ppf = 6;
+};
+// The view zoomed by `factor` (ppf clamped to the range) keeping the frame
+// under pixel `x` where it is: Ctrl+wheel about the mouse, the zoom buttons
+// about the scrub head. `pad` is the lanes' margin left of frame 0.
+TimelineView zoomView(TimelineView v, float factor, float x, float x0, float pad);
+// The view panned `px` pixels right (the frames move left), as the wheel and a
+// middle-mouse drag do: view0 stays in -pad/ppf..kMaxTimelineFrame.
+TimelineView panView(TimelineView v, float px, float pad);
 
 // Sampling, in the track's own units. `frame` may be fractional (a sub-frame).
 // As the runtime: before the first key the track blends from `initial` (the

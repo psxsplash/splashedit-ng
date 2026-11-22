@@ -109,6 +109,11 @@ private:
     int m_menuTrack = -1;
     float xOf(float frame) const;
     float frameAt(float x) const;
+    editor::TimelineView view() const { return {m_view0, m_ppf}; }
+    void setView(editor::TimelineView v) {
+        m_view0 = v.view0;
+        m_ppf = v.ppf;
+    }
     void fit(int length);
     void validate(const editor::Document& doc);
 

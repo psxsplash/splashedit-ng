@@ -23,6 +23,8 @@ using splash::TrackType;
 namespace {
 
 constexpr float kHeaderH = 46, kRulerH = 26, kLaneH = 40, kKeyRowH = 46, kLabelW = 240, kDiamond = 6, kPad = 12;
+// One wheel notch of zoom; the buttons take two.
+constexpr float kZoomStep = 1.2f;
 // A drag past the lanes' edge scrolls this many pixels a second, plus the gain per pixel out, up to the max.
 constexpr float kAutoScrollBase = 240, kAutoScrollGain = 8, kAutoScrollMax = 2400;
 
@@ -455,6 +457,17 @@ void TimelinePanel::header(ImDrawList* dl, ImRect r, editor::Document& doc) {
     if (iconButton("fit", ImRect(ImVec2(rx - 28, cy - 13), ImVec2(rx, cy + 13)), icon::maximize, false,
                    "Fit the whole length in the panel (Ctrl+wheel zooms, wheel scrolls)"))
         m_fitPending = true;
+    rx -= 28 + 2;
+    // Zoom out and in, about the scrub head while it is in view, else the lanes' middle.
+    const float headX = xOf(m_frame);
+    const float zoomAt = headX >= m_bodyX0 && headX <= m_bodyX1 ? headX : (m_bodyX0 + m_bodyX1) / 2;
+    if (iconButton("zoomin", ImRect(ImVec2(rx - 28, cy - 13), ImVec2(rx, cy + 13)), icon::zoomIn, false,
+                   "Zoom in (Ctrl+wheel zooms about the mouse)"))
+        setView(editor::zoomView(view(), kZoomStep * kZoomStep, zoomAt, m_bodyX0, kPad));
+    rx -= 28 + 2;
+    if (iconButton("zoomout", ImRect(ImVec2(rx - 28, cy - 13), ImVec2(rx, cy + 13)), icon::zoomOut, false,
+                   "Zoom out (Ctrl+wheel zooms about the mouse)"))
+        setView(editor::zoomView(view(), 1 / (kZoomStep * kZoomStep), zoomAt, m_bodyX0, kPad));
     rx -= 28 + space::sm;
     const char* addLabel = "Add track";
     const float aw = space::md * 2 + measure(f.medium, type::icon, icon::plus).x + space::sm - 2 + measure(f.medium, type::body, addLabel).x;
@@ -747,16 +760,12 @@ void TimelinePanel::lanes(ImDrawList* dl, ImRect labels, ImRect body, editor::Do
     const ImRect rulerArea(ImVec2(body.Min.x, body.Min.y - kRulerH), body.Max);
     if ((area.Contains(io.MousePos) || rulerArea.Contains(io.MousePos)) && io.MouseWheel != 0 &&
         ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem)) {
-        if (io.KeyCtrl) {
-            const float at = frameAt(io.MousePos.x);
-            m_ppf = std::clamp(m_ppf * std::pow(1.2f, io.MouseWheel), 0.2f, 40.0f);
-            m_view0 = at - (io.MousePos.x - m_bodyX0) / m_ppf;
-        } else if (io.KeyShift || maxScroll <= 0) {
-            m_view0 -= io.MouseWheel * 40 / m_ppf;
-        } else {
+        if (io.KeyCtrl)
+            setView(editor::zoomView(view(), std::pow(kZoomStep, io.MouseWheel), io.MousePos.x, m_bodyX0, kPad));
+        else if (io.KeyShift || maxScroll <= 0)
+            setView(editor::panView(view(), -io.MouseWheel * 40, kPad));
+        else
             m_scrollY -= io.MouseWheel * kLaneH;
-        }
-        m_view0 = std::clamp(m_view0, -kPad / m_ppf, float(editor::kMaxTimelineFrame));
     }
     if (io.MouseWheelH != 0 && area.Contains(io.MousePos)) m_view0 = std::max(0.0f, m_view0 - io.MouseWheelH * 40 / m_ppf);
     // Dragging keys or a box past the left or right of the lanes scrolls them,
@@ -765,8 +774,7 @@ void TimelinePanel::lanes(ImDrawList* dl, ImRect labels, ImRect body, editor::Do
         const float out = io.MousePos.x < body.Min.x ? io.MousePos.x - body.Min.x : io.MousePos.x > body.Max.x ? io.MousePos.x - body.Max.x : 0;
         if (out != 0) {
             const float pxPerSec = std::min(kAutoScrollMax, kAutoScrollBase + kAutoScrollGain * std::fabs(out));
-            m_view0 += std::copysign(pxPerSec, out) * io.DeltaTime / m_ppf;
-            m_view0 = std::clamp(m_view0, -kPad / m_ppf, float(editor::kMaxTimelineFrame));
+            setView(editor::panView(view(), std::copysign(pxPerSec, out) * io.DeltaTime, kPad));
         }
     }
     m_scrollY = std::clamp(m_scrollY, 0.0f, maxScroll);

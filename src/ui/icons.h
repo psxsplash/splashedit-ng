@@ -74,6 +74,8 @@ inline constexpr const char* imageDown = "\xee\x94\xbc";       // e53c
 inline constexpr const char* panelTop = "\xee\x90\xb5";        // e435
 inline constexpr const char* appWindow = "\xee\x90\xa6";       // e426
 inline constexpr const char* memoryStick = "\xee\x91\x85";     // e445
+inline constexpr const char* zoomIn = "\xee\x86\xb6";          // e1b6
+inline constexpr const char* zoomOut = "\xee\x86\xb7";         // e1b7
 
 // The Scale row's lock (#264): one chain in two states, whole while the
 // proportions are kept (on), broken while each axis scales alone (off).
