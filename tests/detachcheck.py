@@ -19,6 +19,13 @@
 #    the others (no hole), its Attach puts it back where it was.
 #  - --in <panel> with --ctrl-held: a Ctrl-click in the Scene's window adds to
 #    the selection there (the click lands in that window, with Ctrl).
+#  - View > Panels > Scene View in Own Window: the 3D view draws the scene in
+#    its own window (not blank), a click on a marker there selects, its move
+#    gizmo drags, its shortcuts save, a model dropped on it lands where the
+#    pointer meets the scene there; the main window gives the Scene tab's
+#    room to the bottom dock (no hole), to the Game view while a game runs,
+#    or with neither says where it went. Closed or Attach, it comes back where
+#    it was; out or not and where are saved (view_detached=, view_window=).
 # Detached windows are written beside each screenshot as <shot>-<panel>.png.
 # usage: python3 detachcheck.py <splashedit> [screenshot prefix]   (needs a display: xvfb-run -a)
 import os, shutil, stat, struct, subprocess, sys, tempfile, zlib
@@ -100,7 +107,9 @@ def has_bars(cs):
 
 
 def run(name, args, cfg_text=None, play=True):
+    global last_project
     project = os.path.join(tempfile.mkdtemp(), 'p')
+    last_project = project
     shutil.copytree(example, project)
     settings = os.path.join(work, name + '.cfg')
     if cfg_text is not None:
@@ -143,6 +152,7 @@ def main_controls(c):
 
 # 0. Never detached: the layout to come back to.
 lines, base_c, cfg, _ = run('base', [])
+split_c = base_c
 check('base: the Game view is beside the Scene tab', 'game.frame' in base_c and 'viewport.split' in base_c, sorted(k for k in base_c if k.startswith('game.')))
 
 # 1. Out: a second window with the game in it, the Scene tab takes the room; the keyboard follows the focus; closed, back.
@@ -273,6 +283,96 @@ lines, c, cfg, shot = run('ctrl', detach('Scene') + ['--in', 'scene', '--click',
                                                      '--in', 'scene', '--ctrl-held', '--click', '@tree.Fill', '--wait', '10'], play=False)
 sel = [l for l in lines if l.startswith('selection: ')]
 check('ctrl: Ctrl-click in the Scene\'s window added to the selection', bool(sel) and sel[-1] == 'selection: 2 primary=Fill all=Crate;Fill', sel)
+
+# 8. The Scene view (the 3D viewport) out in its own window.
+def object_pos(project, name):
+    import json
+    def find(objs):
+        for o in objs:
+            if o.get('name') == name: return o['transform']['position']
+            got = find(o.get('children', []))
+            if got: return got
+    return find(json.load(open(os.path.join(project, 'courtyard.scene')))['objects'])
+
+
+torch0 = object_pos(example, 'Torch Light')
+lines, c, cfg, shot = run('view-out', detach('Scene View') + ['--in', 'view', '--click', '@vp.marker.Torch Light', '--wait', '10',
+                                                              '--in', 'view', '--drag', '@vp.move.y,0,0,0,-50', '--wait', '10',
+                                                              '--in', 'view', '--key', 'ctrl+s', '--wait', '10', '--shot', '{mid}'], play=False)
+check('view-out: it went out', 'detach: view out' in lines and
+      any(l.startswith('panel window view: opened ') and l.endswith(' raised') for l in lines),
+      [l for l in lines if l.startswith('detach') or l.startswith('panel window')])
+check('view-out: its window draws the Scene view', any(l.startswith('window: view drawn ') and l.endswith(' scene') for l in lines) and
+      all('view:' + k in c for k in ('vp.view', 'view.attach', 'vp.camera')), sorted(k for k in c if k.startswith('view:'))[:8])
+vpng = shot + '-mid-view.png'
+if os.path.exists(vpng) and 'view:vp.view' in c:
+    x0, y0, x1, y1 = c['view:vp.view']
+    cs = colours(vpng, (x0 + 20, y0 + 160, x1 - 20, y1 - 50), 2)
+    check('view-out: its window renders the scene (not blank)', len(cs) >= 40, len(cs))
+else:
+    check('view-out: its window was written', False, vpng)
+sel = [l for l in lines if l.startswith('selection: ')]
+check('view-out: a click on a marker in its window selects', 'selection: 1 primary=Torch Light all=Torch Light' in sel, sel)
+torch = object_pos(last_project, 'Torch Light')
+check('view-out: its move gizmo dragged the light up, Ctrl+S there saved', bool(torch) and torch[1] > torch0[1] + 0.05 and
+      abs(torch[0] - torch0[0]) < 1e-3 and abs(torch[2] - torch0[2]) < 1e-3, (torch0, torch))
+check('view-out: gone from the main window', 'vp.view' not in c and 'view.away' not in c, sorted(k for k in c if ':' not in k and k.startswith('vp'))[:6])
+b, a = plain_c.get('vp.view'), c.get('tab_project')
+check('view-out: the Project panel takes the Scene tab\'s room (no hole)', bool(a and b) and abs(a[1] - b[1]) <= 2, (b, a))
+check('view-out: saved out', 'view_detached=1\n' in cfg and 'view_window=' in cfg, cfg)
+
+lines, c, cfg, shot = run('view-close', detach('Scene View') + ['--close-window', 'view', '--wait', '30'], play=False)
+check('view-close: closing its window put it back', 'detach: view back' in lines and 'panel window view: closed' in lines,
+      [l for l in lines if l.startswith('detach') or l.startswith('panel window view')])
+mc, mb = main_controls(c), main_controls(plain_c)
+moved = sorted(k for k in set(mc) | set(mb) if mc.get(k) != mb.get(k))
+check('view-close: back, the main window\'s controls are where they were', not moved, [(k, mb.get(k), mc.get(k)) for k in moved][:8])
+check('view-close: saved back, with where its window was', 'view_detached=0\n' in cfg and 'view_window=' in cfg, cfg)
+
+lines, c, cfg, shot = run('view-back', ['--wait', '10', '--shot', '{mid}', '--in', 'view', '--click', '@view.attach', '--wait', '30'],
+                          'view_detached=1\nview_window=40,50,620,500\n', play=False)
+check('view-back: saved out, it opened at the saved size', any(l.startswith('panel window view: opened 620x500') for l in lines),
+      [l for l in lines if l.startswith('panel window view')])
+vpng = shot + '-mid-view.png'
+check('view-back: its window was written, not blank', os.path.exists(vpng) and len(colours(vpng)) >= 40, vpng)
+check('view-back: Attach put it back', 'detach: view back' in lines and 'panel window view: attached' in lines,
+      [l for l in lines if l.startswith('detach') or l.startswith('panel window view')])
+mc = main_controls(c)
+moved = sorted(k for k in set(mc) | set(mb) if mc.get(k) != mb.get(k))
+check('view-back: back, the main window\'s controls are where they were', not moved, [(k, mb.get(k), mc.get(k)) for k in moved][:8])
+check('view-back: saved back, with where its window was', 'view_detached=0\n' in cfg and 'view_window=40,50,620,500\n' in cfg, cfg)
+
+# A model released on its window lands where the pointer meets the scene
+# there (on the floor below the middle), as a drop on the main window's would.
+box = os.path.join(work, 'dropbox.obj')
+with open(box, 'w') as fh:
+    fh.write('v -0.25 0 -0.25\nv 0.25 0 -0.25\nv 0.25 0.5 -0.25\nv -0.25 0.5 -0.25\n'
+             'v -0.25 0 0.25\nv 0.25 0 0.25\nv 0.25 0.5 0.25\nv -0.25 0.5 0.25\n'
+             'f 1 2 3 4\nf 5 8 7 6\nf 1 5 6 2\nf 4 3 7 8\nf 1 4 8 5\nf 2 6 7 3\n')
+lines, c, cfg, shot = run('view-drop', ['--wait', '10', '--in', 'view', '--drop-now', box + '@@vp.view,0,180', '--wait', '5', '--wait-import',
+                                        '--wait', '10', '--in', 'view', '--key', 'ctrl+s', '--wait', '10'],
+                          'view_detached=1\nview_window=40,50,960,640\n', play=False)
+dropped = object_pos(last_project, 'dropbox')
+check('view-drop: the model dropped on its window was added', dropped is not None,
+      [l for l in lines if 'import' in l.lower()][-4:])
+check('view-drop: where the pointer met the floor there', dropped is not None and abs(dropped[1]) < 0.3 and
+      (abs(dropped[0]) > 1e-3 or abs(dropped[2]) > 1e-3), dropped)
+
+# Out while a game runs: the game takes the whole Scene tab, no split.
+lines, c, cfg, shot = run('view-game', [], 'view_detached=1\nview_window=40,50,620,500\n')
+g, g0 = c.get('game.frame'), split_c.get('game.frame')
+check('view-game: the Game view takes the Scene tab\'s room, no split', 'viewport.split' not in c and bool(g and g0) and
+      (g[2] - g[0]) * (g[3] - g[1]) > (g0[2] - g0[0]) * (g0[3] - g0[1]), (g0, g))
+check('view-game: its window still draws the scene', any(l.startswith('window: view drawn ') for l in lines) and 'view:vp.view' in c,
+      [l for l in lines if l.startswith('window: view')][:2])
+
+# Out with the Project panel out too and no game: nothing else for the room, a
+# note where the Scene view went, whose Attach brings it back.
+lines, c, cfg, shot = run('view-away', ['--wait', '10', '--shot', '{mid}', '--click', '@view.away.attach', '--wait', '30'],
+                          'view_detached=1\nproject_detached=1\n', play=False)
+check('view-away: the note fills the Scene tab\'s room', 'detach: view back' in lines,
+      [l for l in lines if l.startswith('detach') or l.startswith('@')])
+check('view-away: back in the main window', 'vp.view' in c and 'view.away' not in c, sorted(k for k in c if k.startswith('v'))[:6])
 
 print('detachcheck: %d failure(s)' % fails if fails else 'detachcheck: all passed')
 sys.exit(1 if fails else 0)

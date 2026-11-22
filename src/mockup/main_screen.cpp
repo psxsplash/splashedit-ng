@@ -1130,6 +1130,8 @@ static int g_menuIgnoreClick = -1;
 // Project and Timeline tabs leave it while out in their own windows (#345).
 static bool projectOut(const State& st) { return st.play.tools.projectWindow.detached; }
 static bool timelineOut(const State& st) { return st.play.tools.timelineWindow.detached; }
+// The Scene view (the 3D viewport) out in its own window (#345).
+static bool viewOut(const State& st) { return st.play.tools.viewWindow.detached; }
 static bool timelineDocked(const State& st) { return st.timeline.open && !timelineOut(st); }
 static bool timelineInFront(const State& st) { return timelineDocked(st) && st.bottomTab == State::BottomTab::Timeline; }
 static bool frameInFront(const State& st) { return st.frame.open && st.bottomTab == State::BottomTab::Frame; }
@@ -3892,8 +3894,8 @@ static std::vector<MenuEntry> menuEntries(int which, State& st, editor::Document
                 panels.push_back(item("Game View in Own Window", "", true, [&] {
                     setPanelDetached(st, editor::DetachPanel::Game, !st.play.tools.gameWindow.detached);
                 }, st.play.tools.gameWindow.detached));
-                for (const editor::DetachPanel panel : {editor::DetachPanel::Scene, editor::DetachPanel::Inspector, editor::DetachPanel::Project,
-                                                        editor::DetachPanel::Timeline}) {
+                for (const editor::DetachPanel panel : {editor::DetachPanel::View, editor::DetachPanel::Scene, editor::DetachPanel::Inspector,
+                                                        editor::DetachPanel::Project, editor::DetachPanel::Timeline}) {
                     const bool out = st.play.tools.window(panel).detached;
                     panels.push_back(item(std::string(editor::detachPanelTitle(panel)) + " in Own Window", "", true,
                                      [&st, panel, out] { setPanelDetached(st, panel, !out); }, out));
@@ -4237,6 +4239,14 @@ static void importPending(State& st, editor::Document& doc, const viewport::Ps1V
             to.under = row;
         else if (st.viewportRect.GetWidth() > 0 && st.viewportRect.Contains(pos))
             to.at = dropPoint(view, st.viewportRect, pos);
+        importModelFile(st, doc, view, file, to);
+    }
+    // On the Scene view out in its own window: where the pointer met the scene there.
+    std::vector<std::pair<std::string, ImVec2>> viewFiles;
+    viewFiles.swap(st.drop.viewFiles);
+    for (const auto& [file, pos] : viewFiles) {
+        ModelTarget to;
+        if (st.viewWindowRect.GetWidth() > 0 && st.viewWindowRect.Contains(pos)) to.at = dropPoint(view, st.viewWindowRect, pos);
         importModelFile(st, doc, view, file, to);
     }
 }
@@ -16626,7 +16636,8 @@ static void shortcuts(State& st, editor::Document& doc, std::optional<editor::De
     }
     // Object commands on the selection; the UI tab takes these keys for its
     // elements, and while the Project panel has the keyboard, Delete and F2 are its own.
-    const bool uiTab = st.scripts.uiShown();
+    // (The Scene view's own window is the scene's, whichever tab the main window shows.)
+    const bool uiTab = st.scripts.uiShown() && in != editor::DetachPanel::View;
     const bool assetKeys = in ? *in == editor::DetachPanel::Project : st.assets.focused() && projectInFront(st);
     if (uiTab && !assetKeys && !ctrl && pressed(ImGuiKey_F2)) st.canvasView.rename(doc);
     if (const std::optional<editor::ObjectPath> sel = (uiTab || assetKeys) ? std::nullopt : doc.selection()) {
@@ -16771,14 +16782,59 @@ void setPanelDetached(State& st, editor::DetachPanel panel, bool detached) {
     }
     if (panel == editor::DetachPanel::Timeline && !detached && st.timeline.open) st.bottomTab = State::BottomTab::Timeline;
     if (panel == editor::DetachPanel::Timeline) st.timeline.refit();
+    // The Scene view back: its tab in front, so it shows where it was.
+    if (panel == editor::DetachPanel::View && !detached) st.scripts.showScene();
     if (!p.settingsFile.empty()) editor::savePlayTools(p.settingsFile, p.tools);
     scriptLine(nullptr, std::string("detach: ") + editor::detachPanelName(panel) + (detached ? " out" : " back"));
+}
+
+// Any button pressed in `r` this frame, over the current window.
+static bool clickedIn(ImRect r) {
+    return ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem) && r.Contains(ImGui::GetMousePos()) &&
+           (ImGui::IsMouseClicked(ImGuiMouseButton_Left) || ImGui::IsMouseClicked(ImGuiMouseButton_Right) ||
+            ImGui::IsMouseClicked(ImGuiMouseButton_Middle));
+}
+
+// The Game view alone in `r` (its own window, or the Scene tab's room with the
+// Scene view out): a click in it gives the game the keyboard, and with linked
+// consoles picks the one.
+static void gameAlone(State& st, ImDrawList* dl, ImRect r) {
+    State::Play& p = st.play;
+    if (clickedIn(r)) {
+        p.gameFocus = true;
+        if (p.players >= 2) {
+            const std::vector<ImRect> cr = consoleRects(r, p.players);
+            for (int i = 0; i < p.players; ++i)
+                if (cr[size_t(i)].Contains(ImGui::GetMousePos())) p.focus = i;
+        }
+    }
+    gamePanel(st, dl, r);
+}
+
+// Where the Scene view was, with it out in its own window and nothing else
+// to fill the room: a note saying so, and its Attach.
+static void viewAway(State& st, ImDrawList* dl, ImRect r) {
+    Fonts& f = fonts();
+    dl->AddRectFilled(r.Min, r.Max, color::panel, radius::window);
+    dl->AddRect(r.Min, r.Max, color::border, radius::window);
+    nameRect("view.away", r);
+    const char* note = "The Scene view is in its own window.";
+    const ImVec2 ns = measure(f.medium, type::body, note);
+    const ImVec2 c = r.GetCenter();
+    text(dl, ImVec2(c.x - ns.x * 0.5f, c.y - ns.y - space::sm), f.medium, type::body, color::textDim, note);
+    const float aw = buttonWidth(icon::panelTop, "Attach");
+    const ImVec2 ap(c.x - aw * 0.5f, c.y + space::sm);
+    if (button("view.away.attach", ap, icon::panelTop, "Attach", ButtonKind::Ghost, nullptr,
+               "Put the Scene view back in the middle of the editor's window"))
+        setPanelDetached(st, editor::DetachPanel::View, false);
+    nameRect("view.away.attach", ImRect(ap, ap + ImVec2(aw, size::field + 6)));
 }
 
 // A panel's own window: a header with its name and Attach, then the panel:
 // the Game view (a click in it gives the game the keyboard, and with linked
 // consoles picks the one), Play's output, the Scene, the Inspector, the
-// Project panel or the Timeline. The last four take the editor's keyboard
+// Project panel, the Timeline or the Scene view (rendered in the main GL
+// context, its texture drawn here). The last five take the editor's keyboard
 // shortcuts while their window has the focus, as the main window does.
 void drawPanelWindow(State& st, editor::Document& doc, viewport::Ps1View& view, editor::DetachPanel panel, ImVec2 size) {
     using editor::DetachPanel;
@@ -16806,23 +16862,14 @@ void drawPanelWindow(State& st, editor::Document& doc, viewport::Ps1View& view, 
         "Put the Scene back at the left of the editor's window",
         "Put the Inspector back at the right of the editor's window",
         "Put the Project panel back in the editor's bottom dock",
-        "Put the Timeline back in the editor's bottom dock"};
+        "Put the Timeline back in the editor's bottom dock",
+        "Put the Scene view back in the middle of the editor's window"};
     const bool attach = button((name + ".attach").c_str(), ap, icon::panelTop, "Attach", ButtonKind::Ghost, nullptr, tips[size_t(panel)]);
     nameRect(name + ".attach", ImRect(ap, ap + ImVec2(aw, size::field + 6)));
     const ImRect body(ImVec2(g, head.Max.y + g), ImVec2(size.x - g, size.y - g));
     std::string drawn;
     if (game) {
-        if (ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem) && body.Contains(ImGui::GetMousePos()) &&
-            (ImGui::IsMouseClicked(ImGuiMouseButton_Left) || ImGui::IsMouseClicked(ImGuiMouseButton_Right) ||
-             ImGui::IsMouseClicked(ImGuiMouseButton_Middle))) {
-            p.gameFocus = true;
-            if (p.players >= 2) {
-                const std::vector<ImRect> cr = consoleRects(body, p.players);
-                for (int i = 0; i < p.players; ++i)
-                    if (cr[size_t(i)].Contains(ImGui::GetMousePos())) p.focus = i;
-            }
-        }
-        gamePanel(st, dl, body);
+        gameAlone(st, dl, body);
         drawn = std::string(p.cons[0].game.texture() ? " frames" : " waiting") + (p.gameFocus ? " focused" : "");
     } else if (panel == DetachPanel::Console) {
         dl->AddRectFilled(body.Min, body.Max, color::panel, radius::window);
@@ -16845,6 +16892,9 @@ void drawPanelWindow(State& st, editor::Document& doc, viewport::Ps1View& view, 
         // The editor's shortcuts first, as the main window takes them before
         // its panels; the Timeline's own keys before those.
         if (panel == DetachPanel::Timeline) st.timeline.takeKeys(doc);
+        // A click in the Scene view takes the keyboard back from a game
+        // beside the Scene tab, as a click on the scene beside it does.
+        if (panel == DetachPanel::View && clickedIn(body)) p.gameFocus = false;
         shortcuts(st, doc, panel);
         nameRect(name + ".body", body);
         if (panel == DetachPanel::Scene) {
@@ -16860,6 +16910,10 @@ void drawPanelWindow(State& st, editor::Document& doc, viewport::Ps1View& view, 
             // As the tree's rows: no drop targets in the main window's coordinates.
             st.modelField = ImRect();
             st.assetSlots.clear();
+        } else if (panel == DetachPanel::View) {
+            viewportPanel(st, dl, body, doc, view);
+            st.viewWindowRect = body;
+            drawn = " scene";
         } else if (panel == DetachPanel::Project) {
             // Its own tab and no collapse: the window is the panel.
             const auto tabs = std::exchange(st.assets.tabs, nullptr);
@@ -16995,11 +17049,34 @@ ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view,
     st.scripts.setTilesTab(doc.scene().tilemap.has_value());
     // With the Project panel out and no other tab, no dock: all of it.
     const bool pr = projectInFront(st);
-    ImRect body = st.scripts.tabStrip(dl, tl   ? st.timeline.dock(mid)
-                                          : fr ? st.frame.dock(mid)
-                                          : co ? consoleDock(st, mid)
-                                          : pr ? st.assets.dock(mid)
-                                               : mid);
+    ImRect body;
+    // With the Scene view out in its own window (#345) the Scene tab's room
+    // goes to the Game view while a game runs, else to the bottom dock's tab
+    // in front; with neither, a note where it was (viewAway).
+    bool roomTaken = false;
+    if (!viewOut(st)) {
+        body = st.scripts.tabStrip(dl, tl   ? st.timeline.dock(mid)
+                                       : fr ? st.frame.dock(mid)
+                                       : co ? consoleDock(st, mid)
+                                       : pr ? st.assets.dock(mid)
+                                            : mid);
+        st.viewWindowRect = ImRect();
+    } else {
+        body = st.scripts.tabStrip(dl, mid);
+        // The Scene tab picked again: the Scene view's window comes to the front.
+        if (st.scripts.sceneShown() && !st.sceneTabWas) st.raisePanel[size_t(editor::DetachPanel::View)] = true;
+        const bool gameThere = st.play.cons[0].game.attached() && !st.play.tools.gameWindow.detached;
+        if (st.scripts.sceneShown() && !gameThere && (tl || fr || co || (pr && st.assets.open))) {
+            if (tl) st.timeline.fill(body);
+            else if (fr) st.frame.fill(body);
+            else if (co) st.consoleRect = body;
+            else st.assets.fill(body);
+            roomTaken = true;
+        } else {
+            body = tl ? st.timeline.dock(body) : fr ? st.frame.dock(body) : co ? consoleDock(st, body) : pr ? st.assets.dock(body) : body;
+        }
+    }
+    st.sceneTabWas = st.scripts.sceneShown();
     if (co) consoleTab(st, dl, doc, tabsW);
     // While a game runs the Game view shares the tab's room: the Scene tab's
     // always, the UI, Tilemap and script tabs' too unless View > Game View on
@@ -17007,7 +17084,12 @@ ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view,
     // Out in its own window (#345) it leaves the tab its whole room.
     const bool gameShown = st.play.cons[0].game.attached() && !st.play.tools.gameWindow.detached &&
                            (st.scripts.sceneShown() || st.play.tools.gameEveryTab);
-    if (gameShown) body = splitViewport(st, dl, body);
+    if (gameShown && viewOut(st) && st.scripts.sceneShown()) {
+        gameAlone(st, dl, body);
+        roomTaken = true;
+    } else if (gameShown) {
+        body = splitViewport(st, dl, body);
+    }
     scriptLine("game.shown", std::string("game: shown ") + (gameShown ? "yes" : "no") + " every tab " +
                                  (st.play.tools.gameEveryTab ? "on" : "off") +
                                  (st.play.tools.gameWindow.detached ? " own window" : ""));
@@ -17033,7 +17115,10 @@ ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view,
         const std::optional<splash::ExportResult>& live = st.live.result();
         view.setDrawDistance(live && live->ok() ? live->stats.orderingTableSize : 0);
     }
-    if (st.scripts.sceneShown()) {
+    if (st.scripts.sceneShown() && viewOut(st)) {
+        if (!roomTaken) viewAway(st, dl, body);
+        st.viewportRect = ImRect();
+    } else if (st.scripts.sceneShown()) {
         viewportPanel(st, dl, body, doc, view);
         st.viewportRect = body;
     } else if (st.scripts.uiShown()) {
@@ -17073,7 +17158,12 @@ ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view,
         if (!ec && !rel.empty()) savedScripts.push_back(utf8(rel.generic_u8string()));
     }
     if (!savedScripts.empty()) doc.refreshAssets(savedScripts);
-    if (pr) st.assets.draw(dl, doc);
+    if (pr) {
+        // Filling the Scene tab's room it has no collapse.
+        st.assets.windowed = roomTaken && !gameShown;
+        st.assets.draw(dl, doc);
+        st.assets.windowed = false;
+    }
     // Project files renamed, moved or deleted (or that undone): open script
     // tabs follow their file; a move an undo or redo could not make is said.
     // A blocks tab's menu asked for its script as Lua.

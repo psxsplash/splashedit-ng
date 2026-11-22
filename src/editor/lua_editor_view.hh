@@ -29,6 +29,7 @@ public:
     bool empty() const { return m_tabs.empty(); }
     // The Scene tab (the viewport) is showing.
     bool sceneShown() const { return m_active == kScene; }
+    void showScene() { m_active = kScene; }
     // The UI tab (the canvas editor) is showing.
     bool uiShown() const { return m_active == kUi; }
     void showUi() { m_active = kUi; }
