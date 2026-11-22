@@ -315,11 +315,11 @@ void TimelinePanel::draw(ImDrawList* dl, editor::Document& doc) {
         m_bodyX0 = body.Min.x + kPad;
         m_bodyX1 = body.Max.x - kPad;
         if (m_fitPending) fit(len);
-        // Corner over the labels: how many tracks of the runtime's eight.
+        // Corner over the labels: how many tracks of the runtime's limit for this kind.
         const ImRect corner(ImVec2(r.Min.x + 1, top), ImVec2(r.Min.x + kLabelW, top + kRulerH));
         dl->AddRectFilled(corner.Min, corner.Max, rgb(0x1f2229));
         char tc[48];
-        std::snprintf(tc, sizeof tc, "TRACKS  %d / %d", int(editor::seqTracks(doc, m_ref)->size()), editor::kMaxTimelineTracks);
+        std::snprintf(tc, sizeof tc, "TRACKS  %d / %d", int(editor::seqTracks(doc, m_ref)->size()), editor::maxTracks(m_ref.kind));
         text(dl, ImVec2(corner.Min.x + space::md, corner.Min.y + 6), fonts().medium, type::caption, color::textFaint, tc);
         ruler(dl, rulerR, len);
         lanes(dl, labels, body, doc);
@@ -472,9 +472,12 @@ void TimelinePanel::header(ImDrawList* dl, ImRect r, editor::Document& doc) {
     rx -= 28 + space::sm;
     const char* addLabel = "Add track";
     const float aw = space::md * 2 + measure(f.medium, type::icon, icon::plus).x + space::sm - 2 + measure(f.medium, type::body, addLabel).x;
-    const bool full = int(editor::seqTracks(doc, m_ref)->size()) >= editor::kMaxTimelineTracks;
+    const int cap = editor::maxTracks(m_ref.kind);
+    const bool full = int(editor::seqTracks(doc, m_ref)->size()) >= cap;
+    char fullTip[64];
+    std::snprintf(fullTip, sizeof fullTip, "This sequence has the runtime's %d tracks", cap);
     if (button("addtrack", ImVec2(rx - aw, cy - 15), icon::plus, addLabel, ButtonKind::Secondary, nullptr,
-               full ? "This sequence has the runtime's 8 tracks" : "A track drives one property of one target") &&
+               full ? fullTip : "A track drives one property of one target") &&
         !full)
         ImGui::OpenPopup("##addtrack");
     // The time in seconds where it fits left of Add track (the dock's tabs

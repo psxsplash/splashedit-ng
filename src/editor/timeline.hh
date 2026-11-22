@@ -16,9 +16,10 @@ namespace editor {
 
 class Document;
 
-// psxsplash's limits (cutscene.hh) and frame rate.
+// psxsplash's limits (cutscene.hh, animation.hh) and frame rate.
 constexpr int kTimelineFps = 30;
-constexpr int kMaxTimelineTracks = 8;
+constexpr int kMaxCutsceneTracks = 16;   // cutscene.hh MAX_TRACKS
+constexpr int kMaxAnimationTracks = 8;   // animation.hh MAX_ANIM_TRACKS
 constexpr int kMaxTimelineKeys = 64;
 constexpr int kMaxTimelineFrame = 8191;  // 13 bits of the packed key
 // The exporter's name check (splashpack.cpp writeSequences): 1..24 UTF-16
@@ -34,6 +35,9 @@ constexpr int kMaxEventVolume = 128;
 constexpr int kMaxEventPan = 127;
 
 enum class SeqKind { Cutscene, Animation };
+
+// The runtime's track limit for this kind of sequence.
+constexpr int maxTracks(SeqKind k) { return k == SeqKind::Cutscene ? kMaxCutsceneTracks : kMaxAnimationTracks; }
 
 // A cutscene or an animation of the document's scene, by index.
 struct SeqRef {
@@ -175,7 +179,7 @@ bool removeSequence(Document& doc, SeqRef ref);
 SeqRef shownAfterRemove(const Document& doc, SeqRef open, SeqRef removed);
 // The new track's index, or -1: the type is not allowed in this kind of
 // sequence, the target is missing where needed, the same type and target is
-// already there, or the sequence has kMaxTimelineTracks.
+// already there, or the sequence has maxTracks(ref.kind).
 int addTrack(Document& doc, SeqRef ref, splash::TrackType type, const std::string& target);
 bool removeTrack(Document& doc, SeqRef ref, int track);
 // A Follow Path track: target is the object that rides (empty = the camera,
@@ -193,7 +197,7 @@ bool setTrackTarget(Document& doc, SeqRef ref, int track, const std::string& tar
 // the original is left as it was. One undo step. Returns the new track's
 // index, or -1 where setTrackTarget would refuse the target (no target to
 // take, an empty one, the track's own, or one the sequence already drives
-// with this type) or the sequence has kMaxTimelineTracks.
+// with this type) or the sequence has maxTracks(ref.kind).
 int duplicateTrack(Document& doc, SeqRef ref, int track, const std::string& target);
 // What a track of this type can drive, as the export addresses it: objects
 // with a mesh, runtime point lights, canvases, "canvas/element". Empty for

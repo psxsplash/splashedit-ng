@@ -1171,7 +1171,7 @@ void writeUi(BinWriter& w, size_t tableOffsetPos, const std::vector<UICanvas>& c
 
 // ---- cutscenes and animations (cutscene.hh, animation.hh, splashpack.cpp in psxsplash)
 
-constexpr int kMaxCutscenes = 16, kMaxTracks = 8, kMaxKeyframes = 64, kMaxAudioEvents = 64, kMaxSkinEvents = 16;
+constexpr int kMaxCutscenes = 16, kMaxCutsceneTracks = 16, kMaxAnimTracks = 8, kMaxKeyframes = 64, kMaxAudioEvents = 64, kMaxSkinEvents = 16;
 
 // A cutscene or an animation. The two share the track, keyframe and skin event
 // layouts; an animation has no audio events and a shorter header.
@@ -1246,8 +1246,9 @@ void writeSequences(BinWriter& w, size_t tableOffsetPos, const std::vector<Seque
             res.errors.push_back(where + ": the name must be 1..24 characters (Lua plays it by name)");
         if (std::find(seen.begin(), seen.end(), c.name) != seen.end()) res.errors.push_back("two " + kind + "s are named '" + c.name + "'");
         seen.push_back(c.name);
-        if (c.tracks.size() > size_t(kMaxTracks))
-            res.errors.push_back(where + ": " + std::to_string(c.tracks.size()) + " tracks, at most " + std::to_string(kMaxTracks));
+        const int maxTracks = animation ? kMaxAnimTracks : kMaxCutsceneTracks;  // MAX_ANIM_TRACKS, MAX_TRACKS
+        if (c.tracks.size() > size_t(maxTracks))
+            res.errors.push_back(where + ": " + std::to_string(c.tracks.size()) + " tracks, at most " + std::to_string(maxTracks));
         if (c.audioEvents && c.audioEvents->size() > size_t(kMaxAudioEvents))
             res.errors.push_back(where + ": more than " + std::to_string(kMaxAudioEvents) + " audio events");
         if (c.skinEvents.size() > size_t(kMaxSkinEvents))

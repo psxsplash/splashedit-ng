@@ -233,7 +233,7 @@ Untextured: UVs all zero, `tpage = 0xFFFF`, clut = 0. Reader: `Tri`, `static_ass
 ### 2.14 Audio clip table (header audioTableOffset; only if audioClipCount>0). `AlignToFourBytes`, then `audioClipCount` x 16 B `{ u32 dataOffset=0, u32 sizeBytes, u16 sampleRate, u8 loop, u8 nameLen, u32 nameOffset }`, then all names (ASCII, NUL-terminated, name truncated to 255 chars) with nameOffset backfilled. Reader reads the same 16 B (R:splashpack.cpp "dataOff, size, rate, loop, nameLen, nameOff"); ADPCM data comes from `.spu`.
 
 ### 2.15 Cutscenes (header cutsceneTableOffset; only if cutsceneCount>0) - `PSXCutsceneExporter.ExportCutscenes`
-Caps: 16 cutscenes, 8 tracks, 64 keyframes/track, 64 audio events, 16 skin-anim events, names 24 chars (writer consts, equal to R:cutscene.hh).
+Caps: 16 cutscenes, 16 tracks, 64 keyframes/track, 64 audio events, 16 skin-anim events, names 24 chars (writer consts, equal to R:cutscene.hh).
 `AlignToFourBytes`; table of `n` x 12 B `{u32 dataOffset, u8 nameLen, u8[3] pad, u32 nameOffset}`; then per cutscene (each starting `AlignToFourBytes`):
 - Header 20 B: `{ u16 durationFrames; u8 trackCount; u8 audioEventCount; u32 tracksOffset; u32 audioEventsOffset (0 if none); u8 skinAnimEventCount; u8[3] 0; u32 skinAnimEventsOffset (0 if none) }`
 - (align4) tracks, 12 B each: `{ u8 trackType; u8 keyframeCount; u8 targetNameLen; u8 lightIndex (light tracks) or 0; u32 targetNameOffset (0 if no name); u32 keyframesOffset }`
@@ -280,7 +280,7 @@ over 24 characters fails the export (2.4.0 cut it, and `Cutscene.Play` with the 
 found nothing).
 
 ### 2.16 Animations (header animationTableOffset; only if animationCount>0) - `PSXAnimationExporter.ExportAnimations`
-Same table entry (12 B) and track/keyframe/skin-event layouts as cutscenes. Differences: max 16 animations; camera position/rotation tracks are dropped (warning); no audio events; per-animation header is **16 B**: `{ u16 durationFrames; u8 trackCount; u8 0; u32 tracksOffset; u8 skinAnimEventCount; u8[3] 0; u32 skinAnimEventsOffset }`; the keyframe switch has **no CameraH case** (see sec. 7, M3). Order inside: header, tracks, keyframes, names, (align4) skin events, anim name.
+Same table entry (12 B) and track/keyframe/skin-event layouts as cutscenes. Differences: max 16 animations, 8 tracks each (R:animation.hh MAX_ANIM_TRACKS); camera position/rotation tracks are dropped (warning); no audio events; per-animation header is **16 B**: `{ u16 durationFrames; u8 trackCount; u8 0; u32 tracksOffset; u8 skinAnimEventCount; u8[3] 0; u32 skinAnimEventsOffset }`; the keyframe switch has **no CameraH case** (see sec. 7, M3). Order inside: header, tracks, keyframes, names, (align4) skin events, anim name.
 
 This exporter (`core/splashpack.cpp`, `writeSequences`, shared with cutscenes) writes the same
 layout with the cutscene key encodings and checks. Camera tracks, `cameraH` included, fail the
