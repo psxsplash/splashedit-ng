@@ -768,6 +768,16 @@ void TimelinePanel::lanes(ImDrawList* dl, ImRect labels, ImRect body, editor::Do
             m_scrollY -= io.MouseWheel * kLaneH;
     }
     if (io.MouseWheelH != 0 && area.Contains(io.MousePos)) m_view0 = std::max(0.0f, m_view0 - io.MouseWheelH * 40 / m_ppf);
+    // Middle-mouse drag pans: the frames follow the mouse, and the lanes too when they scroll.
+    if (ImGui::IsMouseClicked(ImGuiMouseButton_Middle) && (area.Contains(io.MousePos) || rulerArea.Contains(io.MousePos)) &&
+        ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem))
+        m_panning = true;
+    if (m_panning && !ImGui::IsMouseDown(ImGuiMouseButton_Middle)) m_panning = false;
+    if (m_panning) {
+        ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
+        if (io.MouseDelta.x != 0) setView(editor::panView(view(), -io.MouseDelta.x, kPad));
+        m_scrollY -= io.MouseDelta.y;
+    }
     // Dragging keys or a box past the left or right of the lanes scrolls them,
     // faster the further out the mouse is.
     if ((m_dragging || m_boxing) && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {

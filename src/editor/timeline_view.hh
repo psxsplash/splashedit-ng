@@ -146,6 +146,8 @@ private:
     // A drag of the selection: the frame under the mouse when it started and
     // the whole frames applied so far.
     bool m_dragging = false;
+    // A middle-mouse drag panning the lanes.
+    bool m_panning = false;
     float m_dragFrom = 0;
     int m_dragApplied = 0;
     // skinTargets() for the skin lane's missing objects and clips, and the
