@@ -162,6 +162,12 @@ err('two animations with one name', lambda s: s['animations'].append(json.loads(
     "two animations are named 'lift'")
 err('17 animations', lambda s: s.__setitem__('animations', [dict(s['animations'][0], name='a%d' % i) for i in range(17)]),
     '17 animations')
+# psxsplash animation.hh MAX_ANIM_TRACKS stays 8 while a cutscene takes 16.
+r, d = export(lambda s: s['animations'][0].__setitem__('tracks', s['animations'][0]['tracks'] * 8))
+n8 = len(read_anims(d).get('lift', dict(tracks=[]))['tracks']) if d else -1
+check('eight animation tracks export', r.returncode == 0 and n8 == 8, (n8, r.stderr.strip()[:200]))
+err('nine animation tracks', lambda s: s['animations'][0].__setitem__('tracks', s['animations'][0]['tracks'] * 9),
+    '9 tracks, at most 8')
 err('animation name over 24 characters', lambda s: s['animations'][0].__setitem__('name', 'a' * 25), '1..24')
 err('animation track on an unknown object', lambda s: s['animations'][0]['tracks'][0].__setitem__('target', 'Nope'),
     "no exported object named 'Nope'")

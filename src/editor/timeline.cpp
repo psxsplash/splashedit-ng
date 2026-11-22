@@ -212,7 +212,7 @@ std::string skinEventProblem(const std::vector<SkinTarget>& targets, const splas
 }
 
 // Edits. Every one snapshots the scene's cutscenes and animations before and
-// after; they are small (the runtime caps them at 16 x 8 tracks x 64 keys).
+// after; they are small (the runtime caps them at 16 x 16 tracks x 64 keys).
 
 namespace {
 
@@ -874,7 +874,7 @@ int addTrack(Document& doc, SeqRef ref, TrackType type, const std::string& targe
     editSeq(doc, ref, [&](SeqMut& m) {
         if (!allowedIn(ref.kind, type)) return false;
         if (needsTarget(type) && target.empty()) return false;
-        if (int(m.tracks->size()) >= kMaxTimelineTracks) return false;
+        if (int(m.tracks->size()) >= maxTracks(ref.kind)) return false;
         const std::string t = needsTarget(type) ? target : std::string();
         for (const CutsceneTrack& tr : *m.tracks)
             if (tr.type == type && tr.target == t) return false;
@@ -892,7 +892,7 @@ int addFollowPathTrack(Document& doc, SeqRef ref, const std::string& target, con
     int added = -1;
     editSeq(doc, ref, [&](SeqMut& m) {
         if (ref.kind == SeqKind::Animation && target.empty()) return false;  // animations have no camera
-        if (int(m.tracks->size()) >= kMaxTimelineTracks) return false;
+        if (int(m.tracks->size()) >= maxTracks(ref.kind)) return false;
         for (const CutsceneTrack& tr : *m.tracks)
             if (tr.type == TrackType::FollowPath && tr.target == target) return false;
         CutsceneTrack tr;
@@ -947,7 +947,7 @@ int duplicateTrack(Document& doc, SeqRef ref, int track, const std::string& targ
     int added = -1;
     editSeq(doc, ref, [&](SeqMut& m) {
         if (!trackOk(m, track) || target.empty()) return false;
-        if (int(m.tracks->size()) >= kMaxTimelineTracks) return false;
+        if (int(m.tracks->size()) >= maxTracks(ref.kind)) return false;
         CutsceneTrack copy = (*m.tracks)[size_t(track)];
         if (!needsTarget(copy.type) || copy.target == target) return false;
         for (const CutsceneTrack& o : *m.tracks)
@@ -1135,7 +1135,7 @@ std::optional<Selection> pasteClipboard(Document& doc, SeqRef ref, const Timelin
                     ++skip;
                     continue;
                 }
-                if (int(m.tracks->size()) >= kMaxTimelineTracks) return false;
+                if (int(m.tracks->size()) >= maxTracks(ref.kind)) return false;
                 CutsceneTrack tr;
                 tr.type = ck.type;
                 tr.target = needsTarget(ck.type) ? ck.target : std::string();

@@ -106,12 +106,18 @@ for name, edit in [
     ('unknown ui element', lambda s: s['cutscenes'][0]['tracks'][1].update(target='hud/nope')),
     ('ui element without canvas', lambda s: s['cutscenes'][0]['tracks'][1].update(target='t')),
     ('unknown audio clip', lambda s: s['cutscenes'][0].update(audioEvents=[{'frame': 0, 'clip': 'x'}])),
-    ('nine tracks', lambda s: s['cutscenes'][0].update(tracks=s['cutscenes'][0]['tracks'] * 5)),
     ('duplicate name', lambda s: s['cutscenes'].append(s['cutscenes'][0])),
     ('frame past 8191', lambda s: s['cutscenes'][0]['tracks'][0]['keyframes'].append({'frame': 8192})),
 ]:
     r, _ = export(edit)
     check('rejects ' + name, r.returncode != 0, r.stdout + r.stderr)
+
+# psxsplash cutscene.hh MAX_TRACKS is 16: sixteen tracks export and read back, a seventeenth is refused.
+r, d = export(lambda s: s['cutscenes'][0].update(tracks=s['cutscenes'][0]['tracks'] * 8))
+n16 = len(read(d).get('slide', dict(tracks=[]))['tracks']) if d else -1
+check('sixteen tracks export', r.returncode == 0 and n16 == 16, (n16, r.stderr.strip()[:200]))
+r, _ = export(lambda s: s['cutscenes'][0].update(tracks=s['cutscenes'][0]['tracks'] * 8 + s['cutscenes'][0]['tracks'][:1]))
+check('rejects seventeen tracks', r.returncode != 0 and '17 tracks, at most 16' in r.stderr, r.stderr.strip()[:200])
 
 r, _ = export(lambda s: s['cutscenes'][0]['tracks'][0]['keyframes'].append({'frame': 5, 'value': [900, 0, 0]}))
 check('warns on a clamped position', r.returncode == 0 and 'clamped' in r.stdout + r.stderr, r.stdout + r.stderr)

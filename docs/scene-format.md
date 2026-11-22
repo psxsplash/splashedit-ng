@@ -250,14 +250,14 @@ may be in any order. Audio events name an audio component's `clipName`; `volume`
 `pan` 0..127 [64]. Skin events start a clip on an object with a skin component, as
 `SkinnedAnim.Play` would: `object` is the object name, `clip` one of its clip names, `loop` [false].
 
-At most 16 cutscenes, 8 tracks each, 64 keys per track, 64 audio events and 16 skin events. Names
+At most 16 cutscenes, 16 tracks each, 64 keys per track, 64 audio events and 16 skin events. Names
 are 1..24 characters. A target or clip that does not exist fails the export.
 
 ### Animations: `animations`
 
 An optional top-level array, played from Lua with `Animation.Play(name)`. Up to 8 run at once.
 An animation is a cutscene without `audioEvents` and without camera tracks (`cameraPosition`,
-`cameraRotation`, `cameraH`), which fail the export; the limits are the same.
+`cameraRotation`, `cameraH`), which fail the export; the limits are the same except tracks: at most 8 per animation.
 
 ```json
 "animations": [

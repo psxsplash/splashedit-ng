@@ -9827,9 +9827,14 @@ void testTimelineEdit() {
     CHECK(editor::trackLabel(editor::seqTracks(d, ref)->at(1)) == "Camera: Position");
     CHECK(d.historySize() == h + 2);
     CHECK(d.undo() && editor::seqTracks(d, ref)->size() == 1);
-    for (int i = 0; i < 7; ++i) CHECK(editor::addTrack(d, ref, TrackType::ObjectActive, "o" + std::to_string(i)) == i + 1);
-    CHECK(editor::addTrack(d, ref, TrackType::ObjectActive, "ninth") == -1);  // 8 tracks at most
-    for (int i = 0; i < 7; ++i) CHECK(editor::removeTrack(d, ref, 1));
+    // A cutscene holds 16 tracks (psxsplash cutscene.hh MAX_TRACKS): the seventeenth is refused,
+    // by add and by duplicate alike.
+    for (int i = 0; i < 15; ++i) CHECK(editor::addTrack(d, ref, TrackType::ObjectActive, "o" + std::to_string(i)) == i + 1);
+    CHECK(editor::seqTracks(d, ref)->size() == 16);
+    CHECK(editor::addTrack(d, ref, TrackType::ObjectActive, "seventeenth") == -1);
+    CHECK(editor::duplicateTrack(d, ref, 1, "seventeenth") == -1);
+    CHECK(editor::seqTracks(d, ref)->size() == 16);
+    for (int i = 0; i < 15; ++i) CHECK(editor::removeTrack(d, ref, 1));
     CHECK(!editor::removeTrack(d, ref, 5));
     CHECK(editor::seqTracks(d, ref)->size() == 1);
 
@@ -10310,7 +10315,7 @@ void testTimelineClipboard() {
 
 // Pasting a key into a sequence without its track adds the track in the same
 // undo step; a camera key has no track to go to in an animation; the tracks
-// stay within the runtime's eight.
+// stay within the runtime's limit (eight for an animation).
 void testTimelinePasteAddsTrack() {
     using splash::TrackType;
     splash::Scene sc;
@@ -10368,8 +10373,11 @@ void testTimelinePasteAddsTrack() {
     h = d.historySize();
     CHECK(!editor::pasteClipboard(d, anim, camOnly, 0, &skipped) && skipped == 1 && d.historySize() == h);
 
-    // A sequence with the runtime's eight tracks takes no ninth: refused, no step.
-    for (int i = 0; i < editor::kMaxTimelineTracks; ++i) CHECK(editor::addTrack(d, anim, TrackType::ObjectActive, "T" + std::to_string(i)) == i);
+    // An animation stays at the runtime's eight tracks (animation.hh MAX_ANIM_TRACKS) while a
+    // cutscene takes sixteen: a full one takes no ninth by paste, refused with no step.
+    CHECK(editor::maxTracks(editor::SeqKind::Animation) == 8 && editor::maxTracks(editor::SeqKind::Cutscene) == 16);
+    for (int i = 0; i < 8; ++i) CHECK(editor::addTrack(d, anim, TrackType::ObjectActive, "T" + std::to_string(i)) == i);
+    CHECK(editor::addTrack(d, anim, TrackType::ObjectActive, "T8") == -1);
     h = d.historySize();
     CHECK(!editor::pasteClipboard(d, anim, clip, 0) && d.historySize() == h && editor::seqTracks(d, anim)->size() == 8);
 }
