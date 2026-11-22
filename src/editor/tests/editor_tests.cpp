@@ -17395,6 +17395,23 @@ void testPopupBeside() {
     CHECK(p.x >= 4 && p.x + 240 <= 1596);
 }
 
+// A right-click menu opens at the pointer, flips left or up where it would
+// cross the screen's edge, and one taller than the screen gets the screen's
+// height and scrolls.
+void testPopupAt() {
+    const ui::PopupBox screen{0, 0, 1000, 600};
+    ui::PopupFit p = ui::popupAt(300, 200, 300, 200, 200, 166, screen, 4);
+    CHECK(p.x == 300 && p.y == 200 && p.h == 166);
+    p = ui::popupAt(900, 500, 900, 470, 200, 166, screen, 4);  // no room right or below: left of x, bottom on flipY
+    CHECK(p.x == 700 && p.y == 304 && p.h == 166);
+    p = ui::popupAt(300, 500, 300, 80, 200, 166, screen, 4);  // no room above flipY either: moved down inside the screen
+    CHECK(p.y == 4 && p.h == 166);
+    p = ui::popupAt(300, 100, 300, 80, 200, 900, screen, 4);  // taller than the screen: cut to it, top on the margin
+    CHECK(p.y == 4 && p.h == 592);
+    p = ui::popupAt(300, 100, 300, 80, 200, 900, {0, 0, 1000, 6}, 4);  // no room at all: nothing, not negative
+    CHECK(p.h == 0);
+}
+
 // The Add object picker shows as many rows as fit down to the window's
 // bottom (#378): more than 10 in a tall window, at least 10 when the window
 // holds them (it moves up), never more than the window holds, at least one.
@@ -23021,6 +23038,7 @@ int main(int argc, char** argv) {
     testPopupPlace();
     testPopupHeight();
     testPopupBeside();
+    testPopupAt();
     testPickerRows();
     testTerrain();
     testPathSampler();

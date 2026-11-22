@@ -204,6 +204,17 @@ int picker(const char* id, ImVec2 pos, float width, const char* placeholder, std
 Hit scrollThumb(const char* id, ImRect view, float scroll, float content, const std::string& name = {});
 void drawScrollThumb(ImDrawList* dl, ImRect view, float scroll, float content, bool hot);
 
+// The scroll of the open popup menu's rows (#378): kept with the popup, from
+// the top when it opens; the wheel over it and the thumb at the right of
+// `track` (named `thumb` for scripted checks when given) move it. The popup
+// window itself does not scroll, so the thumb and rows stay in step. Call it
+// before the rows; after them drawScrollThumb(dl, track, scroll, content, hot).
+struct MenuScroll {
+    float scroll;
+    bool hot;  // the thumb is hovered or held
+};
+MenuScroll menuScroll(ImRect track, float content, const std::string& thumb = {});
+
 // What an asset field asked for this frame: a left click (the caller opens
 // its picker) or a row of its right-click menu.
 enum class AssetAction { None, Clicked, Browse, ShowInProject, ShowInExplorer, Clear };
@@ -264,7 +275,14 @@ struct MenuItem {
 // A themed popup menu of `items` (open, sized and placed by the caller).
 // With a `name`, scripted checks find each row as <name>/<label>. Returns
 // the clicked row's run.
+// Items taller than `h` scroll (menuScroll); a row scrolled out of view is
+// not named. The menu's box is named <name>#popup, its thumb <name>/thumb.
 std::function<void()> menuRows(const std::vector<MenuItem>& items, float w, float h, const char* name = nullptr);
+// Places and sizes the next popup as a right-click menu `w` x `*h`: its top
+// left at `at`, its right edge on `flip.x` when there is no room on the right
+// and its bottom on `flip.y` when there is none below, inside the window
+// (ui::popupAt). `*h` becomes the height it gets; menuRows scrolls the rest.
+void placeMenu(ImVec2 at, ImVec2 flip, float w, float* h);
 
 // The broadcast safe areas over a picture shown in `frame` (editor/tv_preview.hh):
 // action-safe (the central 90%) and title-safe (80%), 1-pixel lines on whole

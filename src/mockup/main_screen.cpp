@@ -3973,26 +3973,13 @@ static std::function<void()> menuRows(const std::vector<MenuEntry>& entries, flo
     dl->AddRectFilled(box.Min + ImVec2(0, 2), box.Max + ImVec2(0, 6), rgb(0x000000, 80), radius::card);
     dl->AddRectFilled(box.Min, box.Max, color::raised, radius::card);
     dl->AddRect(box.Min, box.Max, color::borderStrong, radius::card);
-    // The scroll, kept with the popup (top when it opens): the wheel and the
-    // thumb inside the padding move it. The popup itself does not scroll.
+    // The rows scroll inside the padding (menuScroll).
     const ImRect track(box.Min + ImVec2(0, pad), box.Max - ImVec2(0, pad));
     const float content = full - pad * 2;
+    const MenuScroll ms = menuScroll(track, content, menu.empty() ? std::string() : menu + "/thumb");
+    const float scroll = ms.scroll;
     ImGuiStorage* store = ImGui::GetStateStorage();
     const bool appearing = ImGui::IsWindowAppearing();
-    const ImGuiID scrollKey = ImGui::GetID("##scroll"), pressKey = ImGui::GetID("##thumbpress");
-    const ImGuiIO& io = ImGui::GetIO();
-    float scroll = appearing ? 0.0f : store->GetFloat(scrollKey, 0);
-    if (ImGui::IsWindowHovered()) scroll -= io.MouseWheel * 48.0f;
-    scroll = ui::clampScroll(scroll, content, track.GetHeight());
-    const Hit thumb = scrollThumb("##thumb", track, scroll, content, menu.empty() ? std::string() : menu + "/thumb");
-    if (thumb.held) {
-        // From where the press was, so the thumb stays under the pointer.
-        if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) store->SetFloat(pressKey, scroll);
-        const float dy = io.MousePos.y - io.MouseClickedPos[ImGuiMouseButton_Left].y;
-        scroll = ui::clampScroll(store->GetFloat(pressKey, scroll) + ui::thumbDragScroll(dy, content, track.GetHeight()), content,
-                                 track.GetHeight());
-    }
-    store->SetFloat(scrollKey, scroll);
     // Which submenu is open, kept with the popup; none when it opens.
     const ImGuiID subKey = ImGui::GetID("##subopen");
     int openSub = appearing ? -1 : store->GetInt(subKey, -1);
@@ -4052,7 +4039,7 @@ static std::function<void()> menuRows(const std::vector<MenuEntry>& entries, flo
         }
         ImGui::PopID();
     }
-    drawScrollThumb(dl, track, scroll, content, thumb.hovered || thumb.held);
+    drawScrollThumb(dl, track, scroll, content, ms.hot);
     if (openSub >= 0 && !box.Contains(subRow.GetCenter())) openSub = -1;  // its row scrolled out of view, or gone
     store->SetInt(subKey, openSub);
     if (openSub >= 0) {
@@ -4576,16 +4563,10 @@ static void treeMenu(State& st, editor::Document& doc) {
     std::vector<MenuEntry> entries = treeMenuEntries(st.treeMenuShown, st, doc);
     float w, h;
     menuSize(entries, &w, &h);
-    // Kept on screen, flipped up or left when it would run off.
-    const ImVec2 d = ImGui::GetIO().DisplaySize;
-    ImVec2 pos = st.treeMenuPos;
-    if (st.treeMenuRight) pos.x -= w;
-    if (pos.x + w > d.x - space::xs) pos.x = st.treeMenuPos.x - w;
-    if (pos.y + h > d.y - space::xs) pos.y -= h;
-    pos.x = std::max(pos.x, space::xs);
-    pos.y = std::max(pos.y, space::xs);
-    ImGui::SetNextWindowPos(pos);
-    ImGui::SetNextWindowSize(ImVec2(w, h));
+    // Kept on screen, flipped up or left when it would run off; one taller
+    // than the window scrolls.
+    const ImVec2 at(st.treeMenuRight ? st.treeMenuPos.x - w : st.treeMenuPos.x, st.treeMenuPos.y);
+    placeMenu(at, st.treeMenuPos, w, &h);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
     ImGui::PushStyleVar(ImGuiStyleVar_PopupBorderSize, 0.0f);
     const bool open = ImGui::BeginPopup(id, ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
