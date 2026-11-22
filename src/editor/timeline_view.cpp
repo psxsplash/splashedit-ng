@@ -415,7 +415,7 @@ void TimelinePanel::header(ImDrawList* dl, ImRect r, editor::Document& doc) {
         m_playing = !m_playing;
     }
     x += 30;
-    if (iconButton("loop", ImRect(ImVec2(x, cy - 13), ImVec2(x + 28, cy + 13)), icon::redo, m_loop,
+    if (iconButton("loop", ImRect(ImVec2(x, cy - 13), ImVec2(x + 28, cy + 13)), icon::repeat, m_loop,
                    m_loop ? "Loop: on (playback starts over at the end)" : "Loop: off"))
         m_loop = !m_loop;
     x += 28 + space::md;
