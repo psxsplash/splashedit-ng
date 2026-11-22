@@ -8,7 +8,7 @@
 # used file and moves an unused one to the project's .trash folder after the
 # prompt, and Ctrl+Z brings it back; opening the project empties deletes
 # a month old from .trash. A rename leaves the scene unsaved; a file dropped
-# on a folder tile moves into it; View > Project reopens the folded panel,
+# on a folder tile moves into it; View > Panels > Project reopens the folded panel,
 # whose chevron points up (the way it opens) and down when open. A right-click
 # on a folder of the tree opens that folder's menu (its Rename renames it, the
 # scene's references along); on the tree's root, the grid's menu for the root.
@@ -379,7 +379,7 @@ out, shown = run(project, ['--timeline', 'intro', '--wait', '3', '--click', PROJ
 frames = [k['frame'] for k in scene(project)['cutscenes'][0]['tracks'][1]['keyframes']]
 check('the Timeline tab brings its lanes back: a key added there is saved', frames == [0, 100, 150], str(frames) + ' | ' + out[-200:])
 
-# --- View > Project: the panel folded by its chevron comes back ---
+# --- View > Panels > Project: the panel folded by its chevron comes back ---
 project = project_copy()
 out, shown = run(project, ['--wait', '3'])
 check('the chevron of the open panel points down (the way it folds)', chevron(out, run.shot) == 'down', chevron(out, run.shot))
@@ -391,8 +391,9 @@ check('the chevron of the folded panel points up (the way it opens)', chevron(ou
 check("the scene panel's Assets row points up too", chevron(out, run.shot, 'scene.assets', 19) == 'up',
       chevron(out, run.shot, 'scene.assets', 19))
 out, shown = run(project, ['--click', COLLAPSE + ',0', '--wait', '3', '--click', VIEW_MENU + ',0', '--wait', '3',
-                           '--click', '@menu.view/Project', '--wait', '5'])
-check('View > Project opens it again on the project root', getattr(run, 'open', None) is True and
+                           '--click', '@menu.view/Panels', '--wait', '3',
+                           '--click', '@menu.view/Panels/Project', '--wait', '5'])
+check('View > Panels > Project opens it again on the project root', getattr(run, 'open', None) is True and
       shown == ['meshes', 'scripts', 'textures', 'courtyard.scene'] and 'popups open: no' in out, str(shown) + ' | ' + out[-200:])
 
 # --- the folder tree's right-click menu: a folder's own (as its grid tile has),

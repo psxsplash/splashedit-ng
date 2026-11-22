@@ -17361,6 +17361,46 @@ void testPopupPlace() {
     CHECK(p.y + H == 896);
 }
 
+// A title-bar menu longer than the window is cut at the window's bottom and
+// scrolls (#378); one that fits keeps its height.
+void testPopupHeight() {
+    CHECK(ui::popupHeight(300, 40, 960, 4) == 300);
+    CHECK(ui::popupHeight(900, 40, 600, 4) == 556);  // cut: its bottom on the margin
+    CHECK(ui::popupHeight(556, 40, 600, 4) == 556);  // exactly fits
+    CHECK(ui::popupHeight(300, 700, 600, 4) == 0);   // opened below the window: nothing, not negative
+}
+
+// A submenu opens beside its menu (#378): right of it, its top on the row's;
+// left of the menu when the right has no room; moved up near the bottom;
+// one as tall as the screen keeps its top on the margin.
+void testPopupBeside() {
+    const ui::PopupBox screen{0, 0, 1600, 960};
+    ui::PopupPos p = ui::popupBeside({300, 400, 540, 428}, 240, 300, screen, 2, 4);
+    CHECK(p.x == 542 && p.y == 400);
+    p = ui::popupBeside({1300, 400, 1540, 428}, 240, 300, screen, 2, 4);
+    CHECK(p.x == 1058 && p.y == 400);
+    p = ui::popupBeside({300, 800, 540, 828}, 240, 300, screen, 2, 4);
+    CHECK(p.x == 542 && p.y == 656);
+    p = ui::popupBeside({300, 800, 540, 828}, 240, 952, screen, 2, 4);
+    CHECK(p.y == 4);
+    p = ui::popupBeside({0, 400, 1590, 428}, 240, 300, screen, 2, 4);  // no room either side: inside the screen
+    CHECK(p.x >= 4 && p.x + 240 <= 1596);
+}
+
+// The Add object picker shows as many rows as fit down to the window's
+// bottom (#378): more than 10 in a tall window, at least 10 when the window
+// holds them (it moves up), never more than the window holds, at least one.
+void testPickerRows() {
+    const float chrome = 48, rowH = 40, m = 8;
+    CHECK(ui::pickerRows(30, 90, 0, 960, chrome, rowH, m, 10) == 20);
+    CHECK(ui::pickerRows(5, 90, 0, 960, chrome, rowH, m, 10) == 5);  // the box shrinks to the matches
+    CHECK(ui::pickerRows(0, 90, 0, 960, chrome, rowH, m, 10) == 1);  // "No matches" has a row
+    CHECK(ui::pickerRows(30, 800, 0, 960, chrome, rowH, m, 10) == 10);
+    CHECK(ui::pickerRows(30, 90, 0, 600, chrome, rowH, m, 10) == 11);
+    CHECK(ui::pickerRows(30, 200, 0, 300, chrome, rowH, m, 10) == 5);
+    CHECK(ui::pickerRows(30, 10, 0, 50, chrome, rowH, m, 10) == 1);
+}
+
 // Dragging a whole-number field moves it one per pixel at any size (#174):
 // a 300 px wide element grows by 5 for 5 px, not by 15; Shift takes 10 px
 // per step. Other fields keep growing with the value.
@@ -22971,6 +23011,9 @@ int main(int argc, char** argv) {
     testShadows();
     testListScroll();
     testPopupPlace();
+    testPopupHeight();
+    testPopupBeside();
+    testPickerRows();
     testTerrain();
     testPathSampler();
     testPathScene();

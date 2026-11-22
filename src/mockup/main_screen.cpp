@@ -57,6 +57,7 @@
 #include "ui/icons.h"
 #include "ui/list_reorder.hh"
 #include "ui/list_scroll.hh"
+#include "ui/popup_place.hh"
 #include "ui/scrub.hh"
 #include "ui/texture_image.h"
 #include "ui/widgets.h"
@@ -3634,8 +3635,9 @@ static void unityImportModal(State& st, editor::Document& doc, ImVec2 size) {
 // ---- Title-bar menus ----
 
 struct MenuEntry {
-    enum Kind { Item, Separator, Heading } kind = Item;
+    enum Kind { Item, Separator, Heading, Submenu } kind = Item;
     std::string label, shortcut;
+    std::vector<MenuEntry> sub;  // a Submenu's entries, shown beside it while it is hovered
     bool enabled = true, checked = false;
     std::string tip;  // shown on hover, as why a disabled item is off
     bool choice = false;  // one of a group: the picked one shows a dot, an on/off item a check mark
@@ -3666,6 +3668,15 @@ static MenuEntry heading(std::string label) {
     MenuEntry e;
     e.kind = MenuEntry::Heading;
     e.label = std::move(label);
+    return e;
+}
+// A row that opens `entries` beside the menu (View > Panels, #378).
+static MenuEntry submenu(std::string label, std::vector<MenuEntry> entries) {
+    MenuEntry e;
+    e.kind = MenuEntry::Submenu;
+    e.label = std::move(label);
+    e.enabled = !entries.empty();
+    e.sub = std::move(entries);
     return e;
 }
 
@@ -3862,49 +3873,56 @@ static std::vector<MenuEntry> menuEntries(int which, State& st, editor::Document
                                  [&st, &doc] { setUpExternalEditor(st, doc); }));
             }
             m.push_back(separator());
-            m.push_back(heading("Panels"));
-            m.push_back(item("Project", "", true, [&] {
-                if (projectOut(st)) st.raisePanel[size_t(editor::DetachPanel::Project)] = true;
-                else toggleProjectTab(st);
-            }, st.assets.open && projectInFront(st)));
-            m.push_back(item("Console", "", true, [&] {
-                if (consoleInFront(st)) setConsoleDocked(st, false);
-                else {
-                    if (st.play.tools.consoleWindow.detached) setPanelDetached(st, editor::DetachPanel::Console, false);
-                    setConsoleDocked(st, true);
+            {
+                std::vector<MenuEntry> panels;
+                panels.push_back(item("Project", "", true, [&] {
+                    if (projectOut(st)) st.raisePanel[size_t(editor::DetachPanel::Project)] = true;
+                    else toggleProjectTab(st);
+                }, st.assets.open && projectInFront(st)));
+                panels.push_back(item("Console", "", true, [&] {
+                    if (consoleInFront(st)) setConsoleDocked(st, false);
+                    else {
+                        if (st.play.tools.consoleWindow.detached) setPanelDetached(st, editor::DetachPanel::Console, false);
+                        setConsoleDocked(st, true);
+                    }
+                }, consoleInFront(st)));
+                panels.push_back(item("Console in Own Window", "", true, [&] {
+                    setPanelDetached(st, editor::DetachPanel::Console, !st.play.tools.consoleWindow.detached);
+                }, st.play.tools.consoleWindow.detached));
+                panels.push_back(item("Game View in Own Window", "", true, [&] {
+                    setPanelDetached(st, editor::DetachPanel::Game, !st.play.tools.gameWindow.detached);
+                }, st.play.tools.gameWindow.detached));
+                for (const editor::DetachPanel panel : {editor::DetachPanel::Scene, editor::DetachPanel::Inspector, editor::DetachPanel::Project,
+                                                        editor::DetachPanel::Timeline}) {
+                    const bool out = st.play.tools.window(panel).detached;
+                    panels.push_back(item(std::string(editor::detachPanelTitle(panel)) + " in Own Window", "", true,
+                                     [&st, panel, out] { setPanelDetached(st, panel, !out); }, out));
                 }
-            }, consoleInFront(st)));
-            m.push_back(item("Console in Own Window", "", true, [&] {
-                setPanelDetached(st, editor::DetachPanel::Console, !st.play.tools.consoleWindow.detached);
-            }, st.play.tools.consoleWindow.detached));
-            m.push_back(item("Game View in Own Window", "", true, [&] {
-                setPanelDetached(st, editor::DetachPanel::Game, !st.play.tools.gameWindow.detached);
-            }, st.play.tools.gameWindow.detached));
-            for (const editor::DetachPanel panel : {editor::DetachPanel::Scene, editor::DetachPanel::Inspector, editor::DetachPanel::Project,
-                                                    editor::DetachPanel::Timeline}) {
-                const bool out = st.play.tools.window(panel).detached;
-                m.push_back(item(std::string(editor::detachPanelTitle(panel)) + " in Own Window", "", true,
-                                 [&st, panel, out] { setPanelDetached(st, panel, !out); }, out));
+                panels.push_back(item("Game View on Every Tab", "", true, [&] {
+                    st.play.tools.gameEveryTab = !st.play.tools.gameEveryTab;
+                    if (!st.play.settingsFile.empty()) editor::savePlayTools(st.play.settingsFile, st.play.tools);
+                }, st.play.tools.gameEveryTab));
+                panels.push_back(item("Strings", "", !doc.projectRoot().empty(), [&] { st.strings.open = true; }));
+                panels.push_back(item("Frame Debugger", "", true, [&] {
+                    if (frameInFront(st)) {
+                        st.frame.open = false;
+                    } else {
+                        st.frame.open = true;
+                        st.bottomTab = State::BottomTab::Frame;
+                    }
+                }, frameInFront(st)));
+                m.push_back(submenu("Panels", std::move(panels)));
             }
-            m.push_back(item("Game View on Every Tab", "", true, [&] {
-                st.play.tools.gameEveryTab = !st.play.tools.gameEveryTab;
-                if (!st.play.settingsFile.empty()) editor::savePlayTools(st.play.settingsFile, st.play.tools);
-            }, st.play.tools.gameEveryTab));
-            m.push_back(item("Strings", "", !doc.projectRoot().empty(), [&] { st.strings.open = true; }));
-            m.push_back(item("Frame Debugger", "", true, [&] {
-                if (frameInFront(st)) {
-                    st.frame.open = false;
-                } else {
-                    st.frame.open = true;
-                    st.bottomTab = State::BottomTab::Frame;
+            {
+                std::vector<MenuEntry> timeline;
+                timeline.push_back(item("Timeline", "", true, [&] { st.timeline.open = !st.timeline.open; }, st.timeline.open));
+                const std::vector<editor::SeqRef> seqs = editor::allSequences(doc);
+                if (!seqs.empty()) timeline.push_back(separator());
+                for (const editor::SeqRef ref : seqs) {
+                    const char* kindName = ref.kind == editor::SeqKind::Cutscene ? "Cutscene: " : "Animation: ";
+                    timeline.push_back(item(kindName + *editor::seqName(doc, ref), "", true, [&st, &doc, ref] { st.timeline.show(doc, ref); }));
                 }
-            }, frameInFront(st)));
-            m.push_back(separator());
-            m.push_back(heading("Timeline"));
-            m.push_back(item("Timeline", "", true, [&] { st.timeline.open = !st.timeline.open; }, st.timeline.open));
-            for (const editor::SeqRef ref : editor::allSequences(doc)) {
-                const char* kindName = ref.kind == editor::SeqKind::Cutscene ? "Cutscene: " : "Animation: ";
-                m.push_back(item(kindName + *editor::seqName(doc, ref), "", true, [&st, &doc, ref] { st.timeline.show(doc, ref); }));
+                m.push_back(submenu("Timeline", std::move(timeline)));
             }
             break;
         case 5:  // Help
@@ -3916,6 +3934,9 @@ static std::vector<MenuEntry> menuEntries(int which, State& st, editor::Document
 }
 
 // The open title-bar menu, under its label.
+// A menu popup's flags: drawn by menuRows, which scrolls its rows itself.
+constexpr ImGuiWindowFlags kMenuPopupFlags = ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
+                                             ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoScrollWithMouse;
 // Size of a menu popup holding `entries`.
 static void menuSize(const std::vector<MenuEntry>& entries, float* outW, float* outH) {
     Fonts& f = fonts();
@@ -3926,29 +3947,61 @@ static void menuSize(const std::vector<MenuEntry>& entries, float* outW, float* 
         else if (e.kind == MenuEntry::Heading) h += headH;
         else {
             h += rowH;
+            const char* right = e.kind == MenuEntry::Submenu ? icon::chevronRight : e.shortcut.c_str();
             w = std::max(w, 36 + measure(f.regular, type::body, e.label.c_str()).x + space::xl +
-                                measure(f.regular, type::label, e.shortcut.c_str()).x + space::md);
+                                measure(e.kind == MenuEntry::Submenu ? f.medium : f.regular, type::label, right).x + space::md);
         }
     }
     *outW = w;
     *outH = h;
 }
 
-// Draws `entries` in the popup that is open (sized by menuSize) and returns
-// the action of the item clicked this frame, if any. With a `menu` name each
-// item is named "<menu>/<label>" for scripted clicks (menu.build/Room Debug Overlay).
+// Draws `entries` in the popup that is open (sized by menuSize, `h` at most
+// that) and returns the action of the item clicked this frame, if any. With a
+// `menu` name each item in view is named "<menu>/<label>" for scripted clicks
+// (menu.build/Room Debug Overlay), a submenu's "<menu>/<submenu>/<label>".
+// Entries taller than `h` scroll, with the wheel and a thumb (#378); a
+// submenu opens beside its row while that is hovered or clicked.
 static std::function<void()> menuRows(const std::vector<MenuEntry>& entries, float w, float h, const std::string& menu = {}) {
     Fonts& f = fonts();
     const float pad = space::xs, rowH = size::field + 4, sepH = 9, headH = 24;
+    float fullW, full;  // the width is the caller's `w`
+    menuSize(entries, &fullW, &full);
     ImDrawList* dl = ImGui::GetWindowDrawList();
     ImRect box(ImGui::GetWindowPos(), ImGui::GetWindowPos() + ImVec2(w, h));
+    if (!menu.empty()) nameRect(menu + "#popup", box);
     dl->AddRectFilled(box.Min + ImVec2(0, 2), box.Max + ImVec2(0, 6), rgb(0x000000, 80), radius::card);
     dl->AddRectFilled(box.Min, box.Max, color::raised, radius::card);
     dl->AddRect(box.Min, box.Max, color::borderStrong, radius::card);
-    float y = box.Min.y + pad;
+    // The scroll, kept with the popup (top when it opens): the wheel and the
+    // thumb inside the padding move it. The popup itself does not scroll.
+    const ImRect track(box.Min + ImVec2(0, pad), box.Max - ImVec2(0, pad));
+    const float content = full - pad * 2;
+    ImGuiStorage* store = ImGui::GetStateStorage();
+    const bool appearing = ImGui::IsWindowAppearing();
+    const ImGuiID scrollKey = ImGui::GetID("##scroll"), pressKey = ImGui::GetID("##thumbpress");
+    const ImGuiIO& io = ImGui::GetIO();
+    float scroll = appearing ? 0.0f : store->GetFloat(scrollKey, 0);
+    if (ImGui::IsWindowHovered()) scroll -= io.MouseWheel * 48.0f;
+    scroll = ui::clampScroll(scroll, content, track.GetHeight());
+    const Hit thumb = scrollThumb("##thumb", track, scroll, content, menu.empty() ? std::string() : menu + "/thumb");
+    if (thumb.held) {
+        // From where the press was, so the thumb stays under the pointer.
+        if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) store->SetFloat(pressKey, scroll);
+        const float dy = io.MousePos.y - io.MouseClickedPos[ImGuiMouseButton_Left].y;
+        scroll = ui::clampScroll(store->GetFloat(pressKey, scroll) + ui::thumbDragScroll(dy, content, track.GetHeight()), content,
+                                 track.GetHeight());
+    }
+    store->SetFloat(scrollKey, scroll);
+    // Which submenu is open, kept with the popup; none when it opens.
+    const ImGuiID subKey = ImGui::GetID("##subopen");
+    int openSub = appearing ? -1 : store->GetInt(subKey, -1);
+    ImRect subRow;
+    float y = box.Min.y + pad - scroll;
     std::function<void()> run;
     int i = 0;
     for (const MenuEntry& e : entries) {
+        const int index = i;
         ImGui::PushID(i++);
         if (e.kind == MenuEntry::Separator) {
             dl->AddLine(ImVec2(box.Min.x + space::sm, y + sepH * 0.5f), ImVec2(box.Max.x - space::sm, y + sepH * 0.5f), color::border);
@@ -3960,25 +4013,35 @@ static std::function<void()> menuRows(const std::vector<MenuEntry>& entries, flo
         } else {
             ImRect ir(ImVec2(box.Min.x + pad, y), ImVec2(box.Max.x - pad, y + rowH));
             Hit hit = interact("item", ir);
-            if (!menu.empty()) nameRect(menu + "/" + e.label, ir);
-            const bool on = e.enabled && hit.hover > 0;
-            if (on) dl->AddRectFilled(ir.Min, ir.Max, lerpColor(rgb(0x2a2f39, 0), color::hover, hit.hover), radius::field);
+            const bool named = !menu.empty() && box.Contains(ir.GetCenter());  // scrolled out of view: not clickable
+            if (named) nameRect(menu + "/" + e.label, ir);
+            const bool isSub = e.kind == MenuEntry::Submenu;
+            if (isSub && e.enabled && (hit.hovered || hit.clicked)) openSub = index;
+            else if (!isSub && hit.hovered) openSub = -1;  // another row takes over from an open submenu
+            if (isSub && openSub == index) subRow = ir;
+            const float hover = isSub && openSub == index ? 1.0f : hit.hover;
+            const bool on = e.enabled && hover > 0;
+            if (on) dl->AddRectFilled(ir.Min, ir.Max, lerpColor(rgb(0x2a2f39, 0), color::hover, hover), radius::field);
             if (e.checked) {
                 // Scripted checks find the mark as <menu>/<label>/dot or /check.
                 const ImVec2 c(ir.Min.x + space::md, ir.GetCenter().y);
                 if (e.choice) {
                     dl->AddCircleFilled(c, 3.5f, color::accent, 12);
-                    if (!menu.empty()) nameRect(menu + "/" + e.label + "/dot", ImRect(c - ImVec2(4, 4), c + ImVec2(4, 4)));
+                    if (named) nameRect(menu + "/" + e.label + "/dot", ImRect(c - ImVec2(4, 4), c + ImVec2(4, 4)));
                 } else {
                     const ImVec2 cs = measure(f.medium, type::label, icon::check);
                     const ImVec2 at(c.x - cs.x * 0.5f, centerY(f.medium, type::label, ir.Min.y, ir.Max.y));
                     text(dl, at, f.medium, type::label, color::accent, icon::check);
-                    if (!menu.empty()) nameRect(menu + "/" + e.label + "/check", ImRect(at, at + cs));
+                    if (named) nameRect(menu + "/" + e.label + "/check", ImRect(at, at + cs));
                 }
             }
-            const ImU32 tc = !e.enabled ? color::textFaint : on && hit.hover > 0.5f ? color::text : color::textDim;
+            const ImU32 tc = !e.enabled ? color::textFaint : on && hover > 0.5f ? color::text : color::textDim;
             text(dl, ImVec2(ir.Min.x + 28, centerY(f.regular, type::body, ir.Min.y, ir.Max.y)), f.regular, type::body, tc, e.label.c_str());
-            if (!e.shortcut.empty()) {
+            if (isSub) {
+                const ImVec2 cs = measure(f.medium, type::label, icon::chevronRight);
+                text(dl, ImVec2(ir.Max.x - space::sm - cs.x, centerY(f.medium, type::label, ir.Min.y, ir.Max.y)), f.medium, type::label,
+                     e.enabled ? color::textDim : color::textFaint, icon::chevronRight);
+            } else if (!e.shortcut.empty()) {
                 ImVec2 ss = measure(f.regular, type::label, e.shortcut.c_str());
                 text(dl, ImVec2(ir.Max.x - space::sm - ss.x, centerY(f.regular, type::label, ir.Min.y, ir.Max.y)), f.regular, type::label,
                      color::textFaint, e.shortcut.c_str());
@@ -3986,6 +4049,35 @@ static std::function<void()> menuRows(const std::vector<MenuEntry>& entries, flo
             if (!e.tip.empty() && hit.hover > 0.5f) tooltip(e.tip.c_str());
             if (hit.clicked && e.enabled && e.run) run = e.run;
             y += rowH;
+        }
+        ImGui::PopID();
+    }
+    drawScrollThumb(dl, track, scroll, content, thumb.hovered || thumb.held);
+    if (openSub >= 0 && !box.Contains(subRow.GetCenter())) openSub = -1;  // its row scrolled out of view, or gone
+    store->SetInt(subKey, openSub);
+    if (openSub >= 0) {
+        // Beside the menu, its first row level with the submenu's row, and
+        // no taller than the window (it scrolls as this one does).
+        const MenuEntry& se = entries[size_t(openSub)];
+        float sw, sh;
+        menuSize(se.sub, &sw, &sh);
+        const ImVec2 d = ImGui::GetIO().DisplaySize;
+        sh = std::min(sh, std::max(rowH, d.y - space::xs * 2));
+        const ui::PopupPos at = ui::popupBeside({box.Min.x, subRow.Min.y - pad, box.Max.x, subRow.Max.y}, sw, sh, {0, 0, d.x, d.y}, 2,
+                                                space::xs);
+        // One popup id per submenu: another one opening replaces it, from its top.
+        ImGui::PushID(openSub);
+        const char* subId = "##sub";
+        if (!ImGui::IsPopupOpen(subId)) ImGui::OpenPopup(subId);
+        ImGui::SetNextWindowPos(ImVec2(at.x, at.y));
+        ImGui::SetNextWindowSize(ImVec2(sw, sh));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+        ImGui::PushStyleVar(ImGuiStyleVar_PopupBorderSize, 0.0f);
+        const bool open = ImGui::BeginPopup(subId, kMenuPopupFlags);
+        ImGui::PopStyleVar(2);
+        if (open) {
+            if (std::function<void()> r = menuRows(se.sub, sw, sh, menu.empty() ? std::string() : menu + "/" + se.label)) run = r;
+            ImGui::EndPopup();
         }
         ImGui::PopID();
     }
@@ -4017,12 +4109,13 @@ static void menus(State& st, editor::Document& doc, viewport::Ps1View& view) {
     float w, h;
     menuSize(entries, &w, &h);
     const ImRect anchor = g_menuRects[shown];
+    // No further down than the window's bottom; what does not fit scrolls (#378).
+    h = ui::popupHeight(h, anchor.Max.y + space::xs, ImGui::GetIO().DisplaySize.y, space::xs);
     ImGui::SetNextWindowPos(ImVec2(anchor.Min.x, anchor.Max.y + space::xs));
     ImGui::SetNextWindowSize(ImVec2(w, h));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
     ImGui::PushStyleVar(ImGuiStyleVar_PopupBorderSize, 0.0f);
-    const bool open = ImGui::BeginPopup(ids[shown], ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
-                                                        ImGuiWindowFlags_NoSavedSettings);
+    const bool open = ImGui::BeginPopup(ids[shown], kMenuPopupFlags);
     ImGui::PopStyleVar(2);
     if (!open) return;
     static const char* names[7] = {"menu.file", "menu.edit", "menu.object", "menu.build", "menu.view", "menu.help", "menu.players"};

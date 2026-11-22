@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cfloat>
+#include <climits>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -17,6 +18,7 @@
 #include "editor/tv_preview.hh"
 #include "ui/colour_hex.hh"
 #include "ui/icons.h"
+#include "ui/list_scroll.hh"
 #include "ui/popup_place.hh"
 #include "ui/scrub.hh"
 
@@ -821,10 +823,29 @@ int dropdownMenu(const char* id, ImRect r, const char* ic, const char* value, co
     return picked == current ? -1 : picked;
 }
 
+static ImRect thumbRect(ImRect view, float scroll, float content) {
+    const ui::Thumb th = ui::thumb(scroll, content, view.GetHeight());
+    return ImRect(ImVec2(view.Max.x - 7, view.Min.y + th.top), ImVec2(view.Max.x - 1, view.Min.y + th.top + th.height));
+}
+
+Hit scrollThumb(const char* id, ImRect view, float scroll, float content, const std::string& name) {
+    if (ui::maxScroll(content, view.GetHeight()) <= 0) return {};
+    const ImRect r = thumbRect(view, scroll, content);
+    if (!name.empty()) nameRect(name, r);
+    return interact(id, r);
+}
+
+void drawScrollThumb(ImDrawList* dl, ImRect view, float scroll, float content, bool hot) {
+    if (ui::maxScroll(content, view.GetHeight()) <= 0) return;
+    const ImRect r = thumbRect(view, scroll, content);
+    dl->AddRectFilled(ImVec2(r.Max.x - 4, r.Min.y + 2), ImVec2(r.Max.x - 1, r.Max.y - 2), hot ? color::textDim : color::textFaint, 2);
+}
+
 // Keyboard highlight and scroll of the open picker; only one is open at a time.
 struct PickerState {
-    int hi = 0;     // highlighted row, index into the items
-    int first = 0;  // first visible row
+    int hi = 0;      // highlighted row, index into the items
+    int first = 0;   // first visible row
+    float drag = 0;  // the scroll in px while its thumb is dragged
     char buf[64] = {};
 };
 static PickerState& pickerState() {
@@ -834,11 +855,13 @@ static PickerState& pickerState() {
 
 int picker(const char* id, ImVec2 pos, float width, const char* placeholder, std::string* query, const std::vector<PickerItem>& items) {
     Fonts& f = fonts();
-    const float pad = space::xs, searchH = 36, rowH = 40;
-    const int rows = 10;  // at most; the box shrinks to the matches
-    const int shown = std::clamp(static_cast<int>(items.size()), 1, rows);
-    ImVec2 size(width, pad * 2 + searchH + space::xs + rowH * static_cast<float>(shown));
+    const float pad = space::xs, searchH = 36, rowH = 40, chrome = pad * 2 + searchH + space::xs;
     ImVec2 disp = ImGui::GetIO().DisplaySize;
+    // As many rows as fit down to the window's bottom, at least 10 when the
+    // window holds them (#378); the box shrinks to the matches.
+    const int rows = ui::pickerRows(INT_MAX, pos.y, 0, disp.y, chrome, rowH, space::sm, 10);
+    const int shown = std::clamp(static_cast<int>(items.size()), 1, rows);
+    ImVec2 size(width, chrome + rowH * static_cast<float>(shown));
     pos.x = std::clamp(pos.x, space::sm, std::max(space::sm, disp.x - size.x - space::sm));
     pos.y = std::clamp(pos.y, space::sm, std::max(space::sm, disp.y - size.y - space::sm));
     ImGui::SetNextWindowPos(pos);
@@ -922,16 +945,31 @@ int picker(const char* id, ImVec2 pos, float width, const char* placeholder, std
     };
     if (ImGui::IsKeyPressed(ImGuiKey_DownArrow, true)) step(1);
     if (ImGui::IsKeyPressed(ImGuiKey_UpArrow, true)) step(-1);
-    // The wheel scrolls the list; a highlight it scrolls away comes along.
-    if (ImGui::IsWindowHovered() && ImGui::GetIO().MouseWheel != 0) {
-        s.first = std::clamp(s.first - static_cast<int>(ImGui::GetIO().MouseWheel), 0, std::max(0, n - rows));
+    // The wheel and the thumb scroll the list; a highlight they scroll away comes along.
+    auto keepHi = [&] {
         if (s.hi < s.first || s.hi >= s.first + rows) {
             s.hi = s.hi < s.first ? s.first : s.first + rows - 1;
             while (s.hi < n && !available(s.hi)) ++s.hi;
             if (s.hi >= n) s.hi = firstAvailable();
         }
+    };
+    if (ImGui::IsWindowHovered() && ImGui::GetIO().MouseWheel != 0) {
+        s.first = std::clamp(s.first - static_cast<int>(ImGui::GetIO().MouseWheel), 0, std::max(0, n - rows));
+        keepHi();
     }
     s.first = std::clamp(s.first, 0, std::max(0, n - rows));
+    // Matches past the rows show a thumb (#378); dragged, it moves the list by whole rows.
+    const ImRect list(ImVec2(box.Min.x, sr.Max.y + space::xs), ImVec2(box.Max.x, sr.Max.y + space::xs + rowH * static_cast<float>(rows)));
+    const float content = rowH * static_cast<float>(n);
+    const Hit thumb = scrollThumb("##thumb", list, rowH * static_cast<float>(s.first), content, std::string(id) + "/thumb");
+    if (thumb.held) {
+        s.drag = ui::clampScroll(s.drag + ui::thumbDragScroll(ImGui::GetIO().MouseDelta.y, content, list.GetHeight()), content,
+                                 list.GetHeight());
+        s.first = std::clamp(static_cast<int>(std::lround(s.drag / rowH)), 0, std::max(0, n - rows));
+        keepHi();
+    } else {
+        s.drag = rowH * static_cast<float>(s.first);
+    }
     if (enter && available(s.hi)) picked = s.hi;
 
     // Rows.
@@ -964,6 +1002,7 @@ int picker(const char* id, ImVec2 pos, float width, const char* placeholder, std
         dl->PopClipRect();
         if (h.clicked && ok) picked = i;
     }
+    drawScrollThumb(dl, list, rowH * static_cast<float>(s.first), content, thumb.hovered || thumb.held);
     bool closing = picked >= 0 || ImGui::IsKeyPressed(ImGuiKey_Escape, false);
     if (closing) ImGui::CloseCurrentPopup();
     ImGui::EndPopup();

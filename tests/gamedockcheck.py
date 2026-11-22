@@ -3,9 +3,9 @@
 # with SPLASHEDIT_FAKE_REDUX=320x240), which prints "fake redux up".
 #  - On the UI tab and on a script tab the Game view stays beside the tab,
 #    right of or below it, not over it.
-#  - View > Game View on Every Tab off (or game_every_tab=0 in the play
+#  - View > Panels > Game View on Every Tab off (or game_every_tab=0 in the play
 #    settings): the Game view shows on the Scene tab only, as before.
-#  - View > Console docks Play's output as a Console tab under the middle
+#  - View > Panels > Console docks Play's output as a Console tab under the middle
 #    panel, beside the Game view, no popup open; Pop up puts it back in the
 #    status bar's popup. Docked, the status bar entry brings the tab back.
 #  - Both choices are saved in the play settings (--play-settings).
@@ -98,14 +98,15 @@ check('off: the Scene tab had the Game view before the click',
       any(l == 'game: shown yes every tab off' for l in lines), [l for l in lines if l.startswith('game: shown')])
 
 # 4. Turned off from the View menu and saved.
-lines, c, cfg = run('menu', [], ['--click', '@menu.view', '--wait', '3', '--click', '@menu.view/Game View on Every Tab', '--wait', '5',
+lines, c, cfg = run('menu', [], ['--click', '@menu.view', '--wait', '3', '--click', '@menu.view/Panels', '--wait', '3',
+                                 '--click', '@menu.view/Panels/Game View on Every Tab', '--wait', '5',
                                  '--click', '@tab.ui', '--wait', '30'])
 check('menu: Game View on Every Tab off is saved', 'game_every_tab=0\n' in cfg, cfg)
 check('menu: the UI tab has no Game view then', 'game.frame' not in c, sorted(k for k in c if k.startswith('game.')))
 
-# 5. View > Console docks the output beside the Game view, no popup; saved.
+# 5. View > Panels > Console docks the output beside the Game view, no popup; saved.
 lines, c, cfg = run('dock', [], ['--click', '@tab.ui', '--wait', '10', '--click', '@menu.view', '--wait', '3',
-                                 '--click', '@menu.view/Console', '--wait', '30'])
+                                 '--click', '@menu.view/Panels', '--wait', '3', '--click', '@menu.view/Panels/Console', '--wait', '30'])
 check('dock: the Console tab and panel are drawn', 'tab_console' in c and 'console.panel' in c, sorted(c))
 check('dock: it says docked', last(lines, 'console: docked') == 'console: docked', last(lines, 'console: docked'))
 check('dock: it shows what redux printed', any(l == 'console: play shown 1 of 1' for l in lines),
