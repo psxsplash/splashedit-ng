@@ -20634,6 +20634,16 @@ void testShine() {
     const size_t obj = rd16(b, table + 4), tris = rd16(b, table + 6);
     CHECK(obj < ngo);
     if (obj >= ngo) return;
+    {
+        // The frame debugger's tag map reads the v30 header too: its object
+        // table after 168 bytes, so the Crate comes back with its Tri count.
+        gpudump::TagScene tags;
+        std::string err;
+        CHECK(gpudump::parseTagScene(std::vector<uint8_t>(b.begin(), b.end()), tags, &err));
+        CHECK(err.empty());
+        CHECK(tags.objects.size() == ngo);
+        CHECK(tags.objects.size() == ngo && tags.objects[obj].triangles == tris && !tags.objects[obj].streamed);
+    }
     const size_t at = 168 + 8 * nlua + 92 * obj;
     // The Crate: at (0, 0.5, 1), its Tri count in the record.
     const float gte = sc.settings.gteScaling;
