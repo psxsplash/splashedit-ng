@@ -1345,8 +1345,8 @@ bool colourRow(editor::Document& doc, Rows& rows, const char* id, const char* la
 }
 
 // The Blend row: opaque or one of the PS1's four semi-transparency modes, one
-// undo step per pick. Images and text cannot blend (their texels are opaque),
-// so for them it shows Opaque, greyed, and says why. For the elements `idx` of
+// undo step per pick. Text in the system font cannot blend (psxsplash draws it
+// with psyqo's font), so for it the row shows Opaque, greyed, and says why. For the elements `idx` of
 // canvas `c` (`can`: they can blend), showing `blend` or, `mixed`, "mixed".
 // Scripted tests: the field is ui.blend, its menu rows ui.blend/<label>.
 void blendRow(Rows& rows, editor::Document& doc, int c, const std::vector<int>& idx, bool can, splash::UIBlend blend, bool mixed = false) {
@@ -1354,8 +1354,8 @@ void blendRow(Rows& rows, editor::Document& doc, int c, const std::vector<int>& 
     const char* tip = can ? "How it mixes with what is behind it. Opaque covers it. 50% (half) averages the two. "
                             "Add brightens what is behind it by the colour. Subtract darkens what is behind it by the colour. "
                             "Add 25% brightens what is behind it by a quarter of the colour."
-                          : "Images and text always draw opaque: the PS1 only blends texels marked semi-transparent, "
-                            "and the UI atlas does not mark them.";
+                          : "Text in the system font always draws opaque on the PS1. Pick a font (here or as the "
+                            "canvas's default font) to blend it.";
     ImRect field = rows.row("lblend", "Blend", tip);
     nameRect("ui.blend", field);
     if (!can) {
@@ -1781,7 +1781,7 @@ void CanvasView::elementInspector(ImDrawList* dl, ImRect r, float y, editor::Doc
                                   e.type == UIElementType::Image ? "Multiplies the texture by colour/128: #808080 shows it as it is."
                                                                  : "Cut to 15-bit colour on the PS1, as the preview shows.",
                                   e.color, [](UIElement& el, const std::array<float, 3>& v) { el.color = v; }, c, {ei});
-        blendRow(rows, doc, c, {ei}, splash::blendable(e.type), e.blend);
+        blendRow(rows, doc, c, {ei}, splash::blendable(cv, e), e.blend);
         rows.gap();
     }
 }

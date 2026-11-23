@@ -1,7 +1,8 @@
 # The canvas inspector's Blend row (#312) driven headless: picking a mode
-# from the dropdown saves it, is one undo step, and a text element shows the
-# row disabled (no menu, nothing saved). The canvas preview blends: pixels of
-# a Subtract box over a white stripe come out darker than the stripe.
+# from the dropdown saves it, is one undo step, and a system-font text element
+# shows the row disabled (no menu, nothing saved). An image has the row and
+# blends. The canvas preview blends: pixels of a Subtract box over a white
+# stripe come out darker than the stripe, a Half image over it the average.
 # usage: python3 uiblendcheck.py <splashedit> [screenshot-dir]
 import json, os, re, struct, subprocess, sys, tempfile, zlib
 
@@ -124,7 +125,7 @@ check('one pick is one undo step', blends(scene) == {'row2': 'subtract'}, blends
 d, scene, out, ctl = run(PICK + ['--click', '@ui.blend/Subtract', '--wait', '5', '--key', 'ctrl+z', '--wait', '5'])
 check('undo puts back Opaque (no "blend" key)', blends(scene) == {}, blends(scene))
 
-# A text element: the row is there, but no menu opens and nothing is saved.
+# A system-font text element: the row is there, but no menu opens and nothing is saved.
 LABEL = at(row(1)[0] + 8, row(1)[1] + 8)
 d, scene, out, ctl = run(['--click', LABEL, '--wait', '5', '--click', '@ui.blend', '--wait', '5'])
 check('a Text inspector draws the Blend row', 'ui.blend' in ctl, sorted(k for k in ctl if k.startswith('ui.'))[:30])
@@ -153,5 +154,43 @@ check('Half over white is the average of grey and white', all(c == ex((31 + 16) 
 check('Add over white stays white', all(c >= 250 for c in got['add']), got['add'])
 check('Subtract over white is white less grey', all(c == ex(31 - 16) for c in got['subtract']), got['subtract'])
 check('Add 25% over white stays white', all(c >= 250 for c in got['addQuarter']), got['addQuarter'])
+
+
+def writepng(path, w, h, rgb):
+    raw = b''.join(b'\0' + bytes(rgb) * w for _ in range(h))
+    chunk = lambda t, b: struct.pack('>I', len(b)) + t + b + struct.pack('>I', zlib.crc32(t + b) & 0xffffffff)
+    open(path, 'wb').write(b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, 8, 2, 0, 0, 0)) +
+                           chunk(b'IDAT', zlib.compress(raw)) + chunk(b'IEND', b''))
+
+
+def image_project(blend=None):
+    """The stripes and rows of project(), and a grey 16x16 image 'pic' drawn
+    40x8 over the white stripe, in the gap between rows 0 and 1."""
+    d = project()
+    writepng(os.path.join(d, 'grey.png'), 16, 16, [128, 128, 128])
+    s = json.load(open(os.path.join(d, 'hud.scene'), encoding='utf-8'))
+    pic = {'type': 'image', 'name': 'pic', 'visible': True, 'rect': [236, 66, 40, 8], 'anchorMin': [0, 0], 'anchorMax': [0, 0],
+           'color': [0.5, 0.5, 0.5], 'texture': 'grey.png', 'bitDepth': 16}
+    if blend: pic['blend'] = blend
+    s['canvases'][0]['elements'].append(pic)
+    json.dump(s, open(os.path.join(d, 'hud.scene'), 'w'), indent=1)
+    return d
+
+
+# An image: the row opens the menu and a pick saves; Half blends it with the
+# white stripe in the preview (grey 16 of 31 and white: 23), opaque it is grey.
+PIC = at(256, 70)
+OPEN = ['--click', PIC, '--wait', '5', '--click', '@ui.blend', '--wait', '5']
+d, scene, out, ctl = run(OPEN, image_project())
+check('an Image Blend row opens the menu', 'ui.blend/50% (half)' in ctl, sorted(k for k in ctl if k.startswith('ui.blend')))
+d, scene, out, ctl = run(OPEN + ['--click', '@ui.blend/50% (half)', '--wait', '5'], image_project())
+check('picking 50% (half) on an image saves "blend": "half"', blends(scene) == {'pic': 'half'}, blends(scene))
+for blend, want in [(None, ex(16)), ('half', ex((31 + 16) // 2))]:
+    d = image_project(blend)
+    shot = os.path.join(shots, 'se-uiblend-image-%s.png' % (blend or 'opaque')) if shots else None
+    d, scene, out, ctl = run([], d, shot)
+    w, h, bpp, rows = readpng(shot or os.path.join(d, 'shot.png'))
+    got = px(256, 70)
+    check('the %s image over white is %d' % (blend or 'opaque', want), all(c == want for c in got), got)
 print(f'{fails} failures')
 sys.exit(1 if fails else 0)

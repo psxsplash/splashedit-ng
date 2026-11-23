@@ -446,8 +446,8 @@ past 255, the font sheets in the .vram file (in the x = 960 column, one page eac
 system font, row 0 blank) and that an unknown font, 4 fonts, a repeated font name or 25 canvases
 fail the export. Element flags: every element of the scene exports visible and opaque (0x01); with
 blends set, a box, bar or line carries the code in bits 1-3 (Subtract box 0x07, AddQuarter bar 0x09,
-hidden Add line 0x04, Half box 0x03) while an image or text with a blend in the scene still exports
-0x01, and an unknown blend name fails the export.
+hidden Add line 0x04, Half box 0x03) while text in the system font with a blend in the scene still
+exports 0x01, and an unknown blend name fails the export.
 
     python3 uicheck.py <splashpack-cli>
 
@@ -543,10 +543,12 @@ cell, and None saves a plain image without the keys.
 one grey box per row across them and the checkerboard: on a Box the menu (`ui.blend`, items
 `ui.blend/Opaque`, `ui.blend/50% (half)`, `ui.blend/Add`, `ui.blend/Subtract`, `ui.blend/Add 25%`)
 must save `"blend": "subtract"`, one Ctrl+Z must take back one pick and undo to Opaque must leave no
-`blend` key; on a Text element the row must be there but open no menu and save nothing. With a box
+`blend` key; on a system-font Text element the row must be there but open no menu and save nothing;
+on an Image the menu must open and `50% (half)` save `"blend": "half"`. With a box
 per mode, the canvas preview over the white stripe must be the GPU's 5-bit blend of grey and white
-(Half 189, Add and Add 25% white, Subtract 123). With a directory, the last screenshot is saved there
-as `se-uiblend-canvas.png`.
+(Half 189, Add and Add 25% white, Subtract 123), and a grey image over it 132 opaque, 189 at Half.
+With a directory, the screenshots are saved there as `se-uiblend-canvas.png`,
+`se-uiblend-image-opaque.png` and `se-uiblend-image-half.png`.
 
     python3 uiblendcheck.py <splashedit> [screenshot-dir]
 

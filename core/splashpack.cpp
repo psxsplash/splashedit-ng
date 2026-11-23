@@ -911,6 +911,17 @@ void prepareUi(const Scene& scene, const std::vector<UICanvas>& canvases, const 
             if (e.type == UIElementType::Text) {
                 if (!e.font.empty() && !fontIndex.count(e.font))
                     res.errors.push_back(where + ": no UI font named '" + e.font + "'");
+                // A blended text in a grey font: STP on the font's palette
+                // (entry 0, transparent, stays 0). A binary font's white CLUT
+                // is psxsplash's, which sets STP there itself. Opaque text in
+                // the same font ignores STP.
+                if (e.blend != UIBlend::Opaque)
+                    if (const auto fi = fontIndex.find(effectiveFont(cv, e)); fi != fontIndex.end() && fi->second > 0) {
+                        FontSheet& fs = sheets[size_t(fi->second - 1)];
+                        if (fs.grey)
+                            for (uint16_t& w : fs.clut)
+                                if (w != 0) w |= 0x8000;
+                    }
                 if (e.text.size() > size_t(kUiTextMax))
                     res.warnings.push_back(where + ": text cut to " + std::to_string(kUiTextMax) + " bytes");
                 for (unsigned char c : e.text)
@@ -957,6 +968,7 @@ void prepareUi(const Scene& scene, const std::vector<UICanvas>& canvases, const 
                         continue;
                     }
                     store.back().source = sh.texture;
+                    if (e.blend != UIBlend::Opaque) setSemiTransparent(store.back());
                     uiTextures[ci][ei] = &store.back();
                 }
                 continue;
@@ -973,6 +985,10 @@ void prepareUi(const Scene& scene, const std::vector<UICanvas>& canvases, const 
                     continue;
                 }
                 store.back().source = e.texture;
+                // Blended: STP on its drawn texels (CLUT entries), so the
+                // semi-transparent sprite blends them; the packer keeps it
+                // apart from an opaque use of the same image.
+                if (e.blend != UIBlend::Opaque) setSemiTransparent(store.back());
                 uiTextures[ci][ei] = &store.back();
             }
             if (e.type == UIElementType::Line)
@@ -1052,9 +1068,8 @@ void writeUi(BinWriter& w, size_t tableOffsetPos, const std::vector<UICanvas>& c
             std::string name = truncateUtf16(e.name, 24);
             w.u8(uint8_t(e.type));
             // Flags: bit 0 visible, bits 1-3 the blend code (psxsplash
-            // src/uiblend.hh). Image and Text draw textured and cannot blend
-            // with the UI atlas, so they always carry 0 there.
-            const uint8_t blend = blendable(e.type) ? uint8_t(e.blend) : 0;
+            // src/uiblend.hh). System-font text cannot blend and carries 0.
+            const uint8_t blend = blendable(cv, e) ? uint8_t(e.blend) : 0;
             w.u8(uint8_t((e.visible ? 1 : 0) | (blend << 1)));
             w.u8(uint8_t(name.size()));
             w.u8(0);
@@ -2301,6 +2316,15 @@ static ExportResult exportSplashpackBaked(const Scene& scene, const fs::path& ro
     for (size_t ci = 0; ci < canvases.size(); ci++)
         for (const UIElement& e : canvases[ci].elements)
             if (e.type == UIElementType::Image) res.stats.uiImages.push_back({canvases[ci].name, e.name, e.sheet, e.cell});
+    // A sheet that a blended image shows a cell of gets STP on its texels, as
+    // its own Semi-transparent option would: the image shares the sheet's
+    // texture, and opaque sprites, tiles and images of it ignore STP.
+    std::vector<bool> blendedSheet(scene.spriteSheets.size(), false);
+    for (size_t ci = 0; ci < canvases.size(); ci++)
+        for (size_t ei = 0; ei < uiSheets[ci].size() && ei < canvases[ci].elements.size(); ei++)
+            if (const int si = uiSheets[ci][ei]; si >= 0 && size_t(si) < blendedSheet.size() &&
+                                                 canvases[ci].elements[ei].blend != UIBlend::Opaque)
+                blendedSheet[size_t(si)] = true;
 
     // Sprite sheets: checked, then each texture converted with cutout on (the
     // engine draws them as sprites over the scene), packed after the UI's.
@@ -2336,7 +2360,7 @@ static ExportResult exportSplashpackBaked(const Scene& scene, const fs::path& ro
                     continue;
                 }
                 textureStore.back().source = s.texture;
-                if (s.semiTransparent) setSemiTransparent(textureStore.back());
+                if (s.semiTransparent || blendedSheet[i]) setSemiTransparent(textureStore.back());
                 spriteTextures[i] = &textureStore.back();
             }
     }
