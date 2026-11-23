@@ -27,6 +27,27 @@ static std::string utf8(const fs::path& p) {
 }
 static fs::path fromUtf8(const std::string& s) { return fs::path(std::u8string(s.begin(), s.end())); }
 
+const char* playDeviceName(PlayDevice d) {
+    switch (d) {
+        case PlayDevice::Analog: return "analog";
+        case PlayDevice::Mouse: return "mouse";
+        case PlayDevice::None: return "none";
+        default: return "pad";
+    }
+}
+
+// "a,b,c" split at the commas.
+static std::vector<std::string> commaList(const std::string& v) {
+    std::vector<std::string> out;
+    size_t start = 0;
+    for (;;) {
+        const size_t c = v.find(',', start);
+        out.push_back(v.substr(start, c == std::string::npos ? std::string::npos : c - start));
+        if (c == std::string::npos) return out;
+        start = c + 1;
+    }
+}
+
 PlayTools loadPlayTools(const fs::path& file) {
     PlayTools t;
     std::ifstream in(file);
@@ -62,7 +83,15 @@ PlayTools loadPlayTools(const fs::path& file) {
         else if (key == "scale_lock") t.scaleLock = value == "1";
         else if (key == "game_every_tab") t.gameEveryTab = value != "0";
         else if (key == "console_docked") t.consoleDocked = value == "1";
-        else
+        else if (key == "play_devices") {
+            const std::vector<std::string> names = commaList(value);
+            for (size_t i = 0; i < names.size() && i < t.input.device.size(); ++i)
+                for (PlayDevice d : {PlayDevice::Pad, PlayDevice::Analog, PlayDevice::Mouse, PlayDevice::None})
+                    if (names[i] == playDeviceName(d)) t.input.device[i] = d;
+        } else if (key == "multitap") {
+            const std::vector<std::string> on = commaList(value);
+            for (size_t i = 0; i < on.size() && i < 2; ++i) t.input.multitap[i] = on[i] == "1";
+        } else
             for (int k = 0; k < kDetachPanels; ++k) {
                 const std::string name = detachPanelName(DetachPanel(k));
                 if (key == name + "_detached") t.window(DetachPanel(k)).detached = value == "1";
@@ -103,6 +132,10 @@ bool savePlayTools(const fs::path& file, const PlayTools& t) {
     for (int k = 0; k < kDetachPanels; ++k)
         if (const WindowRect& r = t.window(DetachPanel(k)).rect; !r.empty())
             out << detachPanelName(DetachPanel(k)) << "_window=" << windowRectValue(r) << "\n";
+    out << "play_devices=";
+    for (size_t i = 0; i < t.input.device.size(); ++i) out << (i ? "," : "") << playDeviceName(t.input.device[i]);
+    out << "\n"
+        << "multitap=" << (t.input.multitap[0] ? 1 : 0) << "," << (t.input.multitap[1] ? 1 : 0) << "\n";
     return bool(out);
 }
 

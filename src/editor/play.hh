@@ -4,6 +4,7 @@
 
 #include <array>
 #include <cstddef>
+#include <array>
 #include <cstdint>
 #include <filesystem>
 #include <optional>
@@ -23,6 +24,20 @@ namespace editor {
 // or both (see overlayEngine). The disc never gets them. bootLogo off makes
 // them boot the build without psxsplash's boot logo (the -nologo one beside
 // it, see engineFor); the disc follows the project's own disc setting.
+// What Play plugs in for each player, and whether it plugs a multitap into
+// port 1 or 2. Only Play uses it: the exported game reads whatever is in
+// the console's ports. Players 1 and 2 are ports 1 and 2; 3 to 5 port 1's
+// multitap slots B to D, 6 to 8 port 2's, which hold a pad or nothing.
+enum class PlayDevice { Pad, Analog, Mouse, None };
+inline constexpr int kPlayInputPlayers = 8;
+struct PlayInput {
+    std::array<PlayDevice, kPlayInputPlayers> device{};  // all Pad
+    std::array<bool, 2> multitap{};
+    bool operator==(const PlayInput&) const = default;
+};
+// "pad", "analog", "mouse", "none".
+const char* playDeviceName(PlayDevice d);
+
 struct PlayTools {
     std::filesystem::path redux, psxsplash, bios, disc;
     // Export for the Web: the folder of a pcsx-redux web (WebAssembly) build.
@@ -68,6 +83,7 @@ struct PlayTools {
     const PanelWindow& window(DetachPanel panel) const { return *const_cast<PlayTools*>(this)->windows()[size_t(panel)]; }
     // The inspector's Scale lock (#264): one axis edited scales all three.
     bool scaleLock = false;
+    PlayInput input;
 };
 inline constexpr int kMaxPlayers = 10;
 // Whether a Play with these tools runs its consoles through the relay.
@@ -82,10 +98,13 @@ inline bool usesRelay(const PlayTools& t) { return t.players >= 3 || (t.players 
 // scale_lock= (1 or 0), game_every_tab= (1 or 0), console_docked= (1 or 0),
 // <panel>_detached= (1 or 0) and <panel>_window= (x,y,w,h in screen
 // coordinates; written only once placed) for each of game, console, scene,
-// inspector, project, timeline and view (the 3D Scene view). A missing
-// file or key reads as empty or off, but boot_logo, game_dither and game_every_tab as on,
-// players as 1 (also for a value that is not a number) and game_aspect as 4:3;
-// an unknown game_overlay or game_crop as over and none.
+// inspector, project, timeline and view (the 3D Scene view),
+// play_devices= (8 comma-separated playDeviceName()s) and multitap= (two
+// 1s or 0s, "1,0"). A missing file or key reads as empty or off, but
+// boot_logo, game_dither and game_every_tab as on, players as 1 (also for a
+// value that is not a number) and game_aspect as 4:3; an unknown
+// game_overlay or game_crop as over and none; a play_devices entry that is
+// missing or unknown as pad.
 PlayTools loadPlayTools(const std::filesystem::path& file);
 bool savePlayTools(const std::filesystem::path& file, const PlayTools& tools);
 

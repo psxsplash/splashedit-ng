@@ -129,6 +129,7 @@ add_library(splasheditdoc STATIC
     src/editor/lua_editor.cpp
     src/editor/play.cpp
     src/editor/panel_window.cpp
+    src/editor/host_input.cpp
     src/editor/linkplay.cpp
     src/editor/relay.cpp
     src/editor/model_import.cpp
