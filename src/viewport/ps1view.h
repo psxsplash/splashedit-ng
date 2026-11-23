@@ -4,6 +4,7 @@
 
 #include "editor/pick.hh"
 #include "editor/timeline.hh"
+#include "background.hh"
 #include "scene.hh"
 #include "skin.hh"
 
@@ -96,7 +97,8 @@ class Ps1View {
     void setOrtho(bool on) { m_ortho = on; }
     bool ortho() const { return m_ortho; }
     // Vertical field of view in radians (kFovY unless the Player view sets
-    // the engine's, #356). Clamped to [0.05, 3.0].
+    // the engine's, #356, or a Fixed camera's after Look through until the
+    // view is turned, zoomed or framed). Clamped to [0.05, 3.0].
     void setFovY(float radians) { m_fovY = radians < 0.05f ? 0.05f : radians > 3.0f ? 3.0f : radians; }
     float fovY() const { return m_fovY; }
     // World units covered by one panel pixel at `depth` in front of the eye.
@@ -126,6 +128,17 @@ class Ps1View {
     };
     Pose pose() const { return {m_eye, m_target, m_ortho, m_fovY}; }
     void setPose(const Pose& p) { m_eye = p.eye, m_target = p.target, m_ortho = p.ortho, m_fovY = p.fovY; }
+    // A Fixed camera's bake: the objects marked in `include` (flatten order)
+    // drawn clean from `cam` with psxsplash's projection (centre 160,120,
+    // distance H, pixel centres on whole screen coordinates) at 320x240, in
+    // the scene's background colour and fog. rgba is top row first; sz is
+    // each pixel's GTE depth, < 0 where nothing was drawn. Leaves the view as
+    // it was (it rebuilds on its next render). False without a document.
+    struct BakeShot {
+        std::vector<uint8_t> rgba;
+        std::vector<float> sz;
+    };
+    bool bake(const splash::BgCamera& cam, const std::vector<bool>& include, BakeShot* out);
     static constexpr float kFovY = 0.95f;
     static constexpr float kOrthoBack = 150.0f;  // orthographic: render eye's distance behind the pivot
 
@@ -136,6 +149,7 @@ class Ps1View {
         float px, py, pz;
         float u, v;
         float r, g, b;
+        float pw = 1;  // bake: px, py, pz, pw are the clip position itself
     };
     // A run of vertices drawn with one GL texture bound.
     struct Batch {
@@ -151,6 +165,12 @@ class Ps1View {
 
     const editor::Document* m_doc = nullptr;
     uint32_t m_drawDistance = 0;
+    const std::vector<bool>* m_include = nullptr;  // bake(): only these objects
+    // bake(): the camera; rebuild() then writes clip positions (see bakeClip).
+    const splash::BgCamera* m_bakeCam = nullptr;
+    splash::BgEngineCamera m_bakeEngine;
+    static constexpr float kBakeNear = 0.05f, kBakeFar = 2000.0f;
+    void bakeClip(const splash::FlatObject& fo, const splash::Mesh& mesh, const std::vector<int>& tri, Vertex* out) const;
     unsigned m_builtRevision = 0;
     editor::Preview m_preview;
     bool m_previewDirty = false;

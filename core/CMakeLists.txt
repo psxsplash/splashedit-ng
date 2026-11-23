@@ -94,6 +94,7 @@ add_library(splashcore STATIC
     skin.cpp
     texture.cpp
     vrampacker.cpp
+    background.cpp
     bvh.cpp
     navregion.cpp
     rooms.cpp

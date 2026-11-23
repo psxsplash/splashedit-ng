@@ -26,6 +26,7 @@ const std::vector<ComponentInfo>& components() {
         {ComponentKind::Terrain, "Terrain", "landscape ground heightmap height field hills sculpt paint", "Ground you sculpt and paint in the Scene view."},
         {ComponentKind::Path, "Path", "curve route rail track spline waypoints moving platform patrol camera dolly", "A curve that objects, agents and the camera ride."},
         {ComponentKind::FollowPath, "Follow path", "ride move along curve route platform patrol", "Moves this object along a Path."},
+        {ComponentKind::FixedCamera, "Fixed camera", "baked background prerendered resident evil camera angle view", "A camera angle baked into a 2D background the characters walk in front of and behind."},
     };
     return list;
 }
@@ -55,6 +56,7 @@ bool hasComponent(const splash::Object& o, ComponentKind k) {
         case ComponentKind::Terrain: return o.terrain.has_value();
         case ComponentKind::Path: return o.path.has_value();
         case ComponentKind::FollowPath: return o.followPath.has_value();
+        case ComponentKind::FixedCamera: return o.fixedCamera.has_value();
     }
     return false;
 }
@@ -103,6 +105,7 @@ bool addComponent(splash::Object& o, ComponentKind k) {
             o.path.emplace().points = {{-2, 0, 0}, {2, 0, 0}};
             break;
         case ComponentKind::FollowPath: o.followPath.emplace(); break;
+        case ComponentKind::FixedCamera: o.fixedCamera.emplace(); break;
     }
     return true;
 }
@@ -132,6 +135,7 @@ bool removeComponent(splash::Object& o, ComponentKind k) {
         case ComponentKind::Terrain: o.terrain.reset(); break;
         case ComponentKind::Path: o.path.reset(); break;
         case ComponentKind::FollowPath: o.followPath.reset(); break;
+        case ComponentKind::FixedCamera: o.fixedCamera.reset(); break;
     }
     return true;
 }
@@ -154,6 +158,7 @@ const std::vector<ObjectPreset>& presets() {
         {"Agent (NPC)", "npc enemy guard ai patrol waypoint", "A character that walks the nav regions, patrols and senses the player.", {K::Agent}},
         {"Terrain", "landscape ground heightmap hills sculpt paint", "Ground you sculpt and paint in the Scene view.", {K::Terrain}},
         {"Path", "curve route rail track spline moving platform patrol camera dolly", "A curve that objects, agents and the camera ride.", {K::Path}},
+        {"Fixed camera", "baked background prerendered camera angle", "A camera angle baked into a 2D background.", {K::FixedCamera}},
     };
     return list;
 }
