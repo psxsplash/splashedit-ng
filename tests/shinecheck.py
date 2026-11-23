@@ -127,7 +127,7 @@ rc, rects, out = run(['--click', SEARCH + ',0', '--text', 'env', '--wait', '5', 
                      ['--move', '760,940'] + W(5) + ['--shot', mid] +
                      ['--scroll-to', '@obj.shinestrength'] + W(3) + ['--dblclick', '@obj.shinestrength'] + W(3) +
                      ['--key', 'ctrl+a', '--text', '25', '--key', 'enter'] + W(5) +
-                     ['--click', '@obj.shineblend'] + W(5) + ['--click', '@obj.shineblend/Half'] + W(10) +
+                     ['--scroll-to', '@obj.shineblend'] + W(3) + ['--click', '@obj.shineblend'] + W(5) + ['--click', '@obj.shineblend/Half'] + W(10) +
                      ['--key', 'ctrl+s'] + W(10) + ['--wait-export'] + W(20) + ['--move', '760,940'] + W(5), shot)
 
 check('the editor ran to its screenshot', rc == 0 and os.path.exists(shot), (rc, out[-10:]))

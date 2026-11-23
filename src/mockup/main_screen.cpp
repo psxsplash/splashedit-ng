@@ -13373,58 +13373,6 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
             ImGui::PopStyleVar(4);
             ImGui::PopStyleColor(2);
         };
-        // A material's shine (splash::Shine): its reflection image, and once it
-        // has one, strength and blend. `sfx` names the rows: "" with one
-        // material (obj.shine, obj.shinestrength, obj.shineblend), else ".<i>".
-        auto shineRows = [&](size_t i, const std::string& sfx) {
-            const splash::Shine& sh = m.materials[i].shine;
-            const editor::TextureInfo* si = sh.texture.empty() ? nullptr : doc.texture(sh.texture);
-            const editor::AssetStatus sSt = si ? si->status : sh.texture.empty() ? editor::AssetStatus::Ok : editor::AssetStatus::Missing;
-            const std::string sMeta = si && si->status == editor::AssetStatus::Ok
-                                          ? std::to_string(si->width) + " x " + std::to_string(si->height)
-                                          : std::string();
-            const ImRect shRow =
-                row(("lshine" + sfx).c_str(), "Shine",
-                    "Reflection image for chrome, glass, wet floors or car paint. The console draws this part of the model "
-                    "again through it, mapped by which way each vertex faces the camera: the top of the image is what "
-                    "faces up, the middle what faces the camera, so the reflection slides over the surface as the camera "
-                    "moves. A sky or studio picture works best. Costs about one more triangle per shiny triangle.");
-            nameRect("obj.shine" + sfx, shRow);
-            if (slotField(st, doc, static_cast<int>(AssetSlot::ShineTexture), path, ("shine" + sfx).c_str(), ("obj.shine" + sfx).c_str(),
-                          shRow, icon::grid,
-                          sSt != editor::AssetStatus::Ok ? color::warn : color::textDim,
-                          sh.texture.empty() ? "None" : fileName(sh.texture).c_str(), sMeta.empty() ? nullptr : sMeta.c_str(),
-                          int(i)) |
-                fileCard(("fixshine" + sfx).c_str(), sSt, sh.texture, si ? si->error : std::string()))
-                pickAsset(AssetSlot::ShineTexture, path, int(i));
-            if (sh.texture.empty()) return;
-            float sv = sh.strength * 100.f;
-            const ImRect strRow = row(("lshinestr" + sfx).c_str(), "Shine strength",
-                                      "How strongly the reflection shows: 100 draws the image as it is, 0 not at all. "
-                                      "With Add blending, high values wash a dark colour out to the reflection's.");
-            nameRect("obj.shinestrength" + sfx, strRow);
-            commit(numberField(("shinestr" + sfx).c_str(), strRow, fmtShort(sv).c_str(), "%", 0, nullptr, &sv), "shinestr" + sfx,
-                   [&](splash::Object& ob) {
-                       if (!ob.mesh || i >= ob.mesh->materials.size()) return;
-                       ob.mesh->materials[i].shine.strength = splash::clampv(sv / 100.f, 0.f, 1.f);
-                   });
-            const ImRect blRow = row(("lshineblend" + sfx).c_str(), "Shine blend",
-                                     "Add brightens what is under it, for chrome, glass and highlights. Half averages the "
-                                     "two 50/50, so paint keeps its colour under the reflection. Off removes the shine.");
-            nameRect("obj.shineblend" + sfx, blRow);
-            const bool half = sh.blend == splash::ShineBlend::Half;
-            const int pick = dropdownMenu(("obj.shineblend" + sfx).c_str(), blRow, nullptr, half ? "Half" : "Add",
-                                          {"Off", "Add", "Half"}, half ? 2 : 1);
-            if (pick == 0)
-                doc.edit(path, [i](splash::Object& ob) {
-                    if (ob.mesh && i < ob.mesh->materials.size()) ob.mesh->materials[i].shine.texture.clear();
-                });
-            else if (pick > 0 && (pick == 2) != half)
-                doc.edit(path, [i, pick](splash::Object& ob) {
-                    if (ob.mesh && i < ob.mesh->materials.size())
-                        ob.mesh->materials[i].shine.blend = pick == 2 ? splash::ShineBlend::Half : splash::ShineBlend::Add;
-                });
-        };
         // For scripted tests: the materials, one line each.
         int textured = 0;
         for (const splash::Material& mat : m.materials) textured += !mat.texture.empty();
@@ -13487,7 +13435,6 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                 pickAsset(AssetSlot::Texture, path, 0);
             if (nMat == 1 && texPath.empty()) matColour(0);
             if (nMat == 1 && !texPath.empty()) palGroup(0);
-            if (nMat == 1) shineRows(0, "");
         } else {
             std::string cap = std::to_string(nMat) + " materials, " + std::to_string(textured) + " textured";
             if (meshSt == editor::AssetStatus::Ok && nMat > size_t(mi->submeshes)) {
@@ -13536,7 +13483,6 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                         });
                     palGroup(i);
                 }
-                shineRows(i, "." + is);
             }
         }
         if (to4) {
@@ -15490,16 +15436,86 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
     text(dl, ImVec2(lx, add.Min.y + 8), f.medium, type::icon, color::textDim, icon::plus);
     text(dl, ImVec2(lx + 22, add.Min.y + 8), f.medium, type::body, color::textDim, lbl);
     if (h.clicked) st.openAddComponent = true;
+    // Shine, its own section after everything else (Add component included),
+    // so an object without shine draws every other row where it always did.
+    float bottom = add.Max.y;
+    if (o->mesh && !o->mesh->materials.empty()) {
+        const splash::MeshComponent& m = *o->mesh;
+        const size_t nMat = m.materials.size();
+        y = add.Max.y + space::md;
+        top = y;
+        fold(section("s_shine", ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), icon::sun, kind::mesh, "Shine", true, true, false));
+        y += 34 + space::xs;
+        // A material's shine (splash::Shine): its reflection image, and once it
+        // has one, strength and blend. `sfx` names the rows: "" with one
+        // material (obj.shine, obj.shinestrength, obj.shineblend), else ".<i>";
+        // `label` heads the image row.
+        auto shineRows = [&](size_t i, const std::string& sfx, const char* label) {
+            const splash::Shine& sh = m.materials[i].shine;
+            const editor::TextureInfo* si = sh.texture.empty() ? nullptr : doc.texture(sh.texture);
+            const editor::AssetStatus sSt = si ? si->status : sh.texture.empty() ? editor::AssetStatus::Ok : editor::AssetStatus::Missing;
+            const std::string sMeta = si && si->status == editor::AssetStatus::Ok
+                                          ? std::to_string(si->width) + " x " + std::to_string(si->height)
+                                          : std::string();
+            const ImRect shRow =
+                row(("lshine" + sfx).c_str(), label,
+                    "Reflection image for chrome, glass, wet floors or car paint. The console draws this part of the model "
+                    "again through it, mapped by which way each vertex faces the camera: the top of the image is what "
+                    "faces up, the middle what faces the camera, so the reflection slides over the surface as the camera "
+                    "moves. A sky or studio picture works best. Costs about one more triangle per shiny triangle.");
+            nameRect("obj.shine" + sfx, shRow);
+            if (slotField(st, doc, static_cast<int>(AssetSlot::ShineTexture), path, ("shine" + sfx).c_str(), ("obj.shine" + sfx).c_str(),
+                          shRow, icon::grid,
+                          sSt != editor::AssetStatus::Ok ? color::warn : color::textDim,
+                          sh.texture.empty() ? "None" : fileName(sh.texture).c_str(), sMeta.empty() ? nullptr : sMeta.c_str(),
+                          int(i)) |
+                fileCard(("fixshine" + sfx).c_str(), sSt, sh.texture, si ? si->error : std::string()))
+                pickAsset(AssetSlot::ShineTexture, path, int(i));
+            if (sh.texture.empty()) return;
+            float sv = sh.strength * 100.f;
+            const ImRect strRow = row(("lshinestr" + sfx).c_str(), "Strength",
+                                      "How strongly the reflection shows: 100 draws the image as it is, 0 not at all. "
+                                      "With Add blending, high values wash a dark colour out to the reflection's.");
+            nameRect("obj.shinestrength" + sfx, strRow);
+            commit(numberField(("shinestr" + sfx).c_str(), strRow, fmtShort(sv).c_str(), "%", 0, nullptr, &sv), "shinestr" + sfx,
+                   [&](splash::Object& ob) {
+                       if (!ob.mesh || i >= ob.mesh->materials.size()) return;
+                       ob.mesh->materials[i].shine.strength = splash::clampv(sv / 100.f, 0.f, 1.f);
+                   });
+            const ImRect blRow = row(("lshineblend" + sfx).c_str(), "Blend",
+                                     "Add brightens what is under it, for chrome, glass and highlights. Half averages the "
+                                     "two 50/50, so paint keeps its colour under the reflection. Off removes the shine.");
+            nameRect("obj.shineblend" + sfx, blRow);
+            const bool half = sh.blend == splash::ShineBlend::Half;
+            const int pick = dropdownMenu(("obj.shineblend" + sfx).c_str(), blRow, nullptr, half ? "Half" : "Add",
+                                          {"Off", "Add", "Half"}, half ? 2 : 1);
+            if (pick == 0)
+                doc.edit(path, [i](splash::Object& ob) {
+                    if (ob.mesh && i < ob.mesh->materials.size()) ob.mesh->materials[i].shine.texture.clear();
+                });
+            else if (pick > 0 && (pick == 2) != half)
+                doc.edit(path, [i, pick](splash::Object& ob) {
+                    if (ob.mesh && i < ob.mesh->materials.size())
+                        ob.mesh->materials[i].shine.blend = pick == 2 ? splash::ShineBlend::Half : splash::ShineBlend::Add;
+                });
+        };
+        for (size_t i = 0; i < nMat; i++) {
+            const std::string label = nMat == 1 ? std::string("Image") : "Material " + std::to_string(i + 1);
+            shineRows(i, nMat == 1 ? std::string() : "." + std::to_string(i), label.c_str());
+        }
+        sectionEnd(top);
+        bottom = y - space::md;
+    }
     if (lockedFrom) {
         ImGui::EndDisabled();
         // Drawn over what it covers: the custom-drawn fields ignore ImGui's disabled alpha.
-        dl->AddRectFilled(ImVec2(r.Min.x, std::max(*lockedFrom, top0)), ImVec2(r.Max.x - 6, add.Max.y + space::sm),
+        dl->AddRectFilled(ImVec2(r.Min.x, std::max(*lockedFrom, top0)), ImVec2(r.Max.x - 6, bottom + space::sm),
                           (color::panel & 0x00ffffffu) | (150u << IM_COL32_A_SHIFT));
         st.openAddComponent = false;
     }
     ImGui::PopClipRect();
     {
-        const float content = add.Max.y + space::xl - (top0 - scroll), view = r.Max.y - top0;
+        const float content = bottom + space::xl - (top0 - scroll), view = r.Max.y - top0;
         const float maxScroll = std::max(0.0f, content - view);
         if (maxScroll > 0 && ImGui::IsMouseHoveringRect(r.Min, r.Max) && !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId))
             scroll -= ImGui::GetIO().MouseWheel * 48.0f;
