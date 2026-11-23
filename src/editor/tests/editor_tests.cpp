@@ -17759,6 +17759,13 @@ void testFixedCameraPack() {
     const std::string b = bgtest::slurp(dir / "bg.splashpack");
     CHECK(b.size() > 164 && rd16(b, 2) == 29);
     CHECK(rd32(b, 156) == 0);  // no shadows
+    {
+        // The frame debugger's tag map reads the v29 header too.
+        gpudump::TagScene tags;
+        std::string err;
+        CHECK(gpudump::parseTagScene(std::vector<uint8_t>(b.begin(), b.end()), tags, &err));
+        CHECK(err.empty());
+    }
     const size_t table = rd32(b, 160);
     CHECK(table >= 164 && table % 4 == 0 && table + 4 + 64 <= b.size());
     CHECK(rd16(b, table) == 1);
