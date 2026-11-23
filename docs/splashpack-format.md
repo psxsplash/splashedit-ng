@@ -26,9 +26,9 @@ A fifth, separate format `.loading` ("LP" magic, `PSXLoaderPackWriter`; ng `expo
 
 Version written (W:PSXSceneWriter.cs:233): `writer.Write((ushort)(hasLights ? 24 : 23));`
 So the writer emits exactly two versions: **23** when `pointLights.Length == 0`, **24** otherwise.
-Header size: **144 bytes (v23)**, **148 bytes (v24)**, **156 bytes (v25..v27)**, **160 bytes (v28)**, **164 bytes (v29)**. The writer emits v29 when the scene exports a baked Fixed camera (sec. 2.21b), else v28 when it has blob shadows (sec. 2.22a), and v27 (156 bytes, byte for byte what it wrote before shadows existed) otherwise.
+Header size: **144 bytes (v23)**, **148 bytes (v24)**, **156 bytes (v25..v27)**, **160 bytes (v28)**, **164 bytes (v29)**, **168 bytes (v30)**. The writer emits v30 when a material has a shine (the shine table at byte 164), else v29 when the scene exports a baked Fixed camera (sec. 2.21b), else v28 when it has blob shadows (sec. 2.22a), and v27 (156 bytes, byte for byte what it wrote before shadows existed) otherwise.
 Reader (R:splashpack.cpp): `static_assert(sizeof(SPLASHPACKFileHeader) == 156 ...)`, `assert(header->version >= 20, ...)`, and
-`splashpackHeaderSize` (R:splashpackversion.hh): `>=29 -> 164`, `>=28 -> 160`, `>=25 -> 156`, `>=24 -> 148`, `>=22 -> 144`, `>=21 -> 128`, else `120`. The reader assumes the header only ever grows by appending.
+`splashpackHeaderSize` (R:splashpackversion.hh): `>=30 -> 168`, `>=29 -> 164`, `>=28 -> 160`, `>=25 -> 156`, `>=24 -> 148`, `>=22 -> 144`, `>=21 -> 128`, else `120`. The reader assumes the header only ever grows by appending.
 The doc comment at the top of W says "splashpack v16"; the Write() doc says "v20". Both are stale. The emitted number is 23/24.
 
 Field table (writer order = reader struct order; `writer.Write('S')` writes the single byte 0x53 because BinaryWriter encodes a `char` as UTF-8):
@@ -97,9 +97,10 @@ Field table (writer order = reader struct order; `writer.Write('S')` writes the 
 | 148 | 4 | u32 | orderingTableSize | v25+; ordering table buckets, 0 = engine default |
 | 152 | 4 | u32 | bumpAllocatorSize | v25+; bump allocator bytes per frame, 0 = engine default |
 | 156 | 4 | u32 | shadowTableOffset | v28+; backfilled after the shadow chunk, 0 in a v29 pack without shadows. Absent from a v27 header |
-| 160 | 4 | u32 | backgroundTableOffset | v29 only: present (header 164 bytes) only when a Fixed camera's bake is exported; see 2.21b |
+| 160 | 4 | u32 | backgroundTableOffset | v29+: present (header 164 bytes) when a Fixed camera's bake is exported, and 0 in a v30 pack without one; see 2.21b |
+| 164 | 4 | u32 | shineTableOffset | v30 only: present (header 168 bytes) only when a material shines; {u16 count, u16 0}, then per shiny object a 16-byte record and its vertex normals (core/splashpack.cpp, shine) |
 
-Reader gating (R:splashpack.cpp): agentCount only used if `version>=22`; skin table `version>=18`; memcard `>=21`; sprite/sceneHash `>=22`; tilemap `>=23`; lights `>=24`; render buffer sizes `>=25`; skin bind positions and joint names `>=26`; interactable facing cosine (32-byte records) `>=27`; stream table `>=21`; per-cutscene/animation skin events `>=19`; shadow table `>=28` and offset != 0; baked backgrounds `>=29` and offset != 0. The writer emits v27 (v28 with shadows, v29 with a baked Fixed camera), so all gates are satisfied.
+Reader gating (R:splashpack.cpp): agentCount only used if `version>=22`; skin table `version>=18`; memcard `>=21`; sprite/sceneHash `>=22`; tilemap `>=23`; lights `>=24`; render buffer sizes `>=25`; skin bind positions and joint names `>=26`; interactable facing cosine (32-byte records) `>=27`; stream table `>=21`; per-cutscene/animation skin events `>=19`; shadow table `>=28` and offset != 0; baked backgrounds `>=29` and offset != 0; shine `>=30` and offset != 0. The writer emits v27 (v28 with shadows, v29 with a baked Fixed camera, v30 with a shine), so all gates are satisfied.
 
 ---
 

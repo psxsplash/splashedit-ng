@@ -126,6 +126,10 @@ json writeMaterial(const Material& mat) {
     mj["color"] = json::array({mat.color[0], mat.color[1], mat.color[2], mat.color[3]});
     if (mat.bitDepth) mj["bitDepth"] = int(*mat.bitDepth);
     if (!mat.paletteGroup.empty()) mj["paletteGroup"] = mat.paletteGroup;
+    if (!mat.shine.texture.empty())
+        mj["shine"] = {{"texture", mat.shine.texture},
+                       {"strength", mat.shine.strength},
+                       {"blend", mat.shine.blend == ShineBlend::Half ? "half" : "add"}};
     putExtras(mj, mat.extra);
     return mj;
 }
@@ -340,6 +344,14 @@ Object readObject(const json& j) {
                     mat.bitDepth = BitDepth(mbd);
                 }
                 if (mj.contains("paletteGroup")) mat.paletteGroup = mj["paletteGroup"].get<std::string>();
+                if (mj.contains("shine") && mj["shine"].is_object()) {
+                    const json& sj = mj["shine"];
+                    if (sj.contains("texture") && !sj["texture"].is_null()) mat.shine.texture = sj["texture"].get<std::string>();
+                    if (sj.contains("strength")) mat.shine.strength = std::clamp(f(sj["strength"]), 0.f, 1.f);
+                    const std::string blend = sj.value("blend", "add");
+                    if (blend != "add" && blend != "half") fail("shine blend must be add or half");
+                    mat.shine.blend = blend == "half" ? ShineBlend::Half : ShineBlend::Add;
+                }
                 mat.extra = extrasOf(mj, writeMaterial(mat));
                 m.materials.push_back(mat);
             }
