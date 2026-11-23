@@ -1,4 +1,4 @@
-# splashpack scene format (writer v27 or v28, reader accepts v20..v28)
+# splashpack scene format (writer v27, v28 or v33, reader accepts v20..v33)
 
 Sources read (all via `git show origin/main:<path>`, never the working checkout):
 
@@ -26,7 +26,7 @@ A fifth, separate format `.loading` ("LP" magic, `PSXLoaderPackWriter`; ng `expo
 
 Version written (W:PSXSceneWriter.cs:233): `writer.Write((ushort)(hasLights ? 24 : 23));`
 So the writer emits exactly two versions: **23** when `pointLights.Length == 0`, **24** otherwise.
-Header size: **144 bytes (v23)**, **148 bytes (v24)**, **156 bytes (v25..v27)**, **160 bytes (v28)**. The writer emits v28 only when the scene has blob shadows (sec. 2.22a), and v27 (156 bytes, byte for byte what it wrote before shadows existed) otherwise.
+Header size: **144 bytes (v23)**, **148 bytes (v24)**, **156 bytes (v25..v27)**, **160 bytes (v28)**. The writer emits v28 only when the scene has blob shadows (sec. 2.22a), and v27 (156 bytes, byte for byte what it wrote before shadows existed) otherwise. A scene with spawn pools (sec. 2.23a) is written as **v33, 176 bytes**: the v28 shadow word, then the v29 background, v30 shine and v32 particle table offsets, always 0 (the editor writes none of those tables), then spawnPoolTableOffset.
 Reader (R:splashpack.cpp): `static_assert(sizeof(SPLASHPACKFileHeader) == 156 ...)`, `assert(header->version >= 20, ...)`, and
 `splashpackHeaderSize` (R:splashpackversion.hh): `>=28 -> 160`, `>=25 -> 156`, `>=24 -> 148`, `>=22 -> 144`, `>=21 -> 128`, else `120`. The reader assumes the header only ever grows by appending.
 The doc comment at the top of W says "splashpack v16"; the Write() doc says "v20". Both are stale. The emitted number is 23/24.
@@ -96,7 +96,11 @@ Field table (writer order = reader struct order; `writer.Write('S')` writes the 
 | 144 | 4 | u32 | lightTableOffset | v24+; backfilled after the light chunk, 0 if no runtime lights |
 | 148 | 4 | u32 | orderingTableSize | v25+; ordering table buckets, 0 = engine default |
 | 152 | 4 | u32 | bumpAllocatorSize | v25+; bump allocator bytes per frame, 0 = engine default |
-| 156 | 4 | u32 | shadowTableOffset | v28 only; backfilled after the shadow chunk. Absent from a v27 header |
+| 156 | 4 | u32 | shadowTableOffset | v28+; backfilled after the shadow chunk. Absent from a v27 header; 0 in a v33 one without shadows |
+| 160 | 4 | u32 | backgroundTableOffset | v29+; written only in a v33 header, always 0 |
+| 164 | 4 | u32 | shineTableOffset | v30+; written only in a v33 header, always 0 |
+| 168 | 4 | u32 | particleTableOffset | v32+; written only in a v33 header, always 0 |
+| 172 | 4 | u32 | spawnPoolTableOffset | v33; backfilled after the spawn pool chunk |
 
 Reader gating (R:splashpack.cpp): agentCount only used if `version>=22`; skin table `version>=18`; memcard `>=21`; sprite/sceneHash `>=22`; tilemap `>=23`; lights `>=24`; render buffer sizes `>=25`; skin bind positions and joint names `>=26`; interactable facing cosine (32-byte records) `>=27`; stream table `>=21`; per-cutscene/animation skin events `>=19`; shadow table `>=28` and offset != 0. The writer emits v27 (v28 with shadows), so all gates are satisfied.
 
@@ -370,6 +374,9 @@ splashedit-ng (`core/splashpack.cpp`, `memCardTable`; scene `settings.memCard`, 
 `{u16 regionCount, u16 objectRefCount, u16 slotCount, u16 0, u32 slotBytes, i32 loadRadius, i32 unloadRadius}` (20 B), `regionCount` x 32 B `{i32 minX, minZ, maxX, maxZ (fp12); u32 firstSector; u32 byteSize; u16 firstObjectRef; u16 objectRefCount; u32 0}`, then `objectRefCount` x 8 B `{u16 objectIndex; u16 polyCount; u32 offsetInRegionBlob}` (offset += count*52). `.geo` = per region the concatenated `Tri` arrays of its objects, zero padded to a 2048-byte multiple (`ByteSize`); `FirstSector` = cumulative `ByteSize/2048`. Reader: `SPLASHPACKStreamTable/Region/ObjectRef` (R:streamplanner.hh) 20/32/8. Planner (W:PSXWorldStreaming.cs): `BytesPerTri 52`, `SectorSize 2048`, uniform XZ grid, regions in `SortedDictionary<long,...>` key `cz*2^31+cx` order, auto cell size searched over k=1..96, slots <= 32, default draw distance `OrderingTableSize()` = 8192, fog => `min(draw, 20000/fogDensity)`, `load = draw*5/4`, `unload = load*3/2`. Eligible = no lua, not skinned, no interactable/agent, not Dynamic collider, not a cutscene/animation track target name, name not quoted in any Lua source text.
 
 splashedit-ng (`core/worldstream.cpp`, scene setting `streamWorld`) writes the same table with two differences. An object wider than a region is cut by triangle centre into one part per region: the first part keeps the object's index and the others are appended after the scene's objects as copies (same name, transform and flags, their own AABB), so no object index moves; small objects go whole to the region holding their centre. With streaming on and no fog, the automatic draw distance (ordering table) is `min(scene diagonal, 8192)` rather than the diagonal, and the bump allocator counts streamed triangles as the most within the draw distance of one camera position instead of all of them.
+
+### 2.23a Spawn pools (v33; header spawnPoolTableOffset @172; only if an exported object has Spawn pool > 0) - `AlignToFourBytes` first, after the stream table, the last chunk of the pack
+`{u16 poolCount, u16 0}`, then `poolCount` x 8 B `{u16 firstObjectIndex, u16 count, u32 nameOffset}`, then the NUL-terminated UTF-8 pool names that nameOffset (from the start of the pack) points at (psxsplash `spawnpool.hh`). An object with Spawn pool N is written as N copies back to back in the object table (sec. 2.2), each a whole game object with its own triangles, collider and name-table entry (the object's name); their active bit is 0 and the engine forces them inactive at load anyway. Pooled objects are never streamed. At most 64 pools, names unique.
 
 ### 2.24 Final backfills (order): pixelDataOffset=0, atlas/CLUT/audio/font data offsets=0, memcard offset, stream offset, then lua offsets, then mesh offsets. The pack ends at the last section written (no trailing pad guaranteed).
 
