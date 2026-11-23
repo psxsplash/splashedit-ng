@@ -158,10 +158,10 @@ fd = open(os.path.join(tmp, 'future.splashpack'), 'rb').read() if r.returncode =
 check('unknown element type skipped', r.returncode == 0 and 'future' in r.stderr + r.stdout
       and fd[struct.unpack_from('<I', fd, 96)[0] + 2 * 112 + 6] == 8, r.stdout + r.stderr)
 
-# Blend: codes 1-4 in bits 1-3 of a box's, bar's or line's flags; images and
-# text always 0 there, whatever the scene says.
+# Blend: codes 1-4 in bits 1-3 of every element's flags but system-font text,
+# which is always 0 there, whatever the scene says.
 s = json.loads(json.dumps(base))
-modes = {'bar': 'subtract', 'hp': 'addQuarter', 'diag': 'add', 'corner': 'half', 'crate': 'half', 'title': 'add'}
+modes = {'bar': 'subtract', 'hp': 'addQuarter', 'diag': 'add', 'corner': 'half', 'crate': 'half', 'title': 'add', 'sys': 'half'}
 for e in s['canvases'][0]['elements']:
     if e['name'] in modes: e['blend'] = modes[e['name']]
     if e['name'] == 'diag': e['visible'] = False
@@ -179,7 +179,7 @@ if bd:
     for ei in range(bcount):
         bq = bdofs + ei * 48
         bflags[cstr(bd, struct.unpack_from('<I', bd, bq + 4)[0])] = bd[bq + 1]
-want = {'bar': 0x07, 'hp': 0x09, 'diag': 0x04, 'corner': 0x03, 'crate': 0x01, 'title': 0x01, 'body': 0x01}
+want = {'bar': 0x07, 'hp': 0x09, 'diag': 0x04, 'corner': 0x03, 'crate': 0x03, 'title': 0x05, 'body': 0x01, 'sys': 0x01}
 check('blend flags', all(bflags.get(k) == v for k, v in want.items()), bflags)
 bad('unknown blend', lambda s: s['canvases'][0]['elements'][0].update(blend='multiply'))
 

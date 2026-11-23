@@ -13488,8 +13488,8 @@ void testUiBlendSaveLoad() {
     CHECK(threw);
 }
 
-// The element flags byte: bit 0 visible, bits 1-3 the blend code, and only
-// for boxes, progress bars and lines (psxsplash src/uiblend.hh).
+// The element flags byte: bit 0 visible, bits 1-3 the blend code, for every
+// element but system-font text (psxsplash src/uiblend.hh).
 void testUiBlendExport() {
     namespace fs = std::filesystem;
     const fs::path project = fs::path(SPLASHEDIT_SOURCE_DIR) / "examples" / "courtyard";
@@ -13539,9 +13539,9 @@ void testUiBlendExport() {
     auto flags = [&](int i) { return int(uint8_t(b[data + size_t(i) * 48 + 1])); };
     CHECK(flags(0) == 0x07);  // visible Box, Subtract (3 << 1 | 1)
     CHECK(flags(1) == 0x04);  // hidden Line, Add (2 << 1)
-    CHECK(flags(2) == 0x01);  // visible Image: never blends
+    CHECK(flags(2) == 0x03);  // visible Image, Half (1 << 1 | 1)
     CHECK(flags(3) == 0x09);  // visible Progress, AddQuarter (4 << 1 | 1)
-    CHECK(flags(4) == 0x01);  // visible Text: never blends
+    CHECK(flags(4) == 0x01);  // visible Text in the system font: never blends
     CHECK(flags(5) == 0x01);  // visible Box, Opaque: as before blending
 }
 
@@ -13559,7 +13559,7 @@ void testUiBlendEdit() {
 }
 
 // The canvas preview blends with the GPU's math: over a drawn element on its
-// 15-bit colour, over the backdrop on 8-bit channels; images stay opaque.
+// 15-bit colour, over the backdrop on 8-bit channels.
 void testUiBlendRender() {
     using namespace editor::uic;
     const Screen s;
@@ -17052,6 +17052,196 @@ void testSpriteSheetSemiTransparent() {
         d.imageData = {0, 0x03e0, 0x8000};
         splash::setSemiTransparent(d);
         CHECK(d.imageData == std::vector<uint16_t>({0, 0x83e0, 0x8000}));
+    }
+}
+
+// A blended Image or Text (#312): the textured primitive blends only texels
+// with STP set, so the export sets it on what a blended element draws (the
+// image's CLUT or texels, the sheet a cell comes from, a grey font's palette),
+// leaving the transparent 0x0000 alone and everything opaque untouched, and
+// the flags byte carries the blend for every element but system-font text.
+void testUiBlendTexturedExport() {
+    using namespace roomtest;
+    const fs::path src = SPLASHEDIT_SOURCE_DIR;
+    const fs::path project = g_outDir / "uiblend_tex";
+    fs::remove_all(project);
+    fs::create_directories(project);
+    fs::copy(src / "tests" / "sprite", project, fs::copy_options::recursive);
+    fs::copy_file(src / "assets" / "fonts" / "Inter-Regular.ttf", project / "Inter-Regular.ttf");
+    splash::Scene base = splash::loadScene(project / "sprite.scene");
+    base.objects.clear();
+    splash::UIFont grey;
+    grey.name = "grey";
+    grey.source = "Inter-Regular.ttf";
+    grey.size = 12;
+    grey.greyLevels = true;
+    splash::UIFont bin = grey;
+    bin.name = "bin";
+    bin.greyLevels = false;
+    base.fonts = {grey, bin};
+    splash::UICanvas cv;
+    cv.name = "hud";
+    splash::UIElement img = uiBox("img", 0, 0, 32, 32);
+    img.type = splash::UIElementType::Image;
+    img.texture = "dirs.png";
+    img.bitDepth = splash::BitDepth::Bpp8;
+    splash::UIElement cell = uiBox("cell", 40, 0, 16, 16);
+    cell.type = splash::UIElementType::Image;
+    cell.sheet = "hero";
+    cell.cell = 1;
+    splash::UIElement gtext = uiBox("gtext", 0, 40, 100, 16);
+    gtext.type = splash::UIElementType::Text;
+    gtext.text = "grey";
+    gtext.font = "grey";
+    splash::UIElement btext = gtext;
+    btext.name = "btext";
+    btext.font = "bin";
+    splash::UIElement stext = gtext;
+    stext.name = "stext";
+    stext.font.clear();
+    cv.elements = {img, cell, gtext, btext, stext};
+    base.canvases = {cv};
+
+    struct Out {
+        std::string pack;
+        std::vector<uint16_t> vram;
+        std::vector<splash::ExportStats::TexturePlacement> textures;
+        std::vector<std::vector<uint16_t>> fontPalettes;  // a grey font's 16 entries, else empty
+    };
+    auto run = [&](const splash::Scene& s, const char* name) {
+        const fs::path pack = project / (std::string(name) + ".splashpack"), vf = project / (std::string(name) + ".vram");
+        splash::ExportResult r = splash::exportSplashpack(s, project, pack);
+        for (const std::string& e : r.errors) std::fprintf(stderr, "uiblend tex export: %s\n", e.c_str());
+        CHECK(r.ok());
+        Out o{readAll(pack), vramFromFile(vf), r.stats.textures, {}};
+        // The .vram file's font records, after the atlases and CLUTs
+        // (psxsplash SceneManager::uploadVramData).
+        const std::string d = readAll(vf);
+        auto u16 = [&](size_t p) { return p + 1 < d.size() ? int(uint8_t(d[p]) | uint8_t(d[p + 1]) << 8) : 0; };
+        if (d.size() < 8) return o;
+        size_t p = 8;
+        for (int i = 0, n = u16(2); i < n; i++) p = (p + 8 + size_t(u16(p + 4)) * size_t(u16(p + 6)) * 2 + 3) & ~size_t(3);
+        for (int i = 0, n = u16(4); i < n; i++) p = (p + 8 + size_t(u16(p + 4)) * 2 + 3) & ~size_t(3);
+        for (int i = 0, n = uint8_t(d[6]); i < n && p + 12 <= d.size(); i++) {
+            const size_t h = size_t(u16(p + 6)), size = size_t(u16(p + 8)) | size_t(u16(p + 10)) << 16;
+            std::vector<uint16_t> pal;
+            if (size == 128 * h + 32)
+                for (int k = 0; k < 16; k++) pal.push_back(uint16_t(u16(p + 12 + 128 * h + size_t(k) * 2)));
+            o.fontPalettes.push_back(pal);
+            p = (p + 12 + size + 3) & ~size_t(3);
+        }
+        return o;
+    };
+    auto placed = [&](const Out& o, const char* file, int n = 0) {
+        for (const auto& t : o.textures)
+            if (fs::path(t.source).filename() == file && n-- == 0) return t;
+        CHECK(!"texture placed");
+        return splash::ExportStats::TexturePlacement{};
+    };
+    auto count = [&](const Out& o, const char* file) {
+        int n = 0;
+        for (const auto& t : o.textures) n += fs::path(t.source).filename() == file;
+        return n;
+    };
+    auto clut = [&](const Out& o, const splash::ExportStats::TexturePlacement& t) {
+        std::vector<uint16_t> w;
+        if (!o.vram.empty())
+            for (int k = 0; k < t.clutLength; k++) w.push_back(o.vram[size_t(t.clutY) * 1024 + size_t(t.clutX + k)]);
+        return w;
+    };
+    // `on` is `off` with STP on every non-zero word; zeros stay zero.
+    auto stpOf = [&](const std::vector<uint16_t>& off, const std::vector<uint16_t>& on) {
+        bool same = off.size() == on.size() && !off.empty(), anyClear = false;
+        for (size_t i = 0; same && i < off.size(); i++) {
+            anyClear = anyClear || (off[i] != 0 && !(off[i] & 0x8000));
+            same = off[i] == 0 ? on[i] == 0 : on[i] == (off[i] | 0x8000);
+        }
+        return same && anyClear;
+    };
+    auto flags = [&](const Out& o, int i) {
+        const std::string& b = o.pack;
+        if (b.size() < 100) return -1;
+        const size_t table = size_t(rd32(b, 96)) + size_t(uint8_t(b[94])) * 112;
+        if (table + 4 > b.size()) return -1;
+        const size_t at = size_t(rd32(b, table)) + size_t(i) * 48 + 1;
+        return at < b.size() ? int(uint8_t(b[at])) : -1;
+    };
+
+    splash::Scene blended = base;
+    std::vector<splash::UIElement>& els = blended.canvases[0].elements;
+    els[0].blend = splash::UIBlend::Half;
+    els[1].blend = splash::UIBlend::Add;
+    els[2].blend = splash::UIBlend::Subtract;
+    els[3].blend = splash::UIBlend::AddQuarter;
+    els[4].blend = splash::UIBlend::Half;
+    const Out off = run(base, "off"), on = run(blended, "on");
+    CHECK(!off.vram.empty() && !on.vram.empty());
+    // Flags: visible plus the code, but system-font text (psyqo's font) stays 0x01.
+    CHECK(flags(off, 0) == 0x01 && flags(off, 1) == 0x01 && flags(off, 2) == 0x01);
+    CHECK(flags(on, 0) == 0x03);  // Image, Half
+    CHECK(flags(on, 1) == 0x05);  // sheet Image, Add
+    CHECK(flags(on, 2) == 0x07);  // grey-font Text, Subtract
+    CHECK(flags(on, 3) == 0x09);  // binary-font Text, AddQuarter
+    CHECK(flags(on, 4) == 0x01);  // system-font Text: never blends
+    // The plain image: STP on its CLUT, the transparent entry 0 left 0.
+    CHECK(count(off, "dirs.png") == 1 && count(on, "dirs.png") == 1);
+    if (count(off, "dirs.png") == 1 && count(on, "dirs.png") == 1) {
+        CHECK(placed(off, "dirs.png").clutLength > 0);
+        CHECK(stpOf(clut(off, placed(off, "dirs.png")), clut(on, placed(on, "dirs.png"))));
+    }
+    // The sheet the blended cell comes from; the other sheet is untouched.
+    CHECK(stpOf(clut(off, placed(off, "hero.png")), clut(on, placed(on, "hero.png"))));
+    CHECK(clut(off, placed(off, "fx.png")) == clut(on, placed(on, "fx.png")));
+    // The grey font's palette; the binary font has none (psxsplash's white CLUT).
+    CHECK(off.fontPalettes.size() == 2 && on.fontPalettes.size() == 2);
+    if (off.fontPalettes.size() == 2 && on.fontPalettes.size() == 2) {
+        CHECK(off.fontPalettes[0].size() == 16 && off.fontPalettes[0][0] == 0);
+        CHECK(stpOf(off.fontPalettes[0], on.fontPalettes[0]));
+        CHECK(off.fontPalettes[1].empty() && on.fontPalettes[1].empty());
+    }
+    // The same image opaque next to the blended one: two textures, the opaque
+    // one as before.
+    {
+        splash::Scene both = blended;
+        splash::UIElement plain = img;
+        plain.name = "plain";
+        both.canvases[0].elements.push_back(plain);
+        const Out o = run(both, "both");
+        CHECK(count(o, "dirs.png") == 2);
+        if (count(o, "dirs.png") == 2) {
+            const std::vector<uint16_t> a = clut(o, placed(o, "dirs.png", 0)), b = clut(o, placed(o, "dirs.png", 1));
+            const std::vector<uint16_t> want = clut(off, placed(off, "dirs.png"));
+            CHECK((a == want && stpOf(want, b)) || (b == want && stpOf(want, a)));
+        }
+    }
+    // A text with no font of its own blends in its canvas's default font.
+    {
+        splash::UICanvas c = blended.canvases[0];
+        c.defaultFont = "grey";
+        CHECK(splash::blendable(c, c.elements[4]));
+        CHECK(!splash::blendable(blended.canvases[0], blended.canvases[0].elements[4]));
+        CHECK(splash::blendable(c, c.elements[0]) && splash::blendable(c, c.elements[2]));
+    }
+    // The canvas preview blends the image too: Half over a black background
+    // is half of each opaque channel, on every pixel the image draws.
+    {
+        splash::Scene one = base, half = base;
+        one.canvases[0].elements = {img};
+        half.canvases[0].elements = {img};
+        half.canvases[0].elements[0].blend = splash::UIBlend::Half;
+        editor::uic::Assets assets;
+        assets.refresh(project, 0);
+        const editor::uic::Screen s;
+        const std::vector<uint32_t> a = editor::uic::render(one, {true}, s, assets, 0xff000000u);
+        const std::vector<uint32_t> b = editor::uic::render(half, {true}, s, assets, 0xff000000u);
+        int lit = 0, wrong = 0;
+        for (size_t i = 0; i < a.size() && i < b.size(); i++) {
+            if ((a[i] & 0xffffff) == 0) continue;
+            lit++;
+            for (int k = 0; k < 3; k++) wrong += int((b[i] >> (8 * k)) & 0xff) != int((a[i] >> (8 * k)) & 0xff) / 2;
+        }
+        CHECK(a.size() == b.size() && lit > 100 && wrong == 0);
+        if (wrong) std::fprintf(stderr, "blended image preview: %d of %d lit pixels' channels differ\n", wrong, lit);
     }
 }
 
@@ -23582,6 +23772,7 @@ int main(int argc, char** argv) {
     testSceneNetworkId();
     testSpriteSheets();
     testSpriteSheetSemiTransparent();
+    testUiBlendTexturedExport();
     testTilemapModel();
     testTilemapExport();
     testTilemapEdits();

@@ -484,7 +484,7 @@ SharedFields sharedFields(const UICanvas& cv, const std::vector<int>& idx) {
         any = true;
         known &= e.unknown.empty();
         noLine &= e.type != UIElementType::Line;
-        blend &= splash::blendable(e.type);
+        blend &= splash::blendable(cv, e);
         text &= e.type == UIElementType::Text;
         image &= e.type == UIElementType::Image && e.sheet.empty();
         bar &= e.type == UIElementType::Progress;
@@ -1457,8 +1457,10 @@ std::vector<uint32_t> render(const splash::Scene& scene, const std::vector<bool>
         for (const UIElement& e : scene.canvases[size_t(c)].elements) {
             if (!e.visible || !e.unknown.empty()) continue;
             const Rect r = drawn(e, s);
-            // Boxes, bars and lines draw with their blend; images and text opaque.
-            f.blend = splash::blendable(e.type) ? e.blend : splash::UIBlend::Opaque;
+            // Every element draws with its blend but system-font text, which
+            // psxsplash draws opaque. An image or font texel blends when the
+            // export sets its STP, which it does on every drawn one.
+            f.blend = splash::blendable(scene.canvases[size_t(c)], e) ? e.blend : splash::UIBlend::Opaque;
             switch (e.type) {
                 case UIElementType::Box: f.fill(r.x, r.y, r.w, r.h, flat(e.color)); break;
                 case UIElementType::Progress: {

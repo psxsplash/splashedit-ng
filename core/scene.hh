@@ -460,17 +460,20 @@ struct UIFont {
 
 enum class UIElementType : uint8_t { Image = 0, Box = 1, Text = 2, Progress = 3, Line = 4 };
 
-// How a Box, Progress or Line element is drawn over what is already on screen:
-// opaque, or one of the PS1's four semi-transparency modes (B = what is behind,
-// F = the element's colour). The values are the code the splashpack stores in
-// bits 1-3 of the element flags byte (psxsplash src/uiblend.hh). Image and Text
-// elements always draw opaque: a textured primitive only blends texels with
-// bit 15 set, and the UI atlas does not set it.
+// How an element is drawn over what is already on screen: opaque, or one of
+// the PS1's four semi-transparency modes (B = what is behind, F = the element's
+// colour). The values are the code the splashpack stores in bits 1-3 of the
+// element flags byte (psxsplash src/uiblend.hh). A textured primitive (Image,
+// Text) blends only the texels with STP (bit 15) set, so the export sets it on
+// the drawn texels or CLUT entries of a blended image and on the palette of a
+// grey font a blended text uses; psxsplash sets it on a binary font's white.
+// Text in the system font always draws opaque (psyqo's chainprintf).
 enum class UIBlend : uint8_t { Opaque = 0, Half = 1, Add = 2, Subtract = 3, AddQuarter = 4 };
-// Whether elements of type `t` draw with their blend (Box, Progress, Line).
-inline bool blendable(UIElementType t) {
-    return t == UIElementType::Box || t == UIElementType::Progress || t == UIElementType::Line;
-}
+struct UICanvas;
+struct UIElement;
+// Whether element `e` of `canvas` draws with its blend: every one but Text in
+// the system font (see effectiveFont).
+bool blendable(const UICanvas& canvas, const UIElement& e);
 
 // One UI element. Layout is in screen pixels. Each axis is anchored to a
 // fraction of the screen: with anchorMin == anchorMax on an axis, rect x/y is
@@ -484,7 +487,8 @@ struct UIElement {
     std::array<int, 4> rect{0, 0, 16, 16};  // x, y, w, h
     std::array<float, 2> anchorMin{0, 0}, anchorMax{0, 0};
     std::array<float, 3> color{1, 1, 1};
-    // Box, Progress and Line only (see UIBlend); kept but not exported on others.
+    // Every type but system-font Text (see UIBlend, blendable); kept but not
+    // exported on that one.
     UIBlend blend = UIBlend::Opaque;
     // Text
     std::string text;

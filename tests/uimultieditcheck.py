@@ -105,14 +105,17 @@ def select(*rows_):
 BAR, CORNER, TITLE, BODY, SYS, HP = range(6)
 TEXTS = select(TITLE, BODY, SYS)
 
-# Three texts: colour, font and visible differ; Font shows, Blend does not.
+# Three texts: colour, font and visible differ; Font shows, Blend does not
+# (one is in the system font, which cannot blend).
 els, out, rects = run(TEXTS, shot=keep and os.path.join(keep, 'texts-mixed.png'))
 check('three texts selected: the multi inspector', 'uicanvas: inspector 3 elements' in out, out[-300:])
 check('their differing colours read "mixed"', shown(out, 'col') == 'mixed', shown(out, 'col'))
 check('their differing fonts read "mixed"', shown(out, 'font') == 'mixed', shown(out, 'font'))
 check('two shown, one hidden: visible reads "mixed"', shown(out, 'visible') == 'mixed', shown(out, 'visible'))
 check('all texts: the Font row is drawn', 'ui.font' in rects, sorted(k for k in rects if k.startswith('ui.')))
-check('texts cannot blend: no Blend row', 'ui.blend' not in rects and shown(out, 'blend') is None, shown(out, 'blend'))
+# Judged on the last frame: title and body, selected first, do blend and
+# report a Blend on the way.
+check('a system-font text among them: no Blend row', 'ui.blend' not in rects, sorted(k for k in rects if k.startswith('ui.')))
 check('their heights differ: the H field reads "mixed"', shown(out, 'sizeb') == 'mixed', shown(out, 'sizeb'))
 check('their widths agree: the W field reads 300', shown(out, 'sizea') == '300', shown(out, 'sizea'))
 check('just selecting changes nothing', changed(els) == [], changed(els))
@@ -163,10 +166,14 @@ check('a box and a bar: the Blend row, no Font row', 'ui.blend' in rects and 'ui
 check('a Blend pick sets it on both', els['bar'].get('blend') == els['hp'].get('blend') and els['bar'].get('blend') not in (None, 0, 'opaque'),
       (els['bar'].get('blend'), els['hp'].get('blend')))
 check('the Blend then reads Add', shown(out, 'blend') == 'Add', shown(out, 'blend'))
-# A text and a box: neither Font nor Blend, still Colour.
+# A text in a font and a box: both blend, Colour, no Font.
 els, out, rects = run(select(BAR, TITLE))
-check('a text and a box: Colour, but neither Font nor Blend', 'ui.col' in rects and 'ui.font' not in rects and 'ui.blend' not in rects,
+check('a font text and a box: Colour and Blend, no Font', 'ui.col' in rects and 'ui.font' not in rects and 'ui.blend' in rects,
       sorted(k for k in rects if k.startswith('ui.')))
+# A system-font text and a box: neither Font nor Blend, still Colour.
+els, out, rects = run(select(BAR, SYS))
+check('a system-font text and a box: Colour, but neither Font nor Blend',
+      'ui.col' in rects and 'ui.font' not in rects and 'ui.blend' not in rects, sorted(k for k in rects if k.startswith('ui.')))
 
 print('FAILS=%d' % fails)
 sys.exit(1 if fails else 0)

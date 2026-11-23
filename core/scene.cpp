@@ -1594,6 +1594,10 @@ const std::string& effectiveFont(const UICanvas& canvas, const UIElement& e) {
     return e.font.empty() ? canvas.defaultFont : e.font;
 }
 
+bool blendable(const UICanvas& canvas, const UIElement& e) {
+    return e.type != UIElementType::Text || !effectiveFont(canvas, e).empty();
+}
+
 std::string writeUIElementsText(const std::vector<UIElement>& elements) {
     json j;
     j[kUIElementsMarker] = kUIElementsVersion;
