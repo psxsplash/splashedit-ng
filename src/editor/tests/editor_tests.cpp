@@ -22005,9 +22005,9 @@ static void testPanelWindows() {
 // again (and take the focus); the Timeline's only while the Timeline is open.
 static void testPanelWindowsOpen() {
     using editor::DetachPanel;
-    const char* names[] = {"game", "console", "scene", "inspector", "project", "timeline"};
-    const char* titles[] = {"Game", "Console", "Scene", "Inspector", "Project", "Timeline"};
-    CHECK(editor::kDetachPanels == 6);
+    const char* names[] = {"game", "console", "scene", "inspector", "project", "timeline", "view"};
+    const char* titles[] = {"Game", "Console", "Scene", "Inspector", "Project", "Timeline", "Scene View"};
+    CHECK(editor::kDetachPanels == 7);
     for (int k = 0; k < editor::kDetachPanels; ++k) {
         const DetachPanel panel = DetachPanel(k);
         CHECK(std::string(editor::detachPanelName(panel)) == names[k]);
@@ -22025,6 +22025,9 @@ static void testPanelWindowsOpen() {
     const editor::WindowRect s = editor::defaultPanelRect(DetachPanel::Scene), i = editor::defaultPanelRect(DetachPanel::Inspector);
     const editor::WindowRect p = editor::defaultPanelRect(DetachPanel::Project), t = editor::defaultPanelRect(DetachPanel::Timeline);
     CHECK(s.h > s.w && i.h > i.w && p.w > p.h && t.w > t.h);
+    // The Scene view (the 3D viewport) opens wide, and bigger than the panels.
+    const editor::WindowRect v = editor::defaultPanelRect(DetachPanel::View);
+    CHECK(v.w > v.h && v.w >= 640 && v.h >= 480);
 }
 
 // Each panel's out-or-not and window saved with Play's tools under its own
@@ -22039,6 +22042,7 @@ static void testPanelWindowsSaved() {
     CHECK(&t.window(DetachPanel::Scene) == &t.sceneWindow && &t.window(DetachPanel::Inspector) == &t.inspectorWindow);
     CHECK(&t.window(DetachPanel::Project) == &t.projectWindow && &t.window(DetachPanel::Timeline) == &t.timelineWindow);
     CHECK(&t.window(DetachPanel::Game) == &t.gameWindow && &t.window(DetachPanel::Console) == &t.consoleWindow);
+    CHECK(&t.window(DetachPanel::View) == &t.viewWindow);
     for (int bits = 0; bits < (1 << editor::kDetachPanels); bits += 5) {
         for (int k = 0; k < editor::kDetachPanels; ++k) {
             t.window(DetachPanel(k)).detached = bits & (1 << k);
@@ -22059,9 +22063,11 @@ static void testPanelWindowsSaved() {
     }
     {
         std::ofstream odd(dir / "panels-odd.cfg", std::ios::binary);
-        odd << "scene_detached=1\ninspector_detached=yes\ntimeline_window=1,2,3,0\nproject_window=-10,20,900,360\nprojects_detached=1\n";
+        odd << "scene_detached=1\ninspector_detached=yes\ntimeline_window=1,2,3,0\nproject_window=-10,20,900,360\nprojects_detached=1\n"
+               "view_detached=1\nview_window=5,6,960,640\n";
     }
     const editor::PlayTools odd = editor::loadPlayTools(dir / "panels-odd.cfg");
+    CHECK(odd.viewWindow.detached && (odd.viewWindow.rect == WindowRect{5, 6, 960, 640}));
     CHECK(odd.sceneWindow.detached && !odd.inspectorWindow.detached && !odd.projectWindow.detached && !odd.timelineWindow.detached);
     CHECK(odd.timelineWindow.rect.empty() && (odd.projectWindow.rect == WindowRect{-10, 20, 900, 360}));
 }

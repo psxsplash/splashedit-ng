@@ -73,7 +73,7 @@ void scaleQueuedMouse(float c, ImU32& unscaledFrom = g_mouseUnscaledFrom) {
 
 // A panel out of the main window (#345, mockup::panelWindowWanted): its OS
 // window with a GL context sharing the main one's objects (the game's
-// texture), and an ImGui context of its own sharing the main one's fonts. Its
+// texture, the Scene view's), and an ImGui context of its own sharing the main one's fonts. Its
 // draw data goes through the main context's renderer, as ImGui's own
 // multi-viewport windows do. `named`: its controls as last drawn, for
 // scripted input (--in).
@@ -1185,8 +1185,15 @@ int main(int argc, char** argv) {
             }
             // Files dragged in from the desktop: hover feedback, then import where released.
             // Onto a panel's own window (#345) they land nowhere: its
-            // coordinates are not the main window's.
-            if (e.type >= SDL_EVENT_DROP_FILE && e.type <= SDL_EVENT_DROP_POSITION && panelOfWindow(e.drop.windowID) >= 0) continue;
+            // coordinates are not the main window's. But on the Scene view's
+            // they land where the pointer meets the scene there.
+            if (const int k = e.type >= SDL_EVENT_DROP_FILE && e.type <= SDL_EVENT_DROP_POSITION ? panelOfWindow(e.drop.windowID) : -1; k >= 0) {
+                if (k == int(editor::DetachPanel::View) && e.type == SDL_EVENT_DROP_FILE && e.drop.data && !ui::fileDialogOpen()) {
+                    const float c = uiScaleOf(g_panels[size_t(k)].win);
+                    state.drop.viewFiles.push_back({e.drop.data, ImVec2(ui::toUi(e.drop.x, c), ui::toUi(e.drop.y, c))});
+                }
+                continue;
+            }
             if (e.type == SDL_EVENT_DROP_BEGIN) state.drop.hovering = true;
             // (SDL reports where in window coordinates.)
             const ImVec2 dropAt(ui::toUi(e.drop.x, g_uiScale), ui::toUi(e.drop.y, g_uiScale));
@@ -1262,7 +1269,9 @@ int main(int argc, char** argv) {
                 }
                 if (frame >= actionStart[i] && frame < actionStart[i] + actionFrames(a)) playAction(aio, a, frame - actionStart[i]);
                 if (frame != actionStart[i] || held) continue;
-                if (a.kind == Action::Drop) state.drop.files.push_back({a.text, ImVec2(a.x0, a.y0)});
+                // --in view: released on the Scene view's own window, as a desktop drop there.
+                if (a.kind == Action::Drop)
+                    (inPanel && a.panel == int(editor::DetachPanel::View) ? state.drop.viewFiles : state.drop.files).push_back({a.text, ImVec2(a.x0, a.y0)});
                 if (a.kind == Action::Shot) shotDue = a.text;
                 if (a.kind == Action::WaitImport && state.importBusy()) held = true, heldKind = a.kind, heldSince = std::chrono::steady_clock::now();
                 if (a.kind == Action::WaitExport && exportBehind()) held = true, heldKind = a.kind, heldSince = std::chrono::steady_clock::now();

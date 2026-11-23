@@ -692,7 +692,14 @@ while the Scene tab takes the split's room; the keyboard must be the controller 
 window has the focus and not once the main window has it; closing the window, or its Attach, must
 put the Game view back with every main-window control where it was before. Saved out
 (`game_detached=1`, `game_window=x,y,w,h`), the window must open at that size at the next Play.
-The Console's Own window must do the same for Play's output. Detached windows are written beside
+The Console's Own window must do the same for Play's output. View > Scene View in Own Window must
+draw the 3D Scene view in its own window (`--in view`; the scene rendered, not blank), where a click
+on a light's marker selects it, its move gizmo drags it, Ctrl+S saves and a model dropped there
+(`--in view --drop-now`) lands where the pointer meets the scene; the main window must give
+the Scene tab's room to the bottom dock (no hole), to the Game view while a game runs, or with
+neither show a note whose Attach brings the view back; closing its window or its Attach must put it
+back with every main-window control where it was, and `view_detached` / `view_window` must be
+saved and restored. Detached windows are written beside
 each screenshot as `<shot>-game.png` and `<shot>-console.png`; `--in game` (or `console`) sends the
 next scripted action to that window and aims its `@name` at that window's controls (listed as
 `control game:<name>`), `--close-window game` asks the window to close as its close button does,

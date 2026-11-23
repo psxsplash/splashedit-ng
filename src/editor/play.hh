@@ -56,13 +56,13 @@ struct PlayTools {
     // Scene tab only); consoleDocked shows the output in a Console tab of
     // the bottom dock instead of a popup off the status bar.
     bool gameEveryTab = true, consoleDocked = false;
-    // The Game view, the output, the Scene, the Inspector, the Project panel
-    // and the Timeline in OS windows of their own (#345,
+    // The Game view, the output, the Scene, the Inspector, the Project panel,
+    // the Timeline and the Scene view in OS windows of their own (#345,
     // editor/panel_window.hh): out or not, and where each window was.
-    PanelWindow gameWindow, consoleWindow, sceneWindow, inspectorWindow, projectWindow, timelineWindow;
+    PanelWindow gameWindow, consoleWindow, sceneWindow, inspectorWindow, projectWindow, timelineWindow, viewWindow;
     // The one for `panel` (in DetachPanel order).
     std::array<PanelWindow*, kDetachPanels> windows() {
-        return {&gameWindow, &consoleWindow, &sceneWindow, &inspectorWindow, &projectWindow, &timelineWindow};
+        return {&gameWindow, &consoleWindow, &sceneWindow, &inspectorWindow, &projectWindow, &timelineWindow, &viewWindow};
     }
     PanelWindow& window(DetachPanel panel) { return *windows()[size_t(panel)]; }
     const PanelWindow& window(DetachPanel panel) const { return *const_cast<PlayTools*>(this)->windows()[size_t(panel)]; }
@@ -82,7 +82,7 @@ inline bool usesRelay(const PlayTools& t) { return t.players >= 3 || (t.players 
 // scale_lock= (1 or 0), game_every_tab= (1 or 0), console_docked= (1 or 0),
 // <panel>_detached= (1 or 0) and <panel>_window= (x,y,w,h in screen
 // coordinates; written only once placed) for each of game, console, scene,
-// inspector, project and timeline. A missing
+// inspector, project, timeline and view (the 3D Scene view). A missing
 // file or key reads as empty or off, but boot_logo, game_dither and game_every_tab as on,
 // players as 1 (also for a value that is not a number) and game_aspect as 4:3;
 // an unknown game_overlay or game_crop as over and none.

@@ -53,6 +53,8 @@ public:
     bool loaded() const { return m_loaded; }
     // Takes the bottom of `area` (with a drag bar to resize) when open; returns what is left above.
     ImRect dock(ImRect area);
+    // Takes all of `area` (the Scene view out in its own window), in place of dock().
+    void fill(ImRect area) { m_rect = area; }
     // Draws in the rect dock() took.
     void draw(ImDrawList* dl);
 

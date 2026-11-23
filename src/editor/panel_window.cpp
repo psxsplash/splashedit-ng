@@ -5,11 +5,11 @@
 
 namespace editor {
 
-static constexpr const char* kNames[kDetachPanels] = {"game", "console", "scene", "inspector", "project", "timeline"};
-static constexpr const char* kTitles[kDetachPanels] = {"Game", "Console", "Scene", "Inspector", "Project", "Timeline"};
+static constexpr const char* kNames[kDetachPanels] = {"game", "console", "scene", "inspector", "project", "timeline", "view"};
+static constexpr const char* kTitles[kDetachPanels] = {"Game", "Console", "Scene", "Inspector", "Project", "Timeline", "Scene View"};
 // The size each window first opens at.
 static constexpr WindowRect kDefaultRects[kDetachPanels] = {
-    {0, 0, 680, 560}, {0, 0, 760, 420}, {0, 0, 320, 640}, {0, 0, 400, 720}, {0, 0, 900, 360}, {0, 0, 1000, 380}};
+    {0, 0, 680, 560}, {0, 0, 760, 420}, {0, 0, 320, 640}, {0, 0, 400, 720}, {0, 0, 900, 360}, {0, 0, 1000, 380}, {0, 0, 960, 640}};
 
 const char* detachPanelName(DetachPanel panel) { return kNames[int(panel)]; }
 const char* detachPanelTitle(DetachPanel panel) { return kTitles[int(panel)]; }

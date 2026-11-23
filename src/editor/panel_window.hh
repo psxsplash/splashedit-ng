@@ -1,6 +1,7 @@
 // Editor panels that leave the main window for an OS window of their own and
 // come back (#345): the Game view, Play's Console, the Scene (the object
-// tree), the Inspector, the Project panel and the Timeline. What is out,
+// tree), the Inspector, the Project panel, the Timeline and the Scene view
+// (the 3D viewport). What is out,
 // where its window was, and where to open it again; saved with Play's tools
 // (editor/play.hh). The windows themselves are the shell's (main.cpp).
 #pragma once
@@ -10,12 +11,12 @@
 
 namespace editor {
 
-enum class DetachPanel { Game, Console, Scene, Inspector, Project, Timeline };
-inline constexpr int kDetachPanels = 6;
-// "game", "console", "scene", "inspector", "project" or "timeline": the
-// settings keys' prefix and the scripted name.
+enum class DetachPanel { Game, Console, Scene, Inspector, Project, Timeline, View };
+inline constexpr int kDetachPanels = 7;
+// "game", "console", "scene", "inspector", "project", "timeline" or "view"
+// (the 3D Scene view): the settings keys' prefix and the scripted name.
 const char* detachPanelName(DetachPanel panel);
-// "Game", "Console", "Scene", ...: its window's title and header.
+// "Game", "Console", "Scene", ..., "Scene View": its window's title and header.
 const char* detachPanelTitle(DetachPanel panel);
 
 // A window's place on the desktop, in screen coordinates. Empty until the

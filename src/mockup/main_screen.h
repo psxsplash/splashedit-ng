@@ -80,6 +80,9 @@ struct State {
         bool hovering = false;
         ImVec2 pos{-1, -1};
         std::vector<std::pair<std::string, ImVec2>> files;
+        // Released on the Scene view out in its own window (#345): where, in
+        // that window's coordinates (viewWindowRect's).
+        std::vector<std::pair<std::string, ImVec2>> viewFiles;
     } drop;
     // The inspector's Model field this frame (a drop on it replaces that
     // object's model), clipped to the panel; empty when not shown.
@@ -90,6 +93,12 @@ struct State {
     // pointer meets the scene).
     std::vector<std::pair<ImRect, std::vector<int>>> treeRows;
     ImRect viewportRect;
+    // The Scene view out in its own window, as it last drew there (in that
+    // window's coordinates); empty while it is not out.
+    ImRect viewWindowRect;
+    // The Scene tab was in front last frame: picked again while the Scene view
+    // is out, its window comes to the front.
+    bool sceneTabWas = true;
     // Outcome of the last model import, in the status bar until noticeUntil (ImGui time).
     std::string notice;
     bool noticeBad = false;
@@ -603,7 +612,8 @@ struct State {
 ImRect drawMainScreen(State& state, editor::Document& doc, viewport::Ps1View& view, ImVec2 size);
 
 // Panels out of the main window (#345): the Game view, Play's output, the
-// Scene, the Inspector, the Project panel and the Timeline. The saved part
+// Scene, the Inspector, the Project panel, the Timeline and the Scene view
+// (the 3D viewport). The saved part
 // (out or not, where) is Play's tools' (editor::PlayTools::window); the shell
 // opens a window for each panel while panelWindowWanted says, draws it with
 // drawPanelWindow in an ImGui context of its own filling `size`, and closing
