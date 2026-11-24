@@ -22,7 +22,7 @@ cmake --build build
 ./build/splashedit
 ```
 
-`--screenshot out.png [--size 1600x960] [--mouse x,y] [--clean] [--no-overlays]` renders a few frames and writes a PNG (`--no-overlays` hides the scene view's trigger, interact and nav overlays), which also works headless under `xvfb-run`. Screenshots skip the startup splash; `--splash` shows it (silent), `--frames N` picks the moment.
+`--screenshot out.png [--size 1600x960] [--mouse x,y] [--clean] [--no-overlays] [--no-cull] [--wireframe]` renders a few frames and writes a PNG (`--no-overlays` hides the scene view's trigger, interact and nav overlays; `--no-cull` draws both sides of every triangle, `--wireframe` draws meshes as edges), which also works headless under `xvfb-run`. Screenshots skip the startup splash; `--splash` shows it (silent), `--frames N` picks the moment.
 
 The UI follows the monitor's scale setting (e.g. 150% on Windows or X11) and rescales when the window moves to another monitor. `--ui-scale N` (or the `SPLASHEDIT_UI_SCALE` environment variable; the flag wins) sets it instead, N from 0.5 to 4. Without `--size` the window opens that much larger, within the screen; `--size` is always in window coordinates. Scripted `--click`, `--drag`, `--mouse`, `--hittest` and friends take UI coordinates, so a script works at any scale.
 

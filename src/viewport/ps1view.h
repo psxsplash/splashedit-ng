@@ -143,6 +143,11 @@ class Ps1View {
     static constexpr float kOrthoBack = 150.0f;  // orthographic: render eye's distance behind the pivot
 
     bool clean = false;  // false = PS1 look, true = clean view
+    // Meshes show only the side psxsplash draws (its NCLIP cull), so a
+    // triangle facing away, or with its normals flipped, is gone here as it
+    // is in the game (#386).
+    bool cullBack = true;
+    bool wireframe = false;  // meshes as their triangles' edges
 
   private:
     struct Vertex {

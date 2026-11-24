@@ -4009,6 +4009,8 @@ static std::vector<MenuEntry> menuEntries(int which, State& st, editor::Document
             m.push_back(separator());
             m.push_back(item("Snap", "", true, [&] { st.snap = !st.snap; }, st.snap));
             m.push_back(item("Orthographic", "", true, [&] { view.setOrtho(!view.ortho()); }, view.ortho()));
+            m.push_back(item("Cull Back Faces", "", true, [&] { st.cullBack = !st.cullBack; }, st.cullBack));
+            m.push_back(item("Wireframe", "", true, [&] { st.wireframe = !st.wireframe; }, st.wireframe));
             {
                 // Every Lua file the scene uses, to open in the script editor.
                 std::vector<std::string> luas;
@@ -7700,6 +7702,10 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
         lookThroughCamera(doc, view, p);
     }
     view.clean = st.viewMode == 1;
+    view.cullBack = st.cullBack;
+    view.wireframe = st.wireframe;
+    scriptLine("view.faces", std::string("scene view: cull back faces ") + (st.cullBack ? "on" : "off") + ", wireframe " +
+                                 (st.wireframe ? "on" : "off"));
     // In pixels, so the clean view stays sharp at any UI scale or pixel density.
     const ImVec2 fb = ImGui::GetIO().DisplayFramebufferScale;
     // While the timeline previews a pose, outlines and markers follow the
@@ -7812,6 +7818,20 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
     if (iconButton("gizmos", ImRect(giz.Min + ImVec2(2, 2), giz.Max - ImVec2(2, 2)), icon::box, st.gizmos,
                    st.gizmos ? "Trigger boxes, interaction radii and nav regions: shown" : "Trigger boxes, interaction radii and nav regions: hidden"))
         st.gizmos = !st.gizmos;
+    // How meshes are drawn (#386): only the side the console draws, and as edges.
+    ImRect faces(ImVec2(giz.Max.x + space::sm, p.y), ImVec2(giz.Max.x + space::sm + 2 * 30 + 4, p.y + 32));
+    dl->AddRectFilled(faces.Min, faces.Max, rgb(0x0e1014, 210), radius::button + 2);
+    dl->AddRect(faces.Min, faces.Max, rgb(0xffffff, 14), radius::button + 2);
+    const ImRect cullR(faces.Min + ImVec2(2, 2), ImVec2(faces.Min.x + 32, faces.Max.y - 2));
+    const ImRect wireR(ImVec2(cullR.Max.x, cullR.Min.y), faces.Max - ImVec2(2, 2));
+    nameRect("vp.cull", cullR);
+    nameRect("vp.wire", wireR);
+    if (iconButton("cull", cullR, icon::square, st.cullBack,
+                   st.cullBack ? "Cull back faces: on. Meshes show only the side the console draws."
+                               : "Cull back faces: off. Both sides of every triangle show, though the console draws one."))
+        st.cullBack = !st.cullBack;
+    if (iconButton("wire", wireR, icon::squareDashed, st.wireframe, st.wireframe ? "Wireframe: on" : "Wireframe: off"))
+        st.wireframe = !st.wireframe;
 
     // Right side: view mode and camera.
     float segW = 0;
