@@ -938,6 +938,50 @@ void testTriggerIndexMatchesExport() {
     }
 }
 
+// A trigger box on a game object moves with it: the record's old padding2 word
+// (offset 28) is the game object's index + 1. A bare trigger is no game object,
+// so its box stays put (0).
+void testTriggerFollowsEntity() {
+    namespace fs = std::filesystem;
+    const fs::path project = g_outDir / "trigfollow";
+    fs::remove_all(project);
+    fs::create_directories(project / "scripts");
+    std::ofstream(project / "scripts/s.lua") << "function onUpdate(self) end\n";
+    splash::Scene sc;
+    auto obj = [](const char* name, float x, bool script, bool trigger) {
+        splash::Object o;
+        o.name = name;
+        o.transform.position = {x, 0, 0};
+        if (script) o.script.emplace().lua = "scripts/s.lua";
+        if (trigger) o.trigger = splash::TriggerComponent{};
+        return o;
+    };
+    sc.objects.push_back(obj("Lever", -40, true, false));  // a game object before the cart's
+    sc.objects.push_back(obj("Cart", 40, true, true));
+    sc.objects.push_back(obj("Pit", 0, false, true));
+    const splash::ExportResult r = splash::exportSplashpack(sc, project, project / "scene.splashpack");
+    CHECK(r.ok());
+    std::ifstream in(project / "scene.splashpack", std::ios::binary);
+    const std::string b((std::istreambuf_iterator<char>(in)), {});
+    auto u16 = [&](size_t at) { return unsigned(uint8_t(b[at])) | unsigned(uint8_t(b[at + 1])) << 8; };
+    auto i32 = [&](size_t at) { return int32_t(uint32_t(u16(at)) | uint32_t(u16(at + 2)) << 16); };
+    CHECK(b.size() > 160 && u16(2) >= 25 && u16(2) < 28);  // none of shadows, backgrounds, shine: 156 bytes
+    if (b.size() <= 160 || u16(2) < 25 || u16(2) >= 28) return;
+    const size_t objCount = u16(6), objects = 156 + size_t(u16(4)) * 8;
+    const size_t start = objects + objCount * 92 + size_t(u16(12)) * 32;
+    CHECK(objCount == 2 && u16(38) == 2 && b.size() >= start + 64);
+    if (objCount != 2 || u16(38) != 2 || b.size() < start + 64) return;
+    // Cart's box: centred on the game object it names.
+    const unsigned follow = u16(start + 28);
+    CHECK(follow >= 1 && follow <= objCount && u16(start + 30) == 0);
+    if (follow < 1 || follow > objCount) return;
+    const int64_t cx = (int64_t(i32(start)) + i32(start + 12)) / 2;
+    const int64_t ox = i32(objects + 92 * (follow - 1) + 4);
+    CHECK(ox > 0 && std::abs(cx - ox) <= 1);
+    // Pit's box: fixed in the world.
+    CHECK(i32(start + 32 + 28) == 0);
+}
+
 // #369: the Project settings tab reads a music track or movie again only
 // when the file changes (appears, goes, is written), not every second.
 void testFileCache() {
@@ -24198,6 +24242,7 @@ int main(int argc, char** argv) {
     testPick();
     testTriggerWorldBox();
     testTriggerIndexMatchesExport();
+    testTriggerFollowsEntity();
     testFileCache();
     testGizmoMath();
     testPlayerViewFov();

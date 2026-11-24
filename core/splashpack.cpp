@@ -3274,7 +3274,14 @@ static ExportResult exportSplashpackBaked(const Scene& scene, const fs::path& ro
         w.i32(toWorldFixed12(mx.z / gte));
         w.i16(t.lua.empty() ? int16_t(-1) : luaIndex(t.lua));
         w.u16(0);
-        w.u32(0);
+        // The game object the box moves with, index + 1; 0 = fixed in the world
+        // (no game object, as with a bare trigger, or a streamed one, which
+        // never moves). The bounds stay in world space.
+        auto ex = std::find_if(exporters.begin(), exporters.end(),
+                               [&](const ExpObject& e) { return e.obj == fo->object; });
+        const bool follows = ex != exporters.end() && !streamed[size_t(ex - exporters.begin())];
+        w.u16(follows ? uint16_t(ex - exporters.begin() + 1) : 0);
+        w.u16(0);
     }
 
     // ---- BVH
