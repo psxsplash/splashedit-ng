@@ -122,6 +122,10 @@ struct State {
     // when the edit began, so each keeps its own proportions.
     std::vector<std::pair<std::vector<int>, splash::Vec3>> scaleLockFromMany;
     bool gizmos = true;  // viewport draws trigger boxes, interaction radii and nav regions
+    // The Scene view's meshes: only the side the console draws (#386), and
+    // as edges only.
+    bool cullBack = true;
+    bool wireframe = false;
     // The viewport draws the exported BVH's boxes down to bvhDepth (-1: every
     // level). Its own toggle, independent of gizmos.
     bool bvhShow = false;

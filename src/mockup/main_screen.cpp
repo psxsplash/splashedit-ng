@@ -35,6 +35,7 @@
 #include "editor/catalog.hh"
 #include "editor/document.hh"
 #include "editor/file_cache.hh"
+#include "editor/mesh_bounds.hh"
 #include "editor/gizmo.hh"
 #include "editor/player_view.hh"
 #include "editor/lua_editor.hh"
@@ -4008,6 +4009,8 @@ static std::vector<MenuEntry> menuEntries(int which, State& st, editor::Document
             m.push_back(separator());
             m.push_back(item("Snap", "", true, [&] { st.snap = !st.snap; }, st.snap));
             m.push_back(item("Orthographic", "", true, [&] { view.setOrtho(!view.ortho()); }, view.ortho()));
+            m.push_back(item("Cull Back Faces", "", true, [&] { st.cullBack = !st.cullBack; }, st.cullBack));
+            m.push_back(item("Wireframe", "", true, [&] { st.wireframe = !st.wireframe; }, st.wireframe));
             {
                 // Every Lua file the scene uses, to open in the script editor.
                 std::vector<std::string> luas;
@@ -5902,18 +5905,12 @@ static void scaleGizmo(State& st, ImDrawList* dl, viewport::Ps1View& view, ImRec
     }
 }
 
-// Local-space bounds of a mesh, loaded and cached by project path. Empty when
-// the mesh is missing or unreadable.
+// Local-space bounds of a mesh, loaded and cached by project path until the
+// document's assets change (a reimport or a new pivot rewrites the file).
+// Empty when the mesh is missing or unreadable.
 static const std::optional<splash::Bounds>& localBounds(const editor::Document& doc, const std::string& path) {
-    static std::map<std::string, std::optional<splash::Bounds>> cache;
-    auto it = cache.find(path);
-    if (it != cache.end()) return it->second;
-    std::optional<splash::Bounds> b;
-    try {
-        b = splash::loadMesh(doc.resolve(path)).bounds();
-    } catch (...) {
-    }
-    return cache.emplace(path, b).first->second;
+    static editor::MeshBoundsCache cache;
+    return cache.local(doc, path);
 }
 
 // World AABB of the selected object's mesh in GL space, or a small box at its
@@ -5922,14 +5919,8 @@ static void selectedBoxGl(const editor::Document& doc, const splash::FlatObject&
                           viewport::Vec3* hi) {
     if (fo.object->mesh && !fo.object->mesh->mesh.empty()) {
         if (const std::optional<splash::Bounds>& lb = localBounds(doc, fo.object->mesh->mesh)) {
-            splash::Vec3 mn = lb->min(), mx = lb->max();
             splash::Vec3 wmin, wmax;
-            for (int c = 0; c < 8; ++c) {
-                splash::Vec3 corner{c & 1 ? mx.x : mn.x, c & 2 ? mx.y : mn.y, c & 4 ? mx.z : mn.z};
-                splash::Vec3 w = fo.localToWorld.point(corner);
-                wmin = c == 0 ? w : splash::vmin(wmin, w);
-                wmax = c == 0 ? w : splash::vmax(wmax, w);
-            }
+            editor::worldBox(*lb, fo.localToWorld, &wmin, &wmax);
             *lo = toGl(wmin);
             *hi = toGl(wmax);
             return;
@@ -7273,12 +7264,7 @@ static bool meshWorldBounds(const editor::Document& doc, const splash::FlatObjec
     if (mc.mesh.empty()) return false;
     const std::optional<splash::Bounds>& lb = localBounds(doc, mc.mesh);
     if (!lb) return false;
-    const splash::Vec3 a = lb->min(), b = lb->max();
-    for (int c = 0; c < 8; ++c) {
-        const splash::Vec3 p = fo.localToWorld.point({c & 1 ? b.x : a.x, c & 2 ? b.y : a.y, c & 4 ? b.z : a.z});
-        *lo = c == 0 ? p : splash::Vec3{std::min(lo->x, p.x), std::min(lo->y, p.y), std::min(lo->z, p.z)};
-        *hi = c == 0 ? p : splash::Vec3{std::max(hi->x, p.x), std::max(hi->y, p.y), std::max(hi->z, p.z)};
-    }
+    editor::worldBox(*lb, fo.localToWorld, lo, hi);
     return true;
 }
 
@@ -7716,6 +7702,10 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
         lookThroughCamera(doc, view, p);
     }
     view.clean = st.viewMode == 1;
+    view.cullBack = st.cullBack;
+    view.wireframe = st.wireframe;
+    scriptLine("view.faces", std::string("scene view: cull back faces ") + (st.cullBack ? "on" : "off") + ", wireframe " +
+                                 (st.wireframe ? "on" : "off"));
     // In pixels, so the clean view stays sharp at any UI scale or pixel density.
     const ImVec2 fb = ImGui::GetIO().DisplayFramebufferScale;
     // While the timeline previews a pose, outlines and markers follow the
@@ -7828,6 +7818,20 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
     if (iconButton("gizmos", ImRect(giz.Min + ImVec2(2, 2), giz.Max - ImVec2(2, 2)), icon::box, st.gizmos,
                    st.gizmos ? "Trigger boxes, interaction radii and nav regions: shown" : "Trigger boxes, interaction radii and nav regions: hidden"))
         st.gizmos = !st.gizmos;
+    // How meshes are drawn (#386): only the side the console draws, and as edges.
+    ImRect faces(ImVec2(giz.Max.x + space::sm, p.y), ImVec2(giz.Max.x + space::sm + 2 * 30 + 4, p.y + 32));
+    dl->AddRectFilled(faces.Min, faces.Max, rgb(0x0e1014, 210), radius::button + 2);
+    dl->AddRect(faces.Min, faces.Max, rgb(0xffffff, 14), radius::button + 2);
+    const ImRect cullR(faces.Min + ImVec2(2, 2), ImVec2(faces.Min.x + 32, faces.Max.y - 2));
+    const ImRect wireR(ImVec2(cullR.Max.x, cullR.Min.y), faces.Max - ImVec2(2, 2));
+    nameRect("vp.cull", cullR);
+    nameRect("vp.wire", wireR);
+    if (iconButton("cull", cullR, icon::square, st.cullBack,
+                   st.cullBack ? "Cull back faces: on. Meshes show only the side the console draws."
+                               : "Cull back faces: off. Both sides of every triangle show, though the console draws one."))
+        st.cullBack = !st.cullBack;
+    if (iconButton("wire", wireR, icon::squareDashed, st.wireframe, st.wireframe ? "Wireframe: on" : "Wireframe: off"))
+        st.wireframe = !st.wireframe;
 
     // Right side: view mode and camera.
     float segW = 0;

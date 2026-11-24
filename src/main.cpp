@@ -197,6 +197,8 @@ struct Args {
     int shotAt = -1;  // screenshot frame, overriding the padding after actions
     int viewMode = 0;
     bool overlays = true;  // --no-overlays: the scene view hides trigger, interact and nav overlays
+    bool cullBack = true;  // --no-cull: the scene view draws both sides of every triangle
+    bool wireframe = false;  // --wireframe: the scene view draws meshes as edges
     const char* project = nullptr;  // project root; default: the bundled example
     const char* scene = nullptr;    // relative to the project; default: first *.scene in it
     const char* select = nullptr;   // object name to select at startup
@@ -504,6 +506,8 @@ Args parse(int argc, char** argv) {
         else if (!std::strcmp(argv[i], "--shot-at")) a.shotAt = std::atoi(next());
         else if (!std::strcmp(argv[i], "--clean")) a.viewMode = 1;
         else if (!std::strcmp(argv[i], "--no-overlays")) a.overlays = false;
+        else if (!std::strcmp(argv[i], "--no-cull")) a.cullBack = false;
+        else if (!std::strcmp(argv[i], "--wireframe")) a.wireframe = true;
         else if (!std::strcmp(argv[i], "--project")) a.project = next();
         else if (!std::strcmp(argv[i], "--scene")) a.scene = next();
         else if (!std::strcmp(argv[i], "--select")) a.select = next();
@@ -905,6 +909,8 @@ int main(int argc, char** argv) {
     mockup::State state;
     state.viewMode = args.viewMode;
     state.gizmos = args.overlays;
+    state.cullBack = args.cullBack;
+    state.wireframe = args.wireframe;
     state.play.bundleDir = baseDir();
     state.play.scripted = args.screenshot != nullptr;
     {

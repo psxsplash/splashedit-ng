@@ -321,6 +321,22 @@ const splash::Scene* Ps1View::drawnScene() const {
     return m_doc ? &m_doc->scene() : nullptr;
 }
 
+// A submesh's corners in the order the exporter writes them (splashpack.cpp):
+// each triangle turned so its face normal agrees with its first corner's
+// normal. That order, not the file's, decides which side psxsplash draws
+// (NCLIP keeps the triangles clockwise on screen), so the view culls with it.
+static std::vector<int> exportOrder(const splash::Mesh& mesh, const std::vector<int>& tri) {
+    std::vector<int> out(tri);
+    for (size_t k = 0; k + 2 < out.size(); k += 3) {
+        const splash::Vec3 &a = mesh.positions[size_t(out[k])], &b = mesh.positions[size_t(out[k + 1])],
+                           &c = mesh.positions[size_t(out[k + 2])], &n = mesh.normals[size_t(out[k])];
+        const float ux = b.x - a.x, uy = b.y - a.y, uz = b.z - a.z, vx = c.x - a.x, vy = c.y - a.y, vz = c.z - a.z;
+        const float fx = uy * vz - uz * vy, fy = uz * vx - ux * vz, fz = ux * vy - uy * vx;
+        if (fx * n.x + fy * n.y + fz * n.z < 0) std::swap(out[k + 1], out[k + 2]);
+    }
+    return out;
+}
+
 void Ps1View::rebuild() {
     m_verts.clear();
     m_batches.clear();
@@ -447,7 +463,7 @@ void Ps1View::rebuild() {
                     duv = {(*uvOff)[0] / float(ts->second.first - 1), -(*uvOff)[1] / float(ts->second.second - 1)};
             }
             std::vector<Vertex>& bucket = buckets[tex];
-            const std::vector<int>& tri = mesh->submeshes[sub];
+            const std::vector<int> tri = exportOrder(*mesh, mesh->submeshes[sub]);
             // The same triangles in Unity world space for picking, tagged with the object.
             const size_t firstTri = m_pick.positions.size() / 3;
             for (size_t k = 0; k + 2 < tri.size(); k += 3)
@@ -717,10 +733,29 @@ unsigned Ps1View::render(int panelW, int panelH, int lines) {
     glUniform1f(glGetUniformLocation(m_prog, "uAlpha"), 1.0f);
     glActiveTexture_(GL_TEXTURE0);
     glBindVertexArray(m_vao);
+    // The meshes as psxsplash keeps them: rebuild() put each triangle's
+    // corners in the exporter's order, and the console draws the ones that
+    // come out clockwise on screen. The view is not mirrored (render space's
+    // negated Z is undone by the right-handed camera), so clockwise in the
+    // window is the front here too. Wireframe draws the same triangles'
+    // edges; neither touches the blob shadows or anything after the meshes.
+    auto meshPass = [&](bool on) {
+        if (cullBack && on) {
+            glEnable(GL_CULL_FACE);
+            glCullFace(GL_BACK);
+            glFrontFace(GL_CW);
+        } else {
+            glDisable(GL_CULL_FACE);
+            glFrontFace(GL_CCW);
+        }
+        glPolygonMode(GL_FRONT_AND_BACK, wireframe && on ? GL_LINE : GL_FILL);
+    };
+    meshPass(true);
     for (const Batch& b : m_batches) {
         glBindTexture(GL_TEXTURE_2D, b.tex);
         glDrawArrays(GL_TRIANGLES, b.start, b.count);
     }
+    meshPass(false);
 
     // Blob shadows over the finished scene: each a fan of eight triangles,
     // depth tested (not written) so whatever stands in front of the floor,
@@ -787,10 +822,13 @@ unsigned Ps1View::render(int panelW, int panelH, int lines) {
     }
     glBindVertexArray(0);
     // The overlay fades into the fog as the console's does (toward black:
-    // what it adds goes, the fog the triangle under it got stays).
+    // what it adds goes, the fog the triangle under it got stays). It lies
+    // on the meshes' triangles, so it is culled and drawn as they are.
     if (!m_shineBatches.empty()) {
         glUniform3f(glGetUniformLocation(m_prog, "uFog"), 0, 0, 0);
+        meshPass(true);
         drawShine(bRight, bUp);
+        meshPass(false);
     }
     glDisable(GL_DEPTH_TEST);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);

@@ -607,6 +607,17 @@ no caption, red in the middle, no word 0). Needs a display (CI runs it under `xv
 
     python3 meshalphacheck.py <splashedit> <splashpack-cli> [screenshot.png]
 
+`cullcheck.py` checks the Scene view culls back faces as psxsplash does (#386). It builds a temp project
+with two 4 x 4 quads of the same corners in the same order on a green background: Front (red) with its
+normals toward the camera, Back (blue) with them away; the exporter turns each triangle to agree with
+its normals and the console draws the ones clockwise on screen, so only Front shows in game. By
+default (`scene view: cull back faces on, wireframe off`) the viewport must show red and no blue; with
+the toolbar's `vp.cull` clicked, or `--no-cull`, both; clicked twice, red only again. `vp.wire` must
+draw far fewer red pixels than the filled quad and still no blue. Needs a display (CI runs it under
+`xvfb-run`).
+
+    python3 cullcheck.py <splashedit> [screenshot.png]
+
 `shadowcheck.py` checks blob shadows in the editor on a copy of the third-person template. With Player
 Body selected it picks Blob from the mesh inspector's Shadow menu (`--click @obj.shadow/Blob`): the
 size must come from the body's 0.6 m footprint (`shadow: blob size 0.6 darkness 60 Player Body`), the

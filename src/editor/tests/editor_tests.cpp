@@ -77,6 +77,7 @@
 #include "path.hh"
 #include "strings.hh"
 #include "simplify.hh"
+#include "editor/mesh_bounds.hh"
 #include "editor/pivot.hh"
 #include "editor/player_view.hh"
 #include "editor/ui_canvas.hh"
@@ -5812,6 +5813,70 @@ Project make(const char* name, editor::Document& doc) {
 }
 
 }  // namespace pivotfiles
+
+// The Scene view's selection outline after Pivot > Centre (#387): the
+// outline's box (the mesh's cached local bounds through the object's
+// transform) stays on the mesh the view draws, not where the old bounds put it
+// from the new origin; and again after undo.
+void testPivotOutline() {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    fs::path dir = g_outDir / "pivotoutline";
+    fs::remove_all(dir, ec);
+    fs::path proj = dir / "game", outside = dir / "downloads";
+    fs::create_directories(proj, ec);
+    fs::create_directories(outside, ec);
+    std::ofstream(outside / "cube.gltf") << R"({"asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],
+"nodes":[{"name":"Cube","mesh":0,"translation":[5,1,0],"rotation":[0,0.70710678,0,0.70710678],"scale":[2,1,1]}],
+"meshes":[{"primitives":[{"attributes":{"POSITION":0}}]}],
+"accessors":[{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0,0,0],"max":[1,1,0]}],
+"bufferViews":[{"buffer":0,"byteLength":36}],
+"buffers":[{"byteLength":36,"uri":"data:application/octet-stream;base64,AAAAAAAAAAAAAAAAAACAPwAAAAAAAAAAAAAAAAAAgD8AAAAA"}]})";
+    editor::Document doc;
+    doc.reset(splash::Scene{}, proj, "game");
+    CHECK(editor::placeModel(doc, outside / "cube.gltf", std::nullopt, {0}, {4, 5, 6}).error.empty());
+    const splash::Object* o = doc.object({0});
+    CHECK(o && o->mesh && !o->mesh->mesh.empty());
+    if (!o || !o->mesh) return;
+    const std::string mesh = o->mesh->mesh;
+    editor::MeshBoundsCache cache;
+    // The outline's box, and the world AABB of the triangles as drawn.
+    auto boxes = [&](splash::Vec3* lo, splash::Vec3* hi, splash::Vec3* dlo, splash::Vec3* dhi) {
+        for (const splash::FlatObject& fo : splash::flatten(doc.scene()))
+            if (fo.object == doc.object({0})) {
+                const std::optional<splash::Bounds>& lb = cache.local(doc, mesh);
+                if (!lb) return false;
+                editor::worldBox(*lb, fo.localToWorld, lo, hi);
+                const std::vector<splash::Vec3> pos = splash::loadMesh(proj / mesh).positions;
+                for (size_t i = 0; i < pos.size(); ++i) {
+                    const splash::Vec3 w = fo.localToWorld.point(pos[i]);
+                    *dlo = i == 0 ? w : splash::vmin(*dlo, w);
+                    *dhi = i == 0 ? w : splash::vmax(*dhi, w);
+                }
+                return !pos.empty();
+            }
+        return false;
+    };
+    auto onMesh = [&](const char* when) {
+        splash::Vec3 lo{}, hi{}, dlo{}, dhi{};
+        const bool ok = boxes(&lo, &hi, &dlo, &dhi) && nearV(lo, dlo, 1e-4f) && nearV(hi, dhi, 1e-4f);
+        if (!ok)
+            std::fprintf(stderr, "  %s: outline (%g %g %g)-(%g %g %g), mesh (%g %g %g)-(%g %g %g)\n", when, lo.x, lo.y, lo.z, hi.x,
+                         hi.y, hi.z, dlo.x, dlo.y, dlo.z, dhi.x, dhi.y, dhi.z);
+        return ok;
+    };
+    CHECK(onMesh("placed"));
+    const splash::Vec3 before = doc.object({0})->transform.position;
+    std::string err;
+    CHECK(editor::setPivot(doc, {0}, editor::PivotMode::Centre, {}, &err) && err.empty());
+    CHECK(!nearV(doc.object({0})->transform.position, before, 1e-4f));
+    CHECK(onMesh("after Pivot > Centre"));
+    CHECK(doc.undo());
+    CHECK(onMesh("after undo"));
+    // Read again only when the assets changed: placed, set, undone.
+    const unsigned reads = cache.reads();
+    CHECK(onMesh("unchanged") && cache.reads() == reads);
+}
 
 void testSetPivotOtherFiles() {
     using namespace pivotfiles;
@@ -24423,6 +24488,7 @@ int main(int argc, char** argv) {
     testPlaceModel();
     testPlaceOneNodeModel();
     testSetPivot();
+    testPivotOutline();
     testSetPivotOtherFiles();
     testSetPivotBrokenFile();
     testSetPivotPrefabMode();
