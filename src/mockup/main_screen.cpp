@@ -35,6 +35,7 @@
 #include "editor/catalog.hh"
 #include "editor/document.hh"
 #include "editor/file_cache.hh"
+#include "editor/mesh_bounds.hh"
 #include "editor/gizmo.hh"
 #include "editor/player_view.hh"
 #include "editor/lua_editor.hh"
@@ -5902,18 +5903,12 @@ static void scaleGizmo(State& st, ImDrawList* dl, viewport::Ps1View& view, ImRec
     }
 }
 
-// Local-space bounds of a mesh, loaded and cached by project path. Empty when
-// the mesh is missing or unreadable.
+// Local-space bounds of a mesh, loaded and cached by project path until the
+// document's assets change (a reimport or a new pivot rewrites the file).
+// Empty when the mesh is missing or unreadable.
 static const std::optional<splash::Bounds>& localBounds(const editor::Document& doc, const std::string& path) {
-    static std::map<std::string, std::optional<splash::Bounds>> cache;
-    auto it = cache.find(path);
-    if (it != cache.end()) return it->second;
-    std::optional<splash::Bounds> b;
-    try {
-        b = splash::loadMesh(doc.resolve(path)).bounds();
-    } catch (...) {
-    }
-    return cache.emplace(path, b).first->second;
+    static editor::MeshBoundsCache cache;
+    return cache.local(doc, path);
 }
 
 // World AABB of the selected object's mesh in GL space, or a small box at its
@@ -5922,14 +5917,8 @@ static void selectedBoxGl(const editor::Document& doc, const splash::FlatObject&
                           viewport::Vec3* hi) {
     if (fo.object->mesh && !fo.object->mesh->mesh.empty()) {
         if (const std::optional<splash::Bounds>& lb = localBounds(doc, fo.object->mesh->mesh)) {
-            splash::Vec3 mn = lb->min(), mx = lb->max();
             splash::Vec3 wmin, wmax;
-            for (int c = 0; c < 8; ++c) {
-                splash::Vec3 corner{c & 1 ? mx.x : mn.x, c & 2 ? mx.y : mn.y, c & 4 ? mx.z : mn.z};
-                splash::Vec3 w = fo.localToWorld.point(corner);
-                wmin = c == 0 ? w : splash::vmin(wmin, w);
-                wmax = c == 0 ? w : splash::vmax(wmax, w);
-            }
+            editor::worldBox(*lb, fo.localToWorld, &wmin, &wmax);
             *lo = toGl(wmin);
             *hi = toGl(wmax);
             return;
@@ -7273,12 +7262,7 @@ static bool meshWorldBounds(const editor::Document& doc, const splash::FlatObjec
     if (mc.mesh.empty()) return false;
     const std::optional<splash::Bounds>& lb = localBounds(doc, mc.mesh);
     if (!lb) return false;
-    const splash::Vec3 a = lb->min(), b = lb->max();
-    for (int c = 0; c < 8; ++c) {
-        const splash::Vec3 p = fo.localToWorld.point({c & 1 ? b.x : a.x, c & 2 ? b.y : a.y, c & 4 ? b.z : a.z});
-        *lo = c == 0 ? p : splash::Vec3{std::min(lo->x, p.x), std::min(lo->y, p.y), std::min(lo->z, p.z)};
-        *hi = c == 0 ? p : splash::Vec3{std::max(hi->x, p.x), std::max(hi->y, p.y), std::max(hi->z, p.z)};
-    }
+    editor::worldBox(*lb, fo.localToWorld, lo, hi);
     return true;
 }
 
