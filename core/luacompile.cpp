@@ -14,10 +14,10 @@ static int appendChunk(const void* p, size_t size, void* ud) {
     return 0;
 }
 
-std::vector<uint8_t> compileLua(const std::string& source, const std::string& chunkname) {
+std::vector<uint8_t> compileLua(const std::string& source, const std::string& chunkname, bool debugInfo) {
     std::vector<uint8_t> out;
     char err[512];
-    if (psxlua_compile(source.data(), source.size(), chunkname.c_str(), appendChunk, &out, err, sizeof err) != 0)
+    if (psxlua_compile(source.data(), source.size(), chunkname.c_str(), debugInfo ? 0 : 1, appendChunk, &out, err, sizeof err) != 0)
         throw std::runtime_error(err);
     // The PS1 header: little-endian, int, size_t, Instruction and number all
     // 4 bytes, integral numbers. Anything else means a broken host build.

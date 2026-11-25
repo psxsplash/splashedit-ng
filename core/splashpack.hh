@@ -23,6 +23,10 @@ struct ExportOptions {
     std::vector<std::string> objectOrder;
     // Store Lua scripts as psxlua bytecode (compileLua) instead of source.
     bool luaBytecode = false;
+    // With luaBytecode: keep line numbers and local names, each chunk named by
+    // its project path (Play, for the engine's Lua breakpoints). Costs pack
+    // bytes; disc builds leave it off.
+    bool luaDebugInfo = false;
     // Build everything but write no files; ExportResult::stats still fills in.
     bool dryRun = false;
 };
