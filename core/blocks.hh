@@ -67,7 +67,8 @@ enum class BlockKind { Hat, Statement, CBlock, Reporter, Boolean };
 // a UI text element as "Canvas/Element".
 // Device: "pad", "analog", "mouse" or "none" (Input.GetDevice's answers);
 // Stick: "left x", "left y", "right x" or "right y".
-enum class BlockField { None, Variable, Object, Button, Number, Text, Bool, Sound, Cutscene, Light, Key, StringKey, UiText, Device, Stick };
+// Emitter: an object with a Particle Emitter, by name (Particles.Play).
+enum class BlockField { None, Variable, Object, Button, Number, Text, Bool, Sound, Cutscene, Light, Key, StringKey, UiText, Device, Stick, Emitter };
 
 // Label templates (English, for the block editor): %f is the field, %1..%9
 // the inputs; '|' separates the label shown before each body after the

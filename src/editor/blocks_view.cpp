@@ -27,6 +27,7 @@ constexpr float kBlockRadius = 5;
 const char* const kFieldId = "##blockfield";
 const char* const kPickId = "blocks.pick";
 const char* const kNoLights = "No runtime lights";
+const char* const kNoEmitters = "No particle emitters";
 
 ImU32 categoryColor(std::string_view c) {
     if (c == "Events") return blocks::events;
@@ -265,6 +266,7 @@ bool BlocksView::known(splash::BlockField f, const std::string& value, const Con
         case splash::BlockField::Sound: return in(c.sounds);
         case splash::BlockField::Cutscene: return in(c.cutscenes);
         case splash::BlockField::Light: return in(c.lights);
+        case splash::BlockField::Emitter: return in(c.emitters);
         case splash::BlockField::StringKey: return in(c.stringKeys);
         case splash::BlockField::UiText: return in(c.uiTexts);
         case splash::BlockField::Device:
@@ -523,7 +525,7 @@ BlocksView::Result BlocksView::draw(ImDrawList* dl, ImRect r, bool* focused, con
                 } else if (spec->field == splash::BlockField::Button || spec->field == splash::BlockField::Variable ||
                            spec->field == splash::BlockField::Object || spec->field == splash::BlockField::Sound ||
                            spec->field == splash::BlockField::Cutscene || spec->field == splash::BlockField::Light ||
-                           spec->field == splash::BlockField::StringKey || spec->field == splash::BlockField::UiText ||
+                           spec->field == splash::BlockField::Emitter || spec->field == splash::BlockField::StringKey || spec->field == splash::BlockField::UiText ||
                            spec->field == splash::BlockField::Device || spec->field == splash::BlockField::Stick) {
                     m_picking = h.path;
                     m_pickPlayer = false;
@@ -766,6 +768,12 @@ BlocksView::Result BlocksView::draw(ImDrawList* dl, ImRect r, bool* focused, con
                 col = blocks::objects;
                 all = context.lights;
                 break;
+            case splash::BlockField::Emitter:
+                title = "Particle emitter";
+                ic = icon::zap;
+                col = blocks::objects;
+                all = context.emitters;
+                break;
             case splash::BlockField::StringKey:
                 title = "Key";
                 ic = icon::type;
@@ -811,6 +819,7 @@ BlocksView::Result BlocksView::draw(ImDrawList* dl, ImRect r, bool* focused, con
             const bool odd = stray && l == value;
             const char* blurb = odd ? (kind == splash::BlockField::Variable ? "Not a variable of this script"
                                        : kind == splash::BlockField::Light  ? "Not a runtime light in this scene"
+                                       : kind == splash::BlockField::Emitter ? "No particle emitter on an object of this name"
                                        : kind == splash::BlockField::StringKey ? "Not in the string table"
                                                                             : "Not in this scene")
                                 : l == "self" && kind == splash::BlockField::Object ? "The object this script is on"
@@ -819,8 +828,12 @@ BlocksView::Result BlocksView::draw(ImDrawList* dl, ImRect r, bool* focused, con
         }
         // No runtime lights: say how to make one rather than show an empty list.
         // It cannot be picked, and sits past `labels` so no pick maps to it.
-        const bool noLights = kind == splash::BlockField::Light && context.lights.empty();
-        if (noLights) items.push_back({icon::lightbulb, color::textFaint, kNoLights, nullptr, "Turn on Runtime in a point light's inspector"});
+        const bool noLights = (kind == splash::BlockField::Light && context.lights.empty()) ||
+                              (kind == splash::BlockField::Emitter && context.emitters.empty());
+        if (noLights && kind == splash::BlockField::Light)
+            items.push_back({icon::lightbulb, color::textFaint, kNoLights, nullptr, "Turn on Runtime in a point light's inspector"});
+        if (noLights && kind == splash::BlockField::Emitter)
+            items.push_back({icon::zap, color::textFaint, kNoEmitters, nullptr, "Add a Particle emitter component to an object"});
         ImVec2 at = mouse;
         if (const blk::BlockBox* b = curL.find(m_picking)) {
             const blk::Rect& w = m_pickPlayer ? b->player : b->field;

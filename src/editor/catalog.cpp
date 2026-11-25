@@ -27,6 +27,7 @@ const std::vector<ComponentInfo>& components() {
         {ComponentKind::Path, "Path", "curve route rail track spline waypoints moving platform patrol camera dolly", "A curve that objects, agents and the camera ride."},
         {ComponentKind::FollowPath, "Follow path", "ride move along curve route platform patrol", "Moves this object along a Path."},
         {ComponentKind::FixedCamera, "Fixed camera", "baked background prerendered resident evil camera angle view", "A camera angle baked into a 2D background the characters walk in front of and behind."},
+        {ComponentKind::Particles, "Particle emitter", "particles fx effect smoke fire sparks dust rain snow fountain billboard", "Sprite sheet particles: rate, lifetime, velocity, gravity, colour over life."},
     };
     return list;
 }
@@ -57,6 +58,7 @@ bool hasComponent(const splash::Object& o, ComponentKind k) {
         case ComponentKind::Path: return o.path.has_value();
         case ComponentKind::FollowPath: return o.followPath.has_value();
         case ComponentKind::FixedCamera: return o.fixedCamera.has_value();
+        case ComponentKind::Particles: return o.particles.has_value();
     }
     return false;
 }
@@ -106,6 +108,7 @@ bool addComponent(splash::Object& o, ComponentKind k) {
             break;
         case ComponentKind::FollowPath: o.followPath.emplace(); break;
         case ComponentKind::FixedCamera: o.fixedCamera.emplace(); break;
+        case ComponentKind::Particles: o.particles.emplace(); break;
     }
     return true;
 }
@@ -136,6 +139,7 @@ bool removeComponent(splash::Object& o, ComponentKind k) {
         case ComponentKind::Path: o.path.reset(); break;
         case ComponentKind::FollowPath: o.followPath.reset(); break;
         case ComponentKind::FixedCamera: o.fixedCamera.reset(); break;
+        case ComponentKind::Particles: o.particles.reset(); break;
     }
     return true;
 }
