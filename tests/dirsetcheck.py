@@ -144,15 +144,17 @@ check('and says which name clashes', (last(out, 'scene: sprite dirset message ')
     "'walk_n' is already an animation in sheet 'dirs'"), out[-400:])
 
 # 4 directions: n e s w, a row (4 cells) each.
-s, out = run(FORM + click('scene.dirsetcount') + click('scene.dirsetcount/4 directions') + click('scene.dirsetcreate') + SCROLL)
+s, out = run(FORM + click('scene.dirsetcount') + click('scene.dirsetcount/4 directions') + click('scene.dirsetcreate') + ['--wait-export'] +
+             SCROLL)
 want4 = [IDLE] + [('walk_' + x, 4 * k, 4, 6, True) for k, x in enumerate(SUF4)]
 check('4 directions: n e s w, 4 cells each', anims(s) == want4, f'{anims(s)} | ' + out[-300:])
 check('recognised as a set of 4', last(out, 'scene: sprite dirsets') == ' walk:4@1', out[-300:])
 check('Problems is clear', last(out, 'problems: ') == 'No problems', out[-300:])
 
 # Deleting walk_e leaves n s w: Problems warns that SetFacingFromYaw would play the wrong animation.
+# Problems counts from the live export, which lands after the section's own warning: hold for it.
 s, out = run(FORM + click('scene.dirsetcount') + click('scene.dirsetcount/4 directions') + click('scene.dirsetcreate') + SCROLL +
-             click('scene.spriteanim.2.delete') + SCROLL)
+             click('scene.spriteanim.2.delete') + ['--wait-export'] + SCROLL)
 check('walk_e deleted', anims(s) == [IDLE, want4[1], want4[3], want4[4]], f'{anims(s)} | ' + out[-300:])
 check('the warning names the missing direction', last(out, 'scene: sprite warnings ') ==
       'sprite animations walk_*: no walk_e, so Sprite.SetFacingFromYaw(sprite, "walk_n", 4, yaw) would play the wrong '
