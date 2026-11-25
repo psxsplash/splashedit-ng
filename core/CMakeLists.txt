@@ -89,6 +89,7 @@ add_library(splashcore STATIC
     licencetmd.cpp
     scene.cpp
     path.cpp
+    particles.cpp
     strings.cpp
     terrain.cpp
     skin.cpp

@@ -18,7 +18,7 @@ import struct
 import sys
 from pathlib import Path
 
-HEADER = [  # (name, fmt) in order, 164 bytes (v29); 160 in v28, 156 in v25-v27, 148 in v24, 144 in v22-v23
+HEADER = [  # (name, fmt) in order, 172 bytes (v32); 168 in v30-v31, 164 in v29, 160 in v28, 156 in v25-v27, 148 in v24, 144 in v22-v23
     ("magic", "2s"), ("version", "H"), ("luaFileCount", "H"), ("gameObjectCount", "H"),
     ("textureAtlasCount", "H"), ("clutCount", "H"), ("colliderCount", "H"), ("interactableCount", "H"),
     ("playerStartPos", "3h"), ("playerStartRot", "3h"), ("playerHeight", "H"), ("sceneLuaFileIndex", "h"),
@@ -35,23 +35,25 @@ HEADER = [  # (name, fmt) in order, 164 bytes (v29); 160 in v28, 156 in v25-v27,
     ("memcardTableOffset", "I"), ("streamTableOffset", "I"), ("spriteTableOffset", "I"),
     ("spriteSheetCount", "H"), ("spriteAnimCount", "H"), ("sceneHash", "I"), ("tilemapTableOffset", "I"),
     ("lightTableOffset", "I"), ("orderingTableSize", "I"), ("bumpAllocatorSize", "I"),
-    ("shadowTableOffset", "I"), ("backgroundTableOffset", "I"),
+    ("shadowTableOffset", "I"), ("backgroundTableOffset", "I"), ("shineTableOffset", "I"), ("particleTableOffset", "I"),
 ]
 OFFSET_FIELDS = {"nameTableOffset", "audioTableOffset", "cutsceneTableOffset", "uiTableOffset",
                  "animationTableOffset", "skinTableOffset", "memcardTableOffset", "streamTableOffset",
                  "spriteTableOffset", "tilemapTableOffset", "lightTableOffset", "shadowTableOffset",
-                 "backgroundTableOffset"}
-VERSIONS = range(23, 30)
+                 "backgroundTableOffset", "shineTableOffset", "particleTableOffset"}
+VERSIONS = range(23, 33)
 
 
-def header_size(version):  # psxsplash splashpack.cpp splashpackHeaderSize
-    return 164 if version >= 29 else 160 if version >= 28 else 156 if version >= 25 else 148 if version >= 24 else 144
+def header_size(version):  # psxsplash splashpackversion.hh splashpackHeaderSize
+    return (172 if version >= 32 else 168 if version >= 30 else 164 if version >= 29 else 160 if version >= 28
+            else 156 if version >= 25 else 148 if version >= 24 else 144)
 
 
 UNSUPPORTED = ["triggerBoxCount", "interactableCount", "audioClipCount",
                "cutsceneCount", "animationCount", "skinnedMeshCount", "agentCount", "uiCanvasCount",
                "uiFontCount", "spriteSheetCount", "memcardTableOffset", "streamTableOffset",
-               "tilemapTableOffset", "lightTableOffset", "shadowTableOffset", "backgroundTableOffset"]
+               "tilemapTableOffset", "lightTableOffset", "shadowTableOffset", "backgroundTableOffset",
+               "shineTableOffset", "particleTableOffset"]
 
 
 class Pack:
@@ -78,7 +80,7 @@ class Pack:
             else:
                 self.h[name] = 0
             p += n
-        assert p == 164
+        assert p == 172
         p = size
         h = self.h
         self.lua = []
