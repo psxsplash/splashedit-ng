@@ -338,6 +338,17 @@ json writeTerrain(const TerrainComponent& t) {
     return j;
 }
 
+json writeDecal(const DecalComponent& d) {
+    json j = {{"type", "decal"},
+              {"texture", d.texture.empty() ? json(nullptr) : json(d.texture)},
+              {"width", d.width},
+              {"height", d.height},
+              {"depth", d.depth},
+              {"color", {d.color[0], d.color[1], d.color[2]}}};
+    putExtras(j, d.extra);
+    return j;
+}
+
 json writeAudio(const AudioComponent& a) {
     json j = {{"type", "audio"},
               {"clip", a.clip.empty() ? json(nullptr) : json(a.clip)},
@@ -623,6 +634,21 @@ Object readObject(const json& j) {
                 fail("object '" + o.name + "': follow path startOffset must be 0..1");
             fp.extra = extrasOf(c, writeFollowPath(fp));
             o.followPath = fp;
+        } else if (type == "decal") {
+            DecalComponent d;
+            if (c.contains("texture") && !c["texture"].is_null()) d.texture = c["texture"].get<std::string>();
+            d.width = c.value("width", d.width);
+            d.height = c.value("height", d.height);
+            d.depth = c.value("depth", d.depth);
+            if (!(d.width > 0) || !(d.height > 0) || !(d.depth > 0))
+                fail("object '" + o.name + "': decal width, height and depth must be more than 0");
+            if (c.contains("color")) {
+                const json& cj = c["color"];
+                if (!cj.is_array() || cj.size() != 3) fail("object '" + o.name + "': decal color must be [r, g, b]");
+                for (size_t i = 0; i < 3; i++) d.color[i] = cj[i].get<float>();
+            }
+            d.extra = extrasOf(c, writeDecal(d));
+            o.decal = d;
         } else if (type == "skin") {
             SkinComponent sk;
             for (const json& cj : c.value("clips", json::array())) sk.clips.push_back(cj.get<std::string>());
@@ -677,6 +703,7 @@ json writeObject(const Object& o) {
     if (o.followPath) comps.push_back(writeFollowPath(*o.followPath));
     if (o.fixedCamera) comps.push_back(writeFixedCamera(*o.fixedCamera));
     if (o.particles) comps.push_back(writeParticles(*o.particles));
+    if (o.decal) comps.push_back(writeDecal(*o.decal));
     for (const std::string& c : o.unknownComponents) comps.push_back(json::parse(c));
     j["components"] = comps;
     json kids = json::array();

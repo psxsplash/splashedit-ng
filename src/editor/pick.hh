@@ -35,8 +35,13 @@ struct PickMesh {
 
 struct PickHit {
     int object;
-    float t;  // ray parameter: origin + dir * t
+    float t;              // ray parameter: origin + dir * t
+    size_t triangle = 0;  // the soup triangle hit: positions[3 * triangle .. 3 * triangle + 2]
 };
+
+// Unit normal of the hit triangle, turned to face the ray's origin (both faces
+// pick), or {0, 0, 0} for a degenerate one.
+splash::Vec3 hitNormal(const Ray& ray, const PickMesh& mesh, const PickHit& hit);
 
 // Distance along the ray to the triangle, both faces counted, or nullopt.
 std::optional<float> rayTriangle(const Ray& ray, splash::Vec3 a, splash::Vec3 b, splash::Vec3 c);

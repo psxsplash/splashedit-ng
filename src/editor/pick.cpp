@@ -31,10 +31,19 @@ std::optional<PickHit> pickNearest(const Ray& ray, const PickMesh& mesh) {
             const size_t i = tri * 3;
             if (i + 2 >= mesh.positions.size()) break;
             std::optional<float> t = rayTriangle(ray, mesh.positions[i], mesh.positions[i + 1], mesh.positions[i + 2]);
-            if (t && (!best || *t < best->t)) best = PickHit{r.object, *t};
+            if (t && (!best || *t < best->t)) best = PickHit{r.object, *t, tri};
         }
     }
     return best;
+}
+
+Vec3 hitNormal(const Ray& ray, const PickMesh& mesh, const PickHit& hit) {
+    const size_t i = hit.triangle * 3;
+    if (i + 2 >= mesh.positions.size()) return {};
+    const Vec3 n = splash::cross(mesh.positions[i + 1] - mesh.positions[i], mesh.positions[i + 2] - mesh.positions[i]);
+    if (splash::sqrMagnitude(n) <= 0) return {};
+    const Vec3 u = splash::normalized(n);
+    return splash::dot(u, ray.dir) > 0 ? u * -1.0f : u;
 }
 
 std::optional<float> raySphere(const Ray& ray, Vec3 center, float radius) {

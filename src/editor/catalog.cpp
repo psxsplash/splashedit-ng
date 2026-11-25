@@ -28,6 +28,7 @@ const std::vector<ComponentInfo>& components() {
         {ComponentKind::FollowPath, "Follow path", "ride move along curve route platform patrol", "Moves this object along a Path."},
         {ComponentKind::FixedCamera, "Fixed camera", "baked background prerendered resident evil camera angle view", "A camera angle baked into a 2D background the characters walk in front of and behind."},
         {ComponentKind::Particles, "Particle emitter", "particles fx effect smoke fire sparks dust rain snow fountain billboard", "Sprite sheet particles: rate, lifetime, velocity, gravity, colour over life."},
+        {ComponentKind::Decal, "Decal", "sticker graffiti crack poster blood splat projector texture", "Projects a texture onto the walls and floors under it."},
     };
     return list;
 }
@@ -59,6 +60,7 @@ bool hasComponent(const splash::Object& o, ComponentKind k) {
         case ComponentKind::FollowPath: return o.followPath.has_value();
         case ComponentKind::FixedCamera: return o.fixedCamera.has_value();
         case ComponentKind::Particles: return o.particles.has_value();
+        case ComponentKind::Decal: return o.decal.has_value();
     }
     return false;
 }
@@ -71,6 +73,9 @@ std::string cannotAdd(const splash::Object& o, ComponentKind k) {
     if (k == ComponentKind::Terrain && o.mesh && !o.mesh->mesh.empty()) return "Has a model mesh";
     if (k == ComponentKind::Terrain && o.skin) return "Has a skin";
     if (k == ComponentKind::Skin && o.terrain) return "Is a terrain";
+    // Decal pieces are static triangles; a skinned object has none.
+    if (k == ComponentKind::Decal && o.skin) return "Not on a skinned mesh";
+    if (k == ComponentKind::Skin && o.decal) return "Not with a Decal";
     return {};
 }
 
@@ -109,6 +114,7 @@ bool addComponent(splash::Object& o, ComponentKind k) {
         case ComponentKind::FollowPath: o.followPath.emplace(); break;
         case ComponentKind::FixedCamera: o.fixedCamera.emplace(); break;
         case ComponentKind::Particles: o.particles.emplace(); break;
+        case ComponentKind::Decal: o.decal.emplace(); break;
     }
     return true;
 }
@@ -140,6 +146,7 @@ bool removeComponent(splash::Object& o, ComponentKind k) {
         case ComponentKind::FollowPath: o.followPath.reset(); break;
         case ComponentKind::FixedCamera: o.fixedCamera.reset(); break;
         case ComponentKind::Particles: o.particles.reset(); break;
+        case ComponentKind::Decal: o.decal.reset(); break;
     }
     return true;
 }
@@ -163,6 +170,7 @@ const std::vector<ObjectPreset>& presets() {
         {"Terrain", "landscape ground heightmap hills sculpt paint", "Ground you sculpt and paint in the Scene view.", {K::Terrain}},
         {"Path", "curve route rail track spline moving platform patrol camera dolly", "A curve that objects, agents and the camera ride.", {K::Path}},
         {"Fixed camera", "baked background prerendered camera angle", "A camera angle baked into a 2D background.", {K::FixedCamera}},
+        {"Decal", "sticker graffiti crack poster blood splat", "Projects a texture onto the walls and floors under it.", {K::Decal}},
     };
     return list;
 }

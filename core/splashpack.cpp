@@ -20,6 +20,7 @@
 #include "binwriter.hh"
 #include "blocks.hh"
 #include "budget.hh"
+#include "decal.hh"
 #include "bvh.hh"
 #include "reverb.hh"
 #include "rooms.hh"
@@ -165,8 +166,9 @@ struct PsxVert {
 
 struct PsxTri {
     PsxVert v[3];
-    int textureIndex;  // -1 = untextured
-    bool shine = false;  // drawn again through the object's reflection texture (Tri flag 0x4)
+    int textureIndex;     // -1 = untextured
+    bool shine = false;   // drawn again through the object's reflection texture (Tri flag 0x4)
+    bool decal = false;   // a decal piece (core/decal.hh): Tri flag 0x8
 };
 
 struct Color {
@@ -548,6 +550,93 @@ void buildTris(ExpObject& e, float gte, const std::vector<SceneLight>& lights, E
     if (e.tris.size() > 65535)
         res.errors.push_back(e.obj->name + ": " + std::to_string(e.tris.size()) +
                              " triangles after splitting repeating textures, more than 65535");
+}
+
+// Decals (core/decal.hh): every decal object's box clipped onto the static
+// meshes under it, appended to that object's own triangles (a decal object
+// without a mesh ships as an object with only these) with Tri flag 0x8, in its
+// texture converted at 8 bpp (texels under half alpha transparent). Corner
+// colours are the decal colour times the surface's baked colour there.
+template <class ImageFor>
+void addDecals(std::vector<ExpObject>& exporters, std::deque<PsxTexture>& textureStore, ImageFor& imageFor, float gte,
+               const std::vector<SceneLight>& lights, const std::vector<SceneLight>& bakedOnlyLights, ExportResult& res) {
+    std::vector<size_t> decals;
+    for (size_t i = 0; i < exporters.size(); i++)
+        if (exporters[i].obj->decal) decals.push_back(i);
+    if (decals.empty()) return;
+    std::vector<DecalSurface> surfaces;
+    for (size_t i = 0; i < exporters.size(); i++) {
+        const ExpObject& e = exporters[i];
+        if (!e.mesh || e.mesh->positions.empty()) continue;
+        std::vector<Vec3> cols;
+        for (const Color& c : meshColors(*e.flat, *e.mc, *e.mesh, e.dynamicLit ? bakedOnlyLights : lights))
+            cols.push_back({c.r, c.g, c.b});
+        surfaces.push_back(decalSurface(int(i), *e.mesh, e.flat->localToWorld, cols, decalExclusion(*e.obj)));
+    }
+    std::map<std::string, PsxTexture*> cache;
+    for (size_t di : decals) {
+        ExpObject& e = exporters[di];
+        const DecalComponent& d = *e.obj->decal;
+        const std::string where = e.obj->name + ": decal ";
+        if (e.obj->skin) {
+            res.errors.push_back(where + "on a skinned mesh");
+            continue;
+        }
+        if (d.texture.empty()) {
+            res.warnings.push_back(where + "has no texture and draws nothing");
+            continue;
+        }
+        const DecalBuild b = buildDecal(d, e.flat->worldPosition, e.flat->worldRotation, e.flat->lossyScale, surfaces);
+        for (int x : b.excludedHit)
+            res.warnings.push_back(where + "reaches " + exporters[size_t(x)].obj->name + ", which is " +
+                                   decalExclusion(*exporters[size_t(x)].obj) + " and is not decalled");
+        if (b.pieces.empty()) {
+            res.warnings.push_back(where + "covers no triangles");
+            continue;
+        }
+        PsxTexture* tex = nullptr;
+        if (auto it = cache.find(d.texture); it != cache.end()) {
+            tex = it->second;
+        } else {
+            try {
+                const Image& img = imageFor(d.texture);
+                textureStore.push_back(convertTexture(img, BitDepth::Bpp8, hasCutoutTexels(img)));
+            } catch (const std::exception& ex) {
+                res.errors.push_back(ex.what());
+                continue;
+            }
+            textureStore.back().source = d.texture;
+            tex = cache[d.texture] = &textureStore.back();
+        }
+        int texIndex = -1;
+        for (size_t i = 0; i < e.textures.size(); i++)
+            if (e.textures[i] == tex) texIndex = int(i);
+        if (texIndex < 0) {
+            texIndex = int(e.textures.size());
+            e.textures.push_back(tex);
+        }
+        const Quat inv{-e.flat->worldRotation.x, -e.flat->worldRotation.y, -e.flat->worldRotation.z, e.flat->worldRotation.w};
+        for (const DecalPiece& p : b.pieces) {
+            const Vec3 n = rotate(inv, p.worldNormal);
+            PsxTri t{};
+            for (int k = 0; k < 3; k++) {
+                const DecalCorner& c = p.c[size_t(k)];
+                t.v[k] = toPsxVertex(scale(c.local, e.flat->lossyScale), gte, n, c.uv, tex->width, tex->height,
+                                     {c.color.x, c.color.y, c.color.z});
+                e.triPositions.push_back(c.local);
+            }
+            t.textureIndex = texIndex;
+            t.decal = true;
+            e.tris.push_back(t);
+        }
+        // The object's AABB (the engine culls by it) takes the pieces in.
+        Bounds bb = e.mesh->positions.empty() ? Bounds(b.pieces[0].c[0].local, Vec3{0, 0, 0}) : e.mesh->bounds();
+        for (const DecalPiece& p : b.pieces)
+            for (const DecalCorner& c : p.c) bb.encapsulate(c.local);
+        e.pieceBounds = bb;
+        if (e.tris.size() > 65535)
+            res.errors.push_back(e.obj->name + ": " + std::to_string(e.tris.size()) + " triangles with its decal, more than 65535");
+    }
 }
 
 // Same test the engine runs: does the light's range reach the mesh's world AABB?
@@ -2168,7 +2257,7 @@ static ExportResult exportSplashpackBaked(const Scene& scene, const fs::path& ro
             // A script needs a game object to run on, and an agent is one (its
             // actor id is its game object index + 1). Without a mesh it ships as
             // one with no triangles, which the engine draws as nothing.
-            if (fo.object->script || fo.object->agent) {
+            if (fo.object->script || fo.object->agent || fo.object->decal) {
                 static const MeshComponent noMeshComponent = [] {
                     MeshComponent mc;
                     mc.dynamicLighting = DynamicLighting::Off;
@@ -2378,6 +2467,8 @@ static ExportResult exportSplashpackBaked(const Scene& scene, const fs::path& ro
                                    std::to_string(kMaxLightsPerMesh) + " (the first in scene order): " + names);
     }
     for (ExpObject& e : exporters) buildTris(e, gte, e.dynamicLit ? bakedOnlyLights : lights, res);
+    if (!res.ok()) return res;
+    addDecals(exporters, textureStore, imageFor, gte, lights, bakedOnlyLights, res);
     if (!res.ok()) return res;
 
     // UI: image textures (packed after the object textures, as 2.4.0 does),
@@ -3493,7 +3584,7 @@ static ExportResult exportSplashpackBaked(const Scene& scene, const fs::path& ro
             w.u8(v.b);
             w.u8(0);
         }
-        uint16_t flags = e.mc->uvOffsetMaterial == t.textureIndex ? 1 : 0;
+        uint16_t flags = e.mc->uvOffsetMaterial == t.textureIndex && !t.decal ? 1 : 0;
         if (t.shine && e.shineTexture) flags |= 4;
         if (t.textureIndex < 0) {
             for (int i = 0; i < 6; i++) w.u8(0);
@@ -3519,6 +3610,8 @@ static ExportResult exportSplashpackBaked(const Scene& scene, const fs::path& ro
                 ((tex->bitDepth == BitDepth::Bpp4 && vram.fogMaskClut4 >= 0) ||
                  (tex->bitDepth == BitDepth::Bpp8 && vram.fogMaskClut8 >= 0)))
                 flags |= 2;
+            // Tri flag 0x8: a decal piece, drawn kDecalDepthBias buckets in front (psxsplash otdepth.hh).
+            if (t.decal) flags |= 8;
             w.u16(flags);
         }
     };
