@@ -40,6 +40,7 @@ struct RoomOut {
     uint32_t firstTriRef = 0, triRefCount = 0;
     uint32_t firstCell = 0, cellCount = 0;
     uint32_t firstPortalRef = 0, portalRefCount = 0;
+    int reverb = 0;  // RoomComponent::reverb, 0 for the catch-all
 };
 
 struct PortalOut {

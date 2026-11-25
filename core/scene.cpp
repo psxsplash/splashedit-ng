@@ -1,4 +1,5 @@
 #include "scene.hh"
+#include "reverb.hh"
 
 #include <algorithm>
 #include <cmath>
@@ -213,14 +214,27 @@ json writeNavigation(const NavigationComponent& nc) {
     return j;
 }
 
+// Reverb preset ids are saved by name (core/reverb.hh); 0 is not saved.
+void putReverb(json& j, int id) {
+    if (id > 0 && id < kReverbPresetCount) j["reverb"] = kReverbPresets[id].key;
+}
+int readReverb(const json& c, const std::string& where) {
+    if (!c.contains("reverb")) return 0;
+    int id = reverbFromKey(c["reverb"].get<std::string>());
+    if (id < 0) fail(where + ": unknown reverb '" + c["reverb"].get<std::string>() + "'");
+    return id;
+}
+
 json writeTrigger(const TriggerComponent& t) {
     json j = {{"type", "trigger"}, {"size", vec3(t.size)}, {"lua", t.lua.empty() ? json(nullptr) : json(t.lua)}};
+    putReverb(j, t.reverb);
     putExtras(j, t.extra);
     return j;
 }
 
 json writeRoom(const RoomComponent& r) {
     json j = {{"type", "room"}, {"size", vec3(r.size)}, {"offset", vec3(r.offset)}};
+    putReverb(j, r.reverb);
     putExtras(j, r.extra);
     return j;
 }
@@ -332,6 +346,7 @@ json writeAudio(const AudioComponent& a) {
               {"loop", a.loop},
               {"defaultVolume", a.defaultVolume},
               {"trimLeadingSilence", a.trimLeadingSilence}};
+    if (!a.reverbSend) j["reverbSend"] = false;
     putExtras(j, a.extra);
     return j;
 }
@@ -451,12 +466,14 @@ Object readObject(const json& j) {
             TriggerComponent t;
             if (c.contains("size")) t.size = vec3(c["size"]);
             if (c.contains("lua") && !c["lua"].is_null()) t.lua = c["lua"].get<std::string>();
+            t.reverb = readReverb(c, "object '" + o.name + "': trigger");
             t.extra = extrasOf(c, writeTrigger(t));
             o.trigger = t;
         } else if (type == "room") {
             RoomComponent r;
             if (c.contains("size")) r.size = vec3(c["size"]);
             if (c.contains("offset")) r.offset = vec3(c["offset"]);
+            r.reverb = readReverb(c, "object '" + o.name + "': room");
             r.extra = extrasOf(c, writeRoom(r));
             o.room = r;
         } else if (type == "fixedCamera") {
@@ -509,6 +526,7 @@ Object readObject(const json& j) {
             a.loop = c.value("loop", a.loop);
             a.defaultVolume = c.value("defaultVolume", a.defaultVolume);
             a.trimLeadingSilence = c.value("trimLeadingSilence", a.trimLeadingSilence);
+            a.reverbSend = c.value("reverbSend", true);
             a.extra = extrasOf(c, writeAudio(a));
             o.audio = a;
         } else if (type == "agent") {
@@ -746,6 +764,8 @@ json writeSettings(const SceneSettings& st) {
     if (st.bumpAllocatorSize) j["bumpAllocatorSize"] = st.bumpAllocatorSize;
     if (st.streamWorld) j["streamWorld"] = true;
     if (!st.edgeFade) j["edgeFade"] = false;
+    putReverb(j, st.reverb);
+    if (st.cdReverb) j["cdReverb"] = true;
     if (!st.loadingCanvas.empty()) j["loadingCanvas"] = st.loadingCanvas;
     if (json mc = writeMemCard(st.memCard); !mc.empty()) j["memCard"] = mc;
     if (!st.stringPrefixes.empty()) j["stringPrefixes"] = st.stringPrefixes;
@@ -1324,6 +1344,8 @@ Scene loadScene(const fs::path& file) {
         s.settings.bumpAllocatorSize = st.value("bumpAllocatorSize", 0);
         s.settings.streamWorld = st.value("streamWorld", false);
         s.settings.edgeFade = st.value("edgeFade", true);
+        s.settings.reverb = readReverb(st, "settings");
+        s.settings.cdReverb = st.value("cdReverb", false);
         s.settings.loadingCanvas = st.value("loadingCanvas", "");
         if (st.contains("memCard")) s.settings.memCard = readMemCard(st["memCard"]);
         if (st.contains("stringPrefixes") && st["stringPrefixes"].is_array())
@@ -1334,6 +1356,8 @@ Scene loadScene(const fs::path& file) {
         std::erase_if(s.settings.extra, [](const auto& e) { return e.first == "memCard"; });
         // Nor is an explicit "edgeFade": true (the default).
         std::erase_if(s.settings.extra, [](const auto& e) { return e.first == "edgeFade"; });
+        // Nor are the defaults spelled out: "reverb": "off", "cdReverb": false.
+        std::erase_if(s.settings.extra, [](const auto& e) { return e.first == "reverb" || e.first == "cdReverb"; });
     }
     for (const json& oj : j.value("objects", json::array())) s.objects.push_back(readObject(oj));
     for (const json& fj : j.value("fonts", json::array())) s.fonts.push_back(readFont(fj));
