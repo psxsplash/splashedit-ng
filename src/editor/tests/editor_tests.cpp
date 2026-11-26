@@ -982,6 +982,25 @@ void testPick() {
     hit = editor::pickNearest({{0, 0, 0}, {0, 0, 1}}, m);
     CHECK(hit && near(hit->t, 1));
 
+    // With the Scene view's back-face cull, a triangle picks only from the
+    // side its face normal, cross(b - a, c - a), points to: the side drawn.
+    // Two: one at z = 0 facing -Z, one at z = 2 facing +Z.
+    editor::PickMesh tri;
+    tri.positions = {{-1, -1, 0}, {-1, 1, 0}, {1, -1, 0}, {-1, -1, 2}, {1, -1, 2}, {-1, 1, 2}};
+    tri.ranges = {{3, 0, 1}, {4, 1, 1}};
+    hit = editor::pickNearest({{-0.5f, -0.5f, -5}, {0, 0, 1}}, tri, true);
+    CHECK(hit && hit->object == 3 && near(hit->t, 5));
+    hit = editor::pickNearest({{-0.5f, -0.5f, 5}, {0, 0, -1}}, tri, true);
+    CHECK(hit && hit->object == 4 && near(hit->t, 3));
+    // From between them each sees the other's back: nothing picks.
+    CHECK(!editor::pickNearest({{-0.5f, -0.5f, 1}, {0, 0, 1}}, tri, true));
+    CHECK(!editor::pickNearest({{-0.5f, -0.5f, 1}, {0, 0, -1}}, tri, true));
+    // Without the cull both faces pick, as before.
+    hit = editor::pickNearest({{-0.5f, -0.5f, 1}, {0, 0, 1}}, tri);
+    CHECK(hit && hit->object == 4 && near(hit->t, 1));
+    CHECK(editor::rayTriangle({{-0.5f, -0.5f, -5}, {0, 0, 1}}, tri.positions[0], tri.positions[1], tri.positions[2], true));
+    CHECK(!editor::rayTriangle({{-0.5f, -0.5f, 5}, {0, 0, -1}}, tri.positions[0], tri.positions[1], tri.positions[2], true));
+
     // Nearest of two: a second box behind the first along the ray, added
     // first and last so the order in the soup cannot decide.
     editor::PickMesh two;

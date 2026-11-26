@@ -618,6 +618,14 @@ draw far fewer red pixels than the filled quad and still no blue. Needs a displa
 
     python3 cullcheck.py <splashedit> [screenshot.png]
 
+`cullpickbakecheck.py` checks picking and a Fixed camera's bake keep that cull. On cullcheck's project a
+click where Back would be selects nothing with culling on (`selection: 0 all=`) and Back with
+`--no-cull`; a click on Front selects Front. A Fixed camera at (0, 0, -10) looking down +Z bakes
+Front's red and no blue pixel, with the Scene view's culling on and with `--no-cull`: the bake is what
+the console draws. Needs a display (CI runs it under `xvfb-run`).
+
+    python3 cullpickbakecheck.py <splashedit>
+
 `shadowcheck.py` checks blob shadows in the editor on a copy of the third-person template. With Player
 Body selected it picks Blob from the mesh inspector's Shadow menu (`--click @obj.shadow/Blob`): the
 size must come from the body's 0.6 m footprint (`shadow: blob size 0.6 darkness 60 Player Body`), the
