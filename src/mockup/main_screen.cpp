@@ -7920,7 +7920,7 @@ static void paintTool(State& st, ImDrawList* dl, viewport::Ps1View& view, ImRect
     if (r.Contains(io.MousePos) && !bar.Contains(io.MousePos) && !aoBar.Contains(io.MousePos)) {
         viewport::Vec3 ro, rd;
         view.ray(io.MousePos, r.Min, r.GetSize(), &ro, &rd);
-        hit = editor::paintHit(doc, targets, {ro.x, ro.y, -ro.z}, {rd.x, rd.y, -rd.z});
+        hit = editor::paintHit(doc, targets, {ro.x, ro.y, -ro.z}, {rd.x, rd.y, -rd.z}, st.cullBack);
     }
     auto print = [](const std::string& s) {
         if (!namedRectsOn()) return;

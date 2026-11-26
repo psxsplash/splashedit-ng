@@ -8,6 +8,10 @@
 
 #include "unitymath.hh"
 
+namespace splash {
+struct Mesh;
+}
+
 namespace editor {
 
 struct Ray {
@@ -53,6 +57,12 @@ std::optional<float> rayTriangle(const Ray& ray, splash::Vec3 a, splash::Vec3 b,
 // nothing. With `cullBack`, triangles facing away are passed through, as the
 // view culls them.
 std::optional<PickHit> pickNearest(const Ray& ray, const PickMesh& mesh, bool cullBack = false);
+
+// A submesh's corners in the order the exporter writes them (splashpack.cpp):
+// each triangle turned so its face normal agrees with its first corner's
+// normal. That order, not the file's, decides which side psxsplash draws
+// (NCLIP keeps the triangles clockwise on screen), so culling uses it.
+std::vector<int> exportOrder(const splash::Mesh& mesh, const std::vector<int>& tri);
 
 // Ray against a sphere (scene icons). Returns the entry distance.
 std::optional<float> raySphere(const Ray& ray, splash::Vec3 center, float radius);

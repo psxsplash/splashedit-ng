@@ -131,7 +131,8 @@ std::vector<Rgb> currentPaint(const Document& doc, const ObjectPath& path) {
     return out;
 }
 
-std::optional<PaintHit> paintHit(const Document& doc, const std::vector<ObjectPath>& paths, splash::Vec3 origin, splash::Vec3 dir) {
+std::optional<PaintHit> paintHit(const Document& doc, const std::vector<ObjectPath>& paths, splash::Vec3 origin, splash::Vec3 dir,
+                                 bool cullBack) {
     const std::vector<splash::FlatObject> flats = splash::flatten(doc.scene());
     const Ray ray{origin, dir};
     std::optional<PaintHit> best;
@@ -146,16 +147,22 @@ std::optional<PaintHit> paintHit(const Document& doc, const std::vector<ObjectPa
         for (size_t i = 0; i < wp.size(); i++) wp[i] = fo->localToWorld.point(m->positions[i]);
         int hitTri[3] = {-1, -1, -1};
         float hitT = 0;
-        for (const std::vector<int>& sub : m->submeshes)
+        for (const std::vector<int>& file : m->submeshes) {
+            // Corners in the exporter's order, so the culled side is the one the view does not draw.
+            std::vector<int> sub;
+            for (size_t k = 0; k + 2 < file.size(); k += 3)
+                if (size_t(file[k]) < wp.size() && size_t(file[k + 1]) < wp.size() && size_t(file[k + 2]) < wp.size())
+                    sub.insert(sub.end(), {file[k], file[k + 1], file[k + 2]});
+            sub = exportOrder(*m, sub);
             for (size_t k = 0; k + 2 < sub.size(); k += 3) {
                 const size_t a = size_t(sub[k]), b = size_t(sub[k + 1]), c = size_t(sub[k + 2]);
-                if (a >= wp.size() || b >= wp.size() || c >= wp.size()) continue;
-                std::optional<float> t = rayTriangle(ray, wp[a], wp[b], wp[c]);
+                std::optional<float> t = rayTriangle(ray, wp[a], wp[b], wp[c], cullBack);
                 if (t && *t > 0 && (hitTri[0] < 0 || *t < hitT)) {
                     hitT = *t;
                     hitTri[0] = int(a), hitTri[1] = int(b), hitTri[2] = int(c);
                 }
             }
+        }
         if (hitTri[0] < 0 || (best && hitT >= bestT)) continue;
         const splash::Vec3 p = origin + dir * hitT;
         // Barycentric weights of the hit point, for the colour under it.

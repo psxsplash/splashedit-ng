@@ -432,21 +432,6 @@ const splash::Scene* Ps1View::drawnScene() const {
     return m_doc ? &m_doc->scene() : nullptr;
 }
 
-// A submesh's corners in the order the exporter writes them (splashpack.cpp):
-// each triangle turned so its face normal agrees with its first corner's
-// normal. That order, not the file's, decides which side psxsplash draws
-// (NCLIP keeps the triangles clockwise on screen), so the view culls with it.
-static std::vector<int> exportOrder(const splash::Mesh& mesh, const std::vector<int>& tri) {
-    std::vector<int> out(tri);
-    for (size_t k = 0; k + 2 < out.size(); k += 3) {
-        const splash::Vec3 &a = mesh.positions[size_t(out[k])], &b = mesh.positions[size_t(out[k + 1])],
-                           &c = mesh.positions[size_t(out[k + 2])], &n = mesh.normals[size_t(out[k])];
-        const float ux = b.x - a.x, uy = b.y - a.y, uz = b.z - a.z, vx = c.x - a.x, vy = c.y - a.y, vz = c.z - a.z;
-        const float fx = uy * vz - uz * vy, fy = uz * vx - ux * vz, fz = ux * vy - uy * vx;
-        if (fx * n.x + fy * n.y + fz * n.z < 0) std::swap(out[k + 1], out[k + 2]);
-    }
-    return out;
-}
 
 void Ps1View::rebuild() {
     m_verts.clear();
@@ -589,7 +574,7 @@ void Ps1View::rebuild() {
                     duv = {(*uvOff)[0] / float(ts->second.first - 1), -(*uvOff)[1] / float(ts->second.second - 1)};
             }
             std::vector<Vertex>& bucket = buckets[tex];
-            const std::vector<int> tri = exportOrder(*mesh, mesh->submeshes[sub]);
+            const std::vector<int> tri = editor::exportOrder(*mesh, mesh->submeshes[sub]);
             // The same triangles in Unity world space for picking, tagged with the object.
             const size_t firstTri = m_pick.positions.size() / 3;
             for (size_t k = 0; k + 2 < tri.size(); k += 3)
