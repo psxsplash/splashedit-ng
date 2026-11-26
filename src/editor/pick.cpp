@@ -1,6 +1,9 @@
 #include "editor/pick.hh"
 
 #include <cmath>
+#include <utility>
+
+#include "scene.hh"
 
 namespace editor {
 
@@ -61,6 +64,18 @@ std::optional<float> raySphere(const Ray& ray, Vec3 center, float radius) {
     if (t <= 0.0f) t = (-b + sq) / a;
     if (t <= 0.0f) return std::nullopt;
     return t;
+}
+
+std::vector<int> exportOrder(const splash::Mesh& mesh, const std::vector<int>& tri) {
+    std::vector<int> out(tri);
+    for (size_t k = 0; k + 2 < out.size(); k += 3) {
+        const Vec3 &a = mesh.positions[size_t(out[k])], &b = mesh.positions[size_t(out[k + 1])],
+                   &c = mesh.positions[size_t(out[k + 2])], &n = mesh.normals[size_t(out[k])];
+        const float ux = b.x - a.x, uy = b.y - a.y, uz = b.z - a.z, vx = c.x - a.x, vy = c.y - a.y, vz = c.z - a.z;
+        const float fx = uy * vz - uz * vy, fy = uz * vx - ux * vz, fz = ux * vy - uy * vx;
+        if (fx * n.x + fy * n.y + fz * n.z < 0) std::swap(out[k + 1], out[k + 2]);
+    }
+    return out;
 }
 
 }  // namespace editor

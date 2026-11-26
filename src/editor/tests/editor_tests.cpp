@@ -16319,6 +16319,36 @@ void testVertexPaintExportSame() {
     }
 }
 
+// The brush follows the Scene view's cull: with it on, a ray reaching the
+// grid from below (its back, normals up) passes through, and the side is
+// judged in the exporter's order, so a file wound the other way with the
+// same normals still takes paint from above.
+void testVertexPaintCull() {
+    const fs::path dir = g_outDir / "vpaintcull";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    splash::Mesh grid = paintGrid(4, 2);
+    splash::saveMesh(grid, dir / "grid.mesh");
+    for (size_t k = 0; k + 2 < grid.submeshes[0].size(); k += 3) std::swap(grid.submeshes[0][k + 1], grid.submeshes[0][k + 2]);
+    splash::saveMesh(grid, dir / "flipped.mesh");
+    for (const char* mesh : {"grid.mesh", "flipped.mesh"}) {
+        splash::Scene s;
+        s.objects.push_back(paintObject("Grid", 0, splash::VertexColorMode::Baked));
+        s.objects[0].mesh->mesh = mesh;
+        s.objects.push_back(paintLamp());
+        editor::Document d;
+        d.reset(s, dir);
+        d.select(editor::ObjectPath{0});
+        const std::vector<editor::ObjectPath> t = editor::paintTargets(d);
+        CHECK(t == std::vector<editor::ObjectPath>({{0}}));
+        const std::optional<editor::PaintHit> above = editor::paintHit(d, t, {0.1f, 5, 0.1f}, {0, -1, 0}, true);
+        CHECK(above && std::fabs(above->world.y) < 1e-4f && above->normal.y > 0.99f);
+        CHECK(!editor::paintHit(d, t, {0.1f, -5, 0.1f}, {0, 1, 0}, true));
+        CHECK(editor::paintHit(d, t, {0.1f, -5, 0.1f}, {0, 1, 0}, false));
+        CHECK(editor::paintHit(d, t, {0.1f, 5, 0.1f}, {0, -1, 0}, false));
+    }
+}
+
 // A stroke (#199): vertices inside the radius take the colour by the brush
 // weight, the rest keep what they exported; the first stroke on a baked mesh
 // switches it to Painted; the whole stroke is one undo step.
@@ -25863,6 +25893,7 @@ int main(int argc, char** argv) {
     testVertexPaintEncoding();
     testVertexPaintSave();
     testVertexPaintExportSame();
+    testVertexPaintCull();
     testVertexPaintStroke();
     testVertexPaintMulti();
     testVertexPaintMismatch();

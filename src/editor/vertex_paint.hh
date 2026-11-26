@@ -52,7 +52,10 @@ struct PaintHit {
     splash::Vec3 normal;  // of the triangle hit, unit length, world space (for the brush circle)
     Rgb color;            // the current colours interpolated across the triangle hit
 };
-std::optional<PaintHit> paintHit(const Document& doc, const std::vector<ObjectPath>& paths, splash::Vec3 origin, splash::Vec3 dir);
+// With `cullBack` (the Scene view's cull), a triangle facing away from the
+// ray is passed through, as the view does not draw it.
+std::optional<PaintHit> paintHit(const Document& doc, const std::vector<ObjectPath>& paths, splash::Vec3 origin, splash::Vec3 dir,
+                                 bool cullBack = false);
 
 // A stroke over `paths` (paintTargets): begin on the button press, step
 // once per frame at the brush's hit point, end on release. A vertex takes
