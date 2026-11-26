@@ -1742,13 +1742,30 @@ void testObjectRamBudget() {
     // The 1257-object scene that ran Lua out of memory, 1078168 bytes before.
     s.gameObjects = 1257;
     s.splashpackBytes = 1078168;
-    CHECK(splash::ramBudget(s).used > splash::kEngineHeapBytes);
+    CHECK(splash::ramBudget(s).used > splash::ramBudget(s).capacity);
     CHECK(splash::objectsBindRam(s));
     const std::string w = splash::objectRamWarning(s);
     CHECK(w.find("1257 objects") != std::string::npos && w.find("Merge props") != std::string::npos);
     // Geometry alone over budget is not the object count's fault.
-    s.splashpackBytes = splash::kEngineHeapBytes;
+    s.splashpackBytes = splash::kEngineRamCapacity;
     CHECK(!splash::objectsBindRam(s));
+}
+
+// The RAM meter's capacity is the bundled engine's heap less the stack
+// (budget.hh). Measured on psxsplash.ps-exe in pcsx-redux, one 5512-triangle
+// scene the meter put at 1241734 bytes booted and ran, one of 6050 triangles
+// at 1347438 bytes crashed; the meter read 86% and 93% when it
+// still had the heap of an older engine and no stack.
+void testEngineRamCapacity() {
+    CHECK(splash::kEngineHeapStart == 0x800c27f0u);
+    CHECK(splash::kEngineHeapBytes == size_t(0x801ffff8u - 0x800c27f0u));
+    CHECK(splash::kEngineStackReserve >= 40 * 1024);
+    splash::ExportStats s;
+    const size_t capacity = splash::ramBudget(s).capacity;
+    CHECK(capacity == splash::kEngineHeapBytes - splash::kEngineStackReserve);
+    const splash::Budget booted{1241734, capacity}, crashed{1347438, capacity};
+    CHECK(booted.fraction() < 1.0f);
+    CHECK(crashed.fraction() >= 1.0f);
 }
 
 // A script on an object with no mesh (the courtyard's Game Logic) ships as a
@@ -25689,6 +25706,7 @@ int main(int argc, char** argv) {
     testExportStats();
     testOrderingTableReach();
     testObjectRamBudget();
+    testEngineRamCapacity();
     testScriptWithoutMesh();
     testRuntimeLuaScan();
     testSpriteSheetRefScan();
