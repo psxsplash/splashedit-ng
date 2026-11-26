@@ -68,7 +68,11 @@ enum class BlockKind { Hat, Statement, CBlock, Reporter, Boolean };
 // Device: "pad", "analog", "mouse" or "none" (Input.GetDevice's answers);
 // Stick: "left x", "left y", "right x" or "right y".
 // Emitter: an object with a Particle Emitter, by name (Particles.Play).
-enum class BlockField { None, Variable, Object, Button, Number, Text, Bool, Sound, Cutscene, Light, Key, StringKey, UiText, Device, Stick, Emitter };
+// Color: "#RRGGBB", the block shows a swatch with a colour picker; the
+// generated Lua passes it as three 0-255 numbers.
+enum class BlockField { None, Variable, Object, Button, Number, Text, Bool, Sound, Cutscene, Light, Key, StringKey, UiText, Device, Stick, Emitter, Color };
+// "#RRGGBB" (either case) -> r, g, b; false for anything else.
+bool parseBlockColor(std::string_view s, int& r, int& g, int& b);
 
 // Label templates (English, for the block editor): %f is the field, %1..%9
 // the inputs; '|' separates the label shown before each body after the
@@ -105,7 +109,7 @@ bool blockTakesPlayer(const BlockSpec& spec);
 inline constexpr int kBlockPlayers = 8;
 // The palette's sections, in order: Events (every hat), Control, Objects,
 // Sound and scenes, Paths, Variables, Operators, Input, Controllers, Debug,
-// Text.
+// Text, Screen.
 const std::vector<std::string_view>& blockCategories();
 
 // Why name can't be a variable: not an identifier, a Lua keyword, an event

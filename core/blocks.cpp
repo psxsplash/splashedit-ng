@@ -108,6 +108,20 @@ const std::vector<BlockSpec> kCatalogue = {
      "Saves the language to the memory card in port 1, for the next time the game starts (with Remember language on memory card in the strings window); the game waits a few seconds while it writes."},
     {"set_ui_text", K::Statement, "set UI text of %f to %1", 1, 0, F::UiText, "Text",
      "Changes what the chosen UI text element shows to the value."},
+    {"fade_out", K::Statement, "fade screen to %f over %1 frames", 1, 0, F::Color, "Screen",
+     "Fades the whole screen, text included, to the colour over that many frames (30 a second); it stays that colour until a fade in."},
+    {"fade_in", K::Statement, "fade screen in over %1 frames", 1, 0, F::None, "Screen",
+     "Fades back from the fade colour to the picture over that many frames (30 a second)."},
+    {"flash", K::Statement, "flash screen %f for %1 frames", 1, 0, F::Color, "Screen",
+     "Lights the whole screen up with the colour and lets it die away over that many frames (30 a second)."},
+    {"shake", K::Statement, "shake screen by %1 for %2 frames", 2, 0, F::None, "Screen",
+     "Shakes the 3D view by up to that many pixels (0 to 64), dying away over that many frames; the camera itself stays put."},
+    {"letterbox", K::Statement, "letterbox %1 pixels over %2 frames", 2, 0, F::None, "Screen",
+     "Slides black bars that many pixels tall over the top and bottom of the 3D view; 0 pixels takes them away."},
+    {"trail_on", K::Statement, "turn motion trail on", 0, 0, F::None, "Screen",
+     "Blends each frame half and half with the one before, so moving things leave a trail."},
+    {"trail_off", K::Statement, "turn motion trail off", 0, 0, F::None, "Screen",
+     "Stops the motion trail."},
     // Reporters.
     {"number", K::Reporter, "%f", 0, 0, F::Number, "Operators",
      "A number: whole numbers, or decimals from -524288 to 524287 with up to 9 places."},
@@ -159,6 +173,8 @@ const std::vector<BlockSpec> kCatalogue = {
      "Where the player's analog stick points on that axis, about -1 to 1; a digital pad's D-pad stands in for the left stick."},
     {"device_is", K::Boolean, "device of player %p is %f?", 0, 0, F::Device, "Controllers",
      "True when the player has that kind of controller plugged in: a digital pad, an analog pad, a mouse, or none."},
+    {"screen_fading", K::Boolean, "screen is fading?", 0, 0, F::None, "Screen",
+     "True while a fade out or fade in is still going (not while the screen just stays faded)."},
     {"frame_count", K::Reporter, "frame count", 0, 0, F::None, "Debug",
      "How many frames the game has counted so far."},
     {"my_name", K::Reporter, "my name", 0, 0, F::None, "Objects",
@@ -181,7 +197,7 @@ const std::vector<BlockSpec> kCatalogue = {
 
 const std::vector<std::string_view> kCategories = {"Events", "Control", "Objects", "Sound and scenes", "Paths",
                                                    "Variables", "Operators", "Input", "Controllers", "Debug",
-                                                   "Text"};
+                                                   "Text", "Screen"};
 
 const std::vector<std::string_view> kButtons = {"CROSS", "CIRCLE", "SQUARE", "TRIANGLE", "L1", "R1",
                                                 "L2",    "R2",     "START",  "SELECT",   "UP", "DOWN",
@@ -219,7 +235,7 @@ const std::set<std::string, std::less<>> kReserved = {
     // psxsplash API tables
     "Actor", "Agent", "Animation", "Audio", "Camera", "Controls", "Convert", "Cutscene", "Debug", "Entity",
     "FixedPoint", "Input", "Interact", "Light", "MemCard", "Net", "Persist", "Player", "PSXMath", "Random", "Scene",
-    "SkinnedAnim", "Sprite", "Tile", "Timer", "UI", "Vec3",
+    "Screen", "SkinnedAnim", "Sprite", "Tile", "Timer", "UI", "Vec3",
     // tables the export generates
     "Strings",
     // event functions: a local of that name would capture the function
@@ -500,6 +516,12 @@ struct Gen {
         return luaString(b.field);
     }
 
+    std::string colour(const Block& b, const std::string& at) {
+        int r = 0, g = 0, bl = 0;
+        if (!parseBlockColor(b.field, r, g, bl)) error(at, b.field.empty() ? "no colour chosen" : "not a colour: " + b.field);
+        return std::to_string(r) + ", " + std::to_string(g) + ", " + std::to_string(bl);
+    }
+
     std::string light(const Block& b, const std::string& at) {
         if (b.field.empty()) error(at, "no light chosen");
         return "Light.Find(" + luaString(b.field) + ")";
@@ -583,6 +605,7 @@ struct Gen {
             }
             return {"Input.GetDevice(" + player(b, at) + ") == " + luaString(b.field), Cmp};
         }
+        if (op == "screen_fading") return {"Screen.IsFading()", Atom};
         if (op == "frame_count") return {"Timer.GetFrameCount()", Atom};
         // An unset key reads nil on the engine; 0 keeps = < > and maths working.
         if (op == "remembered") return {"(Persist.Get(" + key(b, at) + ") or 0)", Atom};
@@ -735,6 +758,16 @@ struct Gen {
                 const std::string el = slash == std::string::npos ? std::string() : b.field.substr(slash + 1);
                 line(out, depth, "UI.SetText(UI.FindElement(UI.FindCanvas(" + luaString(cv) + "), " + luaString(el) + "), tostring(" +
                                      input(b, 0, at).s + "))");
+            } else if (op == "fade_out" || op == "flash") {
+                line(out, depth, std::string(op == "fade_out" ? "Screen.FadeOut(" : "Screen.Flash(") + colour(b, at) + ", " +
+                                     input(b, 0, at).s + ")");
+            } else if (op == "fade_in") {
+                line(out, depth, "Screen.FadeIn(" + input(b, 0, at).s + ")");
+            } else if (op == "shake" || op == "letterbox") {
+                line(out, depth, std::string(op == "shake" ? "Screen.Shake(" : "Screen.Letterbox(") + input(b, 0, at).s +
+                                     ", " + input(b, 1, at).s + ")");
+            } else if (op == "trail_on" || op == "trail_off") {
+                line(out, depth, op == "trail_on" ? "Screen.Trail(1)" : "Screen.Trail(0)");
             } else {
                 error(at, "unknown block");
             }
@@ -766,6 +799,20 @@ std::string mergeParts(const std::vector<Part>& parts, Gen& g) {
 }
 
 }  // namespace
+
+bool parseBlockColor(std::string_view s, int& r, int& g, int& b) {
+    if (s.size() != 7 || s[0] != '#') return false;
+    int v[6];
+    for (int i = 0; i < 6; i++) {
+        const char c = s[size_t(i + 1)];
+        if (c >= '0' && c <= '9') v[i] = c - '0';
+        else if (c >= 'a' && c <= 'f') v[i] = c - 'a' + 10;
+        else if (c >= 'A' && c <= 'F') v[i] = c - 'A' + 10;
+        else return false;
+    }
+    r = v[0] * 16 + v[1], g = v[2] * 16 + v[3], b = v[4] * 16 + v[5];
+    return true;
+}
 
 std::string blockNameError(std::string_view name) {
     if (name.empty()) return "no name";

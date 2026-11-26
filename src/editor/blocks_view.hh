@@ -114,6 +114,7 @@ private:
     Path m_editing;   // a field being typed into
     Path m_picking;   // a field with its list open
     bool m_pickPlayer = false;  // the list is its block's player's
+    Path m_colouring; // a colour field with its picker open
     std::string m_pickQuery;
     ImVec2 m_scroll{0, 0};
     float m_paletteScroll = 0;

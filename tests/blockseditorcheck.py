@@ -116,8 +116,11 @@ check('a .blocks script opens in a blocks tab', 'blocks.canvas' in c and 'blocks
 check('the empty script has no blocks', not [k for k in c if k.startswith('blocks.block.')], [k for k in c if k.startswith('blocks.block.')])
 check('hide is not in view before Objects is picked', 'blocks.palette.hide' not in c)
 # psxsplash never calls onDestroy: with the wheel bringing the end of the
-# Events up, the hats either side of where it was are drawn, it is not.
-dis = c['blocks.palette.on_disable']
+# Events up, the hats either side of where it was are drawn, it is not. The
+# wheel goes over the last Events hat in view: the category rail's height
+# decides which one that is.
+hats = [v for k, v in c.items() if k.startswith('blocks.palette.on_')]
+dis = max(hats, key=lambda r: r[1])
 _, cw = run(['--wheel', '%d,%d,-2' % (dis[0] + 40, dis[1]), '--wait', '3'])
 check('the palette offers no "when destroyed" hat',
       'blocks.palette.on_disable' in cw and 'blocks.palette.on_scene_start' in cw and 'blocks.palette.on_destroy' not in cw,

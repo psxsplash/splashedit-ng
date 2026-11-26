@@ -73,6 +73,7 @@ constexpr ImU32 operators = rgb(0x3d9a66);
 constexpr ImU32 input = rgb(0x2c95a8);
 constexpr ImU32 debug = rgb(0x687084);
 constexpr ImU32 strings = rgb(0x9a8b2a);  // the Text category (localised strings)
+constexpr ImU32 screen = rgb(0xb0812a);
 constexpr ImU32 text = rgb(0xffffff);
 constexpr ImU32 seam = rgb(0x000000, 70);     // a block's bottom edge
 constexpr ImU32 shadow = rgb(0x000000, 60);   // under a stack
