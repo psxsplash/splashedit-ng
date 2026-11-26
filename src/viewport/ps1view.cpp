@@ -1123,7 +1123,13 @@ bool Ps1View::bake(const splash::BgCamera& cam, const std::vector<bool>& include
     glClearDepth(1.0);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     glDisable(GL_BLEND);
-    glDisable(GL_CULL_FACE);
+    // Only the side psxsplash draws, whatever the Scene view shows: rebuild()
+    // put the corners in the exporter's order and the console keeps those
+    // clockwise on screen. bakeClip turns the screen's y-down into GL's y-up
+    // (and the rows are flipped back after), so clockwise here is too.
+    glEnable(GL_CULL_FACE);
+    glCullFace(GL_BACK);
+    glFrontFace(GL_CW);
     glDisable(GL_SCISSOR_TEST);
     glEnable(GL_DEPTH_TEST);
     glUseProgram(m_prog);
@@ -1153,6 +1159,8 @@ bool Ps1View::bake(const splash::BgCamera& cam, const std::vector<bool>& include
     glUniform1i(untexturedAt, 0);
     glUniform1i(glGetUniformLocation(m_prog, "uPreClip"), 0);
     glBindVertexArray(0);
+    glDisable(GL_CULL_FACE);
+    glFrontFace(GL_CCW);
     glDisable(GL_DEPTH_TEST);
 
     std::vector<uint8_t> rgba(size_t(w) * h * 4);
@@ -1299,7 +1307,7 @@ std::optional<int> Ps1View::pick(ImVec2 screen, ImVec2 mn, ImVec2 sz) const {
     Vec3 o, d;
     ray(screen, mn, sz, &o, &d);
     // GL to Unity: negate Z.
-    std::optional<editor::PickHit> hit = editor::pickNearest({{o.x, o.y, -o.z}, {d.x, d.y, -d.z}}, m_pick);
+    std::optional<editor::PickHit> hit = editor::pickNearest({{o.x, o.y, -o.z}, {d.x, d.y, -d.z}}, m_pick, cullBack);
     if (!hit) return std::nullopt;
     return hit->object;
 }
@@ -1308,7 +1316,7 @@ std::optional<Ps1View::SurfaceHit> Ps1View::pickSurface(ImVec2 screen, ImVec2 mn
     Vec3 o, d;
     ray(screen, mn, sz, &o, &d);
     const editor::Ray r{{o.x, o.y, -o.z}, {d.x, d.y, -d.z}};
-    std::optional<editor::PickHit> hit = editor::pickNearest(r, m_pick);
+    std::optional<editor::PickHit> hit = editor::pickNearest(r, m_pick, cullBack);
     if (!hit) return std::nullopt;
     const splash::Vec3 n = editor::hitNormal(r, m_pick, *hit);
     if (splash::sqrMagnitude(n) <= 0) return std::nullopt;
@@ -1318,7 +1326,7 @@ std::optional<Ps1View::SurfaceHit> Ps1View::pickSurface(ImVec2 screen, ImVec2 mn
 std::optional<Vec3> Ps1View::pickPoint(ImVec2 screen, ImVec2 mn, ImVec2 sz) const {
     Vec3 o, d;
     ray(screen, mn, sz, &o, &d);
-    std::optional<editor::PickHit> hit = editor::pickNearest({{o.x, o.y, -o.z}, {d.x, d.y, -d.z}}, m_pick);
+    std::optional<editor::PickHit> hit = editor::pickNearest({{o.x, o.y, -o.z}, {d.x, d.y, -d.z}}, m_pick, cullBack);
     if (!hit) return std::nullopt;
     return Vec3{o.x + d.x * hit->t, o.y + d.y * hit->t, o.z + d.z * hit->t};
 }

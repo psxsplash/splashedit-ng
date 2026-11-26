@@ -43,11 +43,16 @@ struct PickHit {
 // pick), or {0, 0, 0} for a degenerate one.
 splash::Vec3 hitNormal(const Ray& ray, const PickMesh& mesh, const PickHit& hit);
 
-// Distance along the ray to the triangle, both faces counted, or nullopt.
-std::optional<float> rayTriangle(const Ray& ray, splash::Vec3 a, splash::Vec3 b, splash::Vec3 c);
+// Distance along the ray to the triangle, or nullopt. Both faces count
+// unless `cullBack`: then only a triangle whose face normal, cross(b - a,
+// c - a), points back along the ray (toward its origin), the side the
+// Scene view and psxsplash draw once the corners are in the exporter's order.
+std::optional<float> rayTriangle(const Ray& ray, splash::Vec3 a, splash::Vec3 b, splash::Vec3 c, bool cullBack = false);
 
-// The nearest hit in front of the ray's origin, or nullopt when it hits nothing.
-std::optional<PickHit> pickNearest(const Ray& ray, const PickMesh& mesh);
+// The nearest hit in front of the ray's origin, or nullopt when it hits
+// nothing. With `cullBack`, triangles facing away are passed through, as the
+// view culls them.
+std::optional<PickHit> pickNearest(const Ray& ray, const PickMesh& mesh, bool cullBack = false);
 
 // Ray against a sphere (scene icons). Returns the entry distance.
 std::optional<float> raySphere(const Ray& ray, splash::Vec3 center, float radius);

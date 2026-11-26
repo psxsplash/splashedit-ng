@@ -483,6 +483,9 @@ jobs:
       - name: Scene view back-face culling and wireframe
         if: runner.os == 'Linux'
         run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/cullcheck.py build/splashedit
+      - name: Picking and Fixed camera bakes keep the back-face cull
+        if: runner.os == 'Linux'
+        run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/cullpickbakecheck.py build/splashedit
       - name: Inspector texture palette, cycles and their export
         if: runner.os == 'Linux'
         run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/palettecheck.py build/splashedit build/cli/splashpack-cli

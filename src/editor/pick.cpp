@@ -6,12 +6,14 @@ namespace editor {
 
 using splash::Vec3;
 
-std::optional<float> rayTriangle(const Ray& ray, Vec3 a, Vec3 b, Vec3 c) {
-    // Moller-Trumbore, without back-face culling.
+std::optional<float> rayTriangle(const Ray& ray, Vec3 a, Vec3 b, Vec3 c, bool cullBack) {
+    // Moller-Trumbore. det = -dot(dir, cross(e1, e2)): positive when the face
+    // normal points back at the ray's origin, the front.
     const Vec3 e1 = b - a, e2 = c - a;
     const Vec3 p = splash::cross(ray.dir, e2);
     const float det = splash::dot(e1, p);
     if (std::fabs(det) < 1e-12f) return std::nullopt;  // parallel or degenerate
+    if (cullBack && det < 0.0f) return std::nullopt;   // facing away: culled
     const float inv = 1.0f / det;
     const Vec3 s = ray.origin - a;
     const float u = splash::dot(s, p) * inv;
@@ -24,13 +26,14 @@ std::optional<float> rayTriangle(const Ray& ray, Vec3 a, Vec3 b, Vec3 c) {
     return t;
 }
 
-std::optional<PickHit> pickNearest(const Ray& ray, const PickMesh& mesh) {
+std::optional<PickHit> pickNearest(const Ray& ray, const PickMesh& mesh, bool cullBack) {
     std::optional<PickHit> best;
     for (const TriangleRange& r : mesh.ranges) {
         for (size_t tri = r.first; tri < r.first + r.count; ++tri) {
             const size_t i = tri * 3;
             if (i + 2 >= mesh.positions.size()) break;
-            std::optional<float> t = rayTriangle(ray, mesh.positions[i], mesh.positions[i + 1], mesh.positions[i + 2]);
+            std::optional<float> t =
+                rayTriangle(ray, mesh.positions[i], mesh.positions[i + 1], mesh.positions[i + 2], cullBack);
             if (t && (!best || *t < best->t)) best = PickHit{r.object, *t, tri};
         }
     }
