@@ -8089,6 +8089,12 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
     else if (viewPlayer)
         view.setPose({toGl(startEye.eye), toGl(startEye.eye + startEye.forward * 5.0f), false, playerFrame.fovY});
     unsigned tex = view.render((int)(r.GetWidth() * fb.x), (int)(r.GetHeight() * fb.y), 240);
+    if (namedRectsOn()) {
+        // Which textures the view cycles (their steps change too often to print).
+        std::string cyc;
+        for (const std::string& l : view.cyclingTextures()) cyc += (cyc.empty() ? "" : ", ") + l.substr(0, l.find(" step "));
+        scriptLine("vpcycling", "viewport: cycling " + (cyc.empty() ? std::string("none") : cyc));
+    }
     ui::addTextureImageRounded(dl, (ImTextureID)(intptr_t)tex, r.Min, r.Max, ImVec2(0, 1), ImVec2(1, 0), IM_COL32_WHITE, radius::window);
     if ((viewPlayer || cutEye) && (playerFrame.fracW < 0.999f || playerFrame.fracH < 0.999f)) {
         // Outside the engine's 4:3 frame the game shows nothing: shade it.
@@ -13918,7 +13924,8 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
     };
     report("offvia", offVia.empty() ? std::string() : "object: " + o->name + " off via " + offVia);
     // This object's mesh colour, audio and skin lines; cleared when it has none.
-    std::string meshColLine, materialLines, uvOffLine, audioLine, skinLine, interactLine, texHolesLine, flatColLine, paintLine;
+    std::string meshColLine, materialLines, uvOffLine, audioLine, skinLine, interactLine, texHolesLine, flatColLine, paintLine,
+        paletteLine;
 
     // Mesh.
     // A labelled on/off switch; a click flips it through `flip` (one undo step).
@@ -14161,7 +14168,8 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
         if (nMat <= 1 && !folded && texSt == editor::AssetStatus::Ok && !texPath.empty()) {
             const bool holes = ti && ti->holes;
             const splash::BitDepth depth0 = splash::materialDepth(m, m.materials[0]);
-            y += texturePreview(st.texPreview, dl, x0 + space::sm, x1 - space::sm, y, doc, texPath, depth0, holes, sharedPal0) +
+            y += texturePreview(st.texPreview, dl, x0 + space::sm, x1 - space::sm, y, doc, texPath, depth0, holes, sharedPal0,
+                                 sharedPal0.empty()) +
                  space::sm;
             if (holes) {
                 // Word-wrapped to the inspector's width.
@@ -14377,6 +14385,30 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                       "Off, a static mesh is baked into each Fixed camera's background and not drawn while one shows. On, it stays "
                       "3D there (it moves, or must sort with the characters around it).",
                       m.keep3dInFixedCameras, [](splash::Object& ob) { ob.mesh->keep3dInFixedCameras = !ob.mesh->keep3dInFixedCameras; });
+        // The texture's palette sidecar (export reads it for mesh textures outside a palette group), and
+        // who shares it. Last in the Mesh section, so every mesh row above it keeps its place.
+        if (nMat <= 1 && !folded && texSt == editor::AssetStatus::Ok && !texPath.empty() && sharedPal0.empty()) {
+            const splash::BitDepth depth0 = splash::materialDepth(m, m.materials[0]);
+            ui::PaletteUsers users;
+            for (const splash::FlatObject& fo : splash::flatten(doc.scene())) {
+                if (fo.object == o || !fo.object->mesh) continue;
+                const splash::MeshComponent& om = *fo.object->mesh;
+                bool same = false, at16 = false, other = false;
+                for (const splash::Material& mt : om.materials) {
+                    if (mt.texture != texPath) continue;
+                    const splash::BitDepth d = splash::materialDepth(om, mt);
+                    if (d == depth0) same = true;
+                    else if (d == splash::BitDepth::Bpp16) at16 = true;
+                    else other = true;
+                }
+                if (same) users.sameDepth++;
+                else if (at16) users.at16++;
+                else if (other) users.otherDepth++;
+            }
+            y += texturePalette(st.texPreview, dl, x0 + space::sm, x1 - space::sm, y, doc, texPath, depth0, ti && ti->holes, users) +
+                 space::sm;
+            paletteLine = st.texPreview.paletteShown;
+        }
         sectionEnd(top);
     }
 
@@ -16318,6 +16350,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
     report("materials", materialLines);
     report("uvoffset", uvOffLine);
     report("texholes", texHolesLine);
+    report("palette", paletteLine);
     report("audio", audioLine);
     report("skin", skinLine);
     report("interact", interactLine);
