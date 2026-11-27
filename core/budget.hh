@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdint>
 #include <string>
 
 #include "reverb.hh"
@@ -18,13 +19,25 @@ struct Budget {
 
 constexpr size_t kVramCapacity = 1024 * 512 * 2;
 constexpr size_t kSpuRamCapacity = 512 * 1024;
-// Heap of the disc engine SplashEdit bundles, psxsplash d2c232c built with
-// LOADER=cdrom NOPARSER=1 and every feature: __stack_start - __heap_start in
-// psxsplash.elf (mipsel-none-elf-nm). The disc engine has the least heap of
-// those a game ships with; leaving the Lua parser out gave it 0x7000 bytes
-// (__heap_start 0x800a5c70 with the parser). The stack grows down into the
-// same space.
-constexpr size_t kEngineHeapBytes = 0x80200000 - 0x8009ec70;
+// The heap of the engine SplashEdit bundles, psxsplash.ps-exe, which a disc
+// and a PCdrv run boot alike (psxsplash-cdrom.ps-exe is the same bytes). It
+// starts at __heap_start in psxsplash.elf; the PS-X EXE header does not say
+// where (psyqo leaves b_addr/b_size zero, and t_addr + t_size ends before the
+// BSS), so it is written here, from what the engine prints at boot ("Current
+// heap start"). The engine job in .github/workflows/build.yml fails when the
+// built engine's __heap_start is another (tools/engineheapcheck.sh). The
+// -nologo builds start about 48 KB lower and fit more; the -perf and -rooms
+// debug builds start up to about 6 KB higher.
+constexpr uint32_t kEngineHeapStart = 0x800c27f0;
+// psyqo's allocator hands out nothing past this.
+constexpr uint32_t kEngineHeapTop = 0x801ffff8;
+constexpr size_t kEngineHeapBytes = kEngineHeapTop - kEngineHeapStart;
+// The stack grows down from 0x801fff00 into the same space. Provisional: about
+// 41 KB deep, measured in pcsx-redux on a 6.5k-triangle test scene (the lowest
+// RAM it wrote), not a bound for every scene.
+constexpr size_t kEngineStackReserve = 41 * 1024;
+// What the RAM meter offers a scene.
+constexpr size_t kEngineRamCapacity = kEngineHeapBytes - kEngineStackReserve;
 
 // psxsplash-docs components/objects.md: "roughly 1000-2000 visible triangles
 // per frame at 30fps". The top of that range is the meter's capacity.
@@ -111,7 +124,7 @@ inline Budget ramBudget(const ExportStats& s) {
     return {s.rendererBytes() + s.visibleListBytes() + s.streamPoolBytes() +
                 std::max({s.splashpackBytes, s.vramFileBytes, s.spuFileBytes}) + objectLoadBytes(s) + kEngineLoadBytes +
                 s.stringsLuaBytes + s.particlePoolBytes,
-            kEngineHeapBytes};
+            kEngineRamCapacity};
 }
 
 // True when the scene does not fit and would without its per-object cost:

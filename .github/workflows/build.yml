@@ -32,6 +32,8 @@ jobs:
           sparse-checkout: |
             CMakeLists.txt
             tools/psxluapin.sh
+            core/budget.hh
+            tools/engineheapcheck.sh
           sparse-checkout-cone-mode: false
       - name: psxlua pin matches the engine's
         run: bash editor/tools/psxluapin.sh . editor/CMakeLists.txt
@@ -68,6 +70,8 @@ jobs:
             mk FPSOVERLAY=1 MEMOVERLAY=1 ROOMDEBUG=1 "$@"
             mv psxsplash.ps-exe "$out/psxsplash-perf-rooms$logo"
             mk "$@"
+            # The editor's RAM meter is sized to this build's heap (core/budget.hh).
+            if [ -z "$logo" ]; then bash editor/tools/engineheapcheck.sh psxsplash.elf editor/core/budget.hh; fi
             mv psxsplash.ps-exe "$out/psxsplash$logo"
           done
           for v in "" -cdrom -perf -rooms -perf-rooms; do
